@@ -1,12 +1,12 @@
 use divan::Bencher;
-use felix::{make_rust_parser, node_count, parse_source, reparse_source};
+use felix_editor::{make_rust_parser, node_count, parse_source, reparse_source};
 use tree_sitter::{InputEdit, Point};
 
 fn main() {
     divan::main();
 }
 
-const SEED: &str = include_str!("../src/main.rs");
+const SEED: &str = include_str!("../../felix-app/src/main.rs");
 
 fn make_fixture(target_lines: usize) -> String {
     let seed_lines = SEED.lines().count();
@@ -41,7 +41,6 @@ fn reparse_small_edit(b: Bencher) {
         new_end_position: Point { row: 1, column: 0 },
     };
 
-    // Parser + old tree are created outside the timing window via with_inputs.
     b.with_inputs(|| {
         let mut parser = make_rust_parser();
         let old_tree = parse_source(&mut parser, &content);

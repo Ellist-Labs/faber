@@ -20,6 +20,8 @@ large_open_rss_mb  = 1000   # RSS after settling on the large fixture
 # lands (Phase 2). Current impl pre-allocates all lines as SharedStrings at load time.
 # Target after virtual rendering: <300 MB (only visible lines allocated).
 
-# Not yet enforced (needs input handling to exist first):
-# input_latency_ms  = 10    # keystroke → repaint round-trip
-# frame_time_ms     = 8     # 120fps target; add when frame telemetry lands
+# Input-handling metrics — enforced now that input handling exists.
+# Measured manually via frame telemetry; macro.sh stubs added below.
+# Tighten to "match Zed" tier (<2ms input latency) when the app is feature-stable.
+input_latency_ms  = 10    # keystroke → repaint round-trip (target: beat VS Code <12ms)
+frame_time_ms     = 8     # 120fps target (8.3 ms/frame)

@@ -7,7 +7,21 @@ Felix is a lean, GPU-accelerated code editor (Rust + GPUI). Its core value propo
 Every code decision must protect that premise.
 
 Stack: GPUI (GPU UI), Ropey (rope buffer), Tree-sitter (incremental parsing),
-LSP (language intelligence), WASM/wasmtime (extensions), Tokio (async I/O).
+LSP (language intelligence), WASM/wasmtime (extensions). Async via GPUI's own executor (no tokio).
+
+## Workspace structure
+
+4-crate Cargo workspace. Dependency direction is strictly downward — gpui is absent from every
+crate except felix-app, enforced by the compiler.
+
+```
+crates/felix-core/    NO gpui — rope helpers, Selection/SelectionSet, Transaction/ChangeSet,
+                      Anchor+Bias, movement, search, utf16 helpers
+crates/felix-lang/    NO gpui — Language, LanguageId, LanguageRegistry, grammar loading
+crates/felix-editor/  NO gpui — Document (text+syntax+history+per-view selections),
+                      Command + dispatch (UI-free editing engine)
+crates/felix-app/     gpui shell — EditorView, virtualized render, keybindings, Workspace
+```
 
 ## Performance Guardrails
 
@@ -55,10 +69,12 @@ Add to `perf/budgets.toml` and `perf/macro.sh` when the infrastructure is in pla
 
 ## Architecture Rules
 
-- `src/lib.rs` owns all core operations (rope, parse, reparse). Keep it dependency-free from GPUI.
-- `src/main.rs` is the thin GPUI shell only — UI wiring, no business logic.
-- New subsystems follow the same split: lib crate = logic, main/app = UI wiring.
+- **felix-core and felix-editor must never import gpui.** The workspace enforces this at compile time.
+- **felix-app is the thin GPUI shell only** — UI wiring, no business logic.
+- All document mutations flow through a single choke-point: `Document::apply(Transaction)`.
+- New subsystems: logic in felix-core/felix-editor, UI wiring in felix-app.
 - Extension API design is a long-term contract; design the surface carefully before stabilizing it.
+- Benches live in `crates/felix-editor/benches/` (hot-path coverage, divan, harness=false).
 
 ## Code Style
 

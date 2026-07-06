@@ -5,7 +5,7 @@ fn main() {
     divan::main();
 }
 
-const SEED: &str = include_str!("../src/main.rs");
+const SEED: &str = include_str!("../../felix-app/src/main.rs");
 
 fn make_fixture(target_lines: usize) -> String {
     let seed_lines = SEED.lines().count();

@@ -1,0 +1,33 @@
+[package]
+name = "felix-editor"
+version = "0.1.0"
+edition = "2024"
+description = "UI-free editing engine: Document, History, Command dispatch"
+license = "MIT"
+
+[lib]
+name = "felix_editor"
+path = "src/lib.rs"
+
+[[bench]]
+name = "rope_ops"
+harness = false
+
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "edit_ops"
+harness = false
+
+[dependencies]
+felix-core = { path = "../felix-core" }
+felix-lang = { path = "../felix-lang" }
+ropey = "1"
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+
+[dev-dependencies]
+divan = "0.1"
+proptest = "1"

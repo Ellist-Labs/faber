@@ -1,0 +1,14 @@
+[package]
+name = "felix"
+version = "0.1.0"
+edition = "2024"
+description = "A lean, fast, GPU-accelerated code editor"
+license = "MIT"
+
+[[bin]]
+name = "felix"
+path = "src/main.rs"
+
+[dependencies]
+felix-editor = { path = "../felix-editor" }
+gpui = "0.2"
