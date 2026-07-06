@@ -7,24 +7,21 @@ use felix_editor::{
     edit_history::History,
     highlight::{HighlightSpan, byte_col_to_char_col},
     node_count,
-    save::save,
     search::Query,
     Selection,
 };
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    ReadGlobal, Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div,
+    AnyElement, App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
+    KeyDownEvent, Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div,
     prelude::*, px, uniform_list,
 };
 
 use crate::theme::RuntimeTheme;
 
-// ── layout constants ───────────────────────────────────────────────────────────
+// ── layout ─────────────────────────────────────────────────────────────────────
+// Line height and char width live on RuntimeTheme (settings-scaled).
 
-const LINE_H: f32 = 20.0;
-const CHAR_W: f32 = 8.4;
 const GUTTER_COLS: f32 = 6.0;
-const GUTTER_W: f32 = GUTTER_COLS * CHAR_W;
 
 // ── actions ────────────────────────────────────────────────────────────────────
 
@@ -32,12 +29,18 @@ use crate::{
     Backspace, CloseSearch, Copy, Cut, Delete, DeleteWordLeft, DeleteWordRight, Enter, FindNext,
     FindPrev, MoveDocEnd, MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart,
     MovePageDown, MovePageUp, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace,
-    OpenSearch, Paste, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne, Save, SearchBackspace,
+    OpenSearch, Paste, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne, SearchBackspace,
     SelectAll, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft, SelectLineEnd,
     SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight, Tab, Undo,
 };
 
 // ── EditorView ─────────────────────────────────────────────────────────────────
+
+/// Emitted after every document mutation — drives auto-save and future
+/// subscribers (LSP didChange, etc.).
+pub enum EditorEvent {
+    Edited,
+}
 
 pub struct EditorView {
     pub doc: Document,
@@ -70,6 +73,10 @@ impl EditorView {
             d.path = std::path::PathBuf::from(path);
             d
         });
+        Self::from_doc(doc, cx)
+    }
+
+    pub fn from_doc(doc: Document, cx: &mut Context<EditorView>) -> Self {
         let mut view = Self {
             doc,
             sel: Selection::default(),
@@ -100,6 +107,13 @@ impl EditorView {
         self.sel.anchor = self.sel.anchor.min(len);
     }
 
+    /// Post-mutation bookkeeping — every document edit funnels through here.
+    fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.update_matches();
+        cx.emit(EditorEvent::Edited);
+        cx.notify();
+    }
+
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.history.commit();
         if !self.sel.is_empty() {
@@ -113,8 +127,7 @@ impl EditorView {
         let end = pos + text.chars().count();
         self.history.push_insert(edit, end);
         self.sel = Selection::collapsed(end, &self.doc.rope);
-        self.update_matches();
-        cx.notify();
+        self.after_edit(cx);
     }
 
     fn do_backspace(&mut self, cx: &mut Context<Self>) {
@@ -130,8 +143,7 @@ impl EditorView {
             self.history.push_other(edit);
             self.sel = Selection::collapsed(pos, &self.doc.rope);
         }
-        self.update_matches();
-        cx.notify();
+        self.after_edit(cx);
     }
 
     fn do_delete_fwd(&mut self, cx: &mut Context<Self>) {
@@ -146,8 +158,7 @@ impl EditorView {
             self.history.push_other(edit);
             self.sel = Selection::collapsed(self.sel.head, &self.doc.rope);
         }
-        self.update_matches();
-        cx.notify();
+        self.after_edit(cx);
     }
 
     fn do_delete_word_left(&mut self, cx: &mut Context<Self>) {
@@ -165,8 +176,7 @@ impl EditorView {
                 self.sel = Selection::collapsed(word_start, &self.doc.rope);
             }
         }
-        self.update_matches();
-        cx.notify();
+        self.after_edit(cx);
     }
 
     fn do_delete_word_right(&mut self, cx: &mut Context<Self>) {
@@ -184,8 +194,7 @@ impl EditorView {
                 self.sel = Selection::collapsed(self.sel.head, &self.doc.rope);
             }
         }
-        self.update_matches();
-        cx.notify();
+        self.after_edit(cx);
     }
 
     pub fn rebuild_line_cache(&mut self) {
@@ -252,8 +261,7 @@ impl EditorView {
         self.history.push_other(edit2);
         let new_pos = m.start + replacement.chars().count();
         self.sel = Selection::collapsed(new_pos, &self.doc.rope);
-        self.update_matches();
-        cx.notify();
+        self.after_edit(cx);
     }
 
     fn do_replace_all(&mut self, cx: &mut Context<Self>) {
@@ -266,8 +274,7 @@ impl EditorView {
             let edit2 = self.doc.insert(m.start, &replacement);
             self.history.push_other(edit2);
         }
-        self.update_matches();
-        cx.notify();
+        self.after_edit(cx);
     }
 
     // ── action handlers ────────────────────────────────────────────────────────
@@ -439,8 +446,7 @@ impl EditorView {
             self.history.push_other(edit);
             let pos = self.sel.start();
             self.sel = Selection::collapsed(pos, &self.doc.rope);
-            self.update_matches();
-            cx.notify();
+            self.after_edit(cx);
         }
     }
     fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
@@ -456,23 +462,14 @@ impl EditorView {
         if let Some(pos) = self.history.undo(&mut self.doc) {
             self.clamp_sel();
             self.sel = Selection::collapsed(pos.min(self.doc.len_chars()), &self.doc.rope);
-            self.update_matches();
-            cx.notify();
+            self.after_edit(cx);
         }
     }
     fn on_redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(pos) = self.history.redo(&mut self.doc) {
             self.clamp_sel();
             self.sel = Selection::collapsed(pos.min(self.doc.len_chars()), &self.doc.rope);
-            self.update_matches();
-            cx.notify();
-        }
-    }
-
-    fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
-        if let Ok(()) = save(&self.doc.rope, &self.doc.path) {
-            self.doc.dirty = false;
-            cx.notify();
+            self.after_edit(cx);
         }
     }
 
@@ -584,7 +581,7 @@ impl EditorView {
         // ── Fast path: no decoration at all ───────────────────────────────────
         if !cursor_on_line && !has_sel && !has_match && !has_spans {
             return div()
-                .h(px(LINE_H))
+                .h(px(t.line_height_code))
                 .font_family(t.mono_family.clone())
                 .text_size(px(t.font_size_code))
                 .text_color(t.text)
@@ -635,10 +632,10 @@ impl EditorView {
 
         let gutter = div()
             .flex_shrink_0()
-            .w(px(GUTTER_W))
+            .w(px(GUTTER_COLS * t.char_w_code))
             .text_color(t.gutter)
             .child(format!("{:>4}", line_idx + 1));
-        let gutter_spacer = div().flex_shrink_0().w(px(2.0 * CHAR_W)).child("  ");
+        let gutter_spacer = div().flex_shrink_0().w(px(2.0 * t.char_w_code)).child("  ");
 
         let mut content_children: Vec<AnyElement> = Vec::new();
         let mut breakpoints: Vec<usize> = vec![0, line_char_count];
@@ -671,7 +668,7 @@ impl EditorView {
                     div()
                         .flex_shrink_0()
                         .w(px(1.5))
-                        .h(px(LINE_H))
+                        .h(px(t.line_height_code))
                         .bg(t.cursor)
                         .into_any(),
                 );
@@ -698,7 +695,7 @@ impl EditorView {
         }
         if cursor_on_line && cursor_col == line_char_count {
             content_children.push(
-                div().flex_shrink_0().w(px(1.5)).h(px(LINE_H)).bg(t.cursor).into_any(),
+                div().flex_shrink_0().w(px(1.5)).h(px(t.line_height_code)).bg(t.cursor).into_any(),
             );
         }
 
@@ -706,7 +703,7 @@ impl EditorView {
         div()
             .flex()
             .flex_row()
-            .h(px(LINE_H))
+            .h(px(t.line_height_code))
             .font_family(t.mono_family.clone())
             .text_size(px(t.font_size_code))
             .child(gutter)
@@ -822,6 +819,8 @@ impl EditorView {
 
 // ── GPUI impls ─────────────────────────────────────────────────────────────────
 
+impl EventEmitter<EditorEvent> for EditorView {}
+
 impl Focusable for EditorView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -832,33 +831,15 @@ impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.global::<RuntimeTheme>().clone();
 
-        let file_name = self.doc.path.file_name().map_or_else(
-            || "untitled".to_string(),
-            |n| n.to_string_lossy().to_string(),
-        );
-        let title = if self.doc.dirty {
-            format!("● {file_name}")
-        } else {
-            file_name
-        };
-
-        let title_color = if self.doc.dirty { t.dirty } else { t.text };
         let header = div()
             .flex()
             .flex_row()
-            .justify_between()
+            .justify_end()
             .px_4()
             .py_2()
             .bg(t.bg_elevated)
             .border_b_1()
             .border_color(t.separator)
-            .child(
-                div()
-                    .font_family(t.ui_family.clone())
-                    .text_size(px(t.font_size_body))
-                    .text_color(title_color)
-                    .child(title),
-            )
             .child(
                 div()
                     .font_family(t.ui_family.clone())
@@ -936,7 +917,6 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_paste))
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_redo))
-            .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_open_search))
             .on_action(cx.listener(Self::on_open_replace))
             .on_action(cx.listener(Self::on_close_search))

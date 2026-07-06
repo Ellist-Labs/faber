@@ -1,6 +1,7 @@
 pub mod buffer;
 pub mod edit_history;
 pub mod highlight;
+pub mod project;
 pub mod save;
 
 // Re-export from felix-core so felix-app's imports keep working.

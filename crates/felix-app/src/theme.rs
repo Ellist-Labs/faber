@@ -1,5 +1,5 @@
 use felix_theme::Theme as ThemeDef;
-use gpui::{App, Global, Hsla, ReadGlobal, rgb};
+use gpui::{App, Global, Hsla, rgb};
 
 /// GPU-ready runtime theme — all fields are `Copy` `Hsla`.
 /// Cloned once per frame at the top of `render()`, then passed by ref to helpers.
@@ -62,6 +62,8 @@ pub struct RuntimeTheme {
     pub font_size_code: f32,
     pub font_size_heading: f32,
     pub line_height_code: f32,
+    /// Advance width of one monospace cell — drives cursor x-position math.
+    pub char_w_code: f32,
     // Spacing
     pub sp1: f32,
     pub sp2: f32,
@@ -85,6 +87,14 @@ fn h(hex: u32) -> Hsla {
 
 impl From<ThemeDef> for RuntimeTheme {
     fn from(t: ThemeDef) -> Self {
+        Self::from_scaled(t, 1.0)
+    }
+}
+
+impl RuntimeTheme {
+    /// Build from a theme definition with all typography multiplied by
+    /// `scale` (settings-driven; 1.0 = the theme's own sizes).
+    pub fn from_scaled(t: ThemeDef, scale: f32) -> Self {
         let c = &t.colors;
         let s = &t.syntax;
         let ty = &t.typography;
@@ -135,11 +145,14 @@ impl From<ThemeDef> for RuntimeTheme {
             syntax_label: h(s.label.color),
             ui_family: ty.ui_family.clone().into(),
             mono_family: ty.mono_family.clone().into(),
-            font_size_body: ty.body.size_px,
-            font_size_caption: ty.caption.size_px,
-            font_size_code: ty.code.size_px,
-            font_size_heading: ty.heading.size_px,
-            line_height_code: ty.code.line_height_px,
+            font_size_body: ty.body.size_px * scale,
+            font_size_caption: ty.caption.size_px * scale,
+            font_size_code: ty.code.size_px * scale,
+            font_size_heading: ty.heading.size_px * scale,
+            line_height_code: ty.code.line_height_px * scale,
+            // Linear fallback from the measured 8.4px @ 13px Monaco cell;
+            // apply_settings overwrites with a real text-system measurement.
+            char_w_code: 8.4 * (ty.code.size_px * scale) / 13.0,
             sp1: sp.sp1,
             sp2: sp.sp2,
             sp3: sp.sp3,
@@ -153,6 +166,20 @@ impl From<ThemeDef> for RuntimeTheme {
             radius_lg: r.lg,
         }
     }
+}
+
+/// Rebuild the theme global from current settings and repaint every window.
+/// Called at startup and after each settings change.
+pub fn apply_settings(cx: &mut App) {
+    let settings = cx.global::<crate::settings_view::SettingsStore>().0.clone();
+    let scale = settings.font_size / felix_settings::DEFAULT_FONT_SIZE;
+    let mut rt = RuntimeTheme::from_scaled(felix_theme::default::felix_dark(), scale);
+    let font_id = cx.text_system().resolve_font(&gpui::font(rt.mono_family.clone()));
+    if let Ok(em) = cx.text_system().em_advance(font_id, gpui::px(rt.font_size_code)) {
+        rt.char_w_code = f32::from(em);
+    }
+    cx.set_global(rt);
+    cx.refresh_windows();
 }
 
 /// Extension trait — gives every `AppContext`-carrying type `cx.theme()`.

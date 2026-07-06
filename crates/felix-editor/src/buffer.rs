@@ -54,17 +54,7 @@ impl Document {
             let t = parse_source(&mut p, &source);
             (p, t)
         } else {
-            // Plain text: use an inert parser and an empty tree.
-            let mut p = Parser::new();
-            // parse with no language set returns None; fall back gracefully.
-            let t = p.parse("", None).unwrap_or_else(|| {
-                let mut fallback = LanguageRegistry::with_defaults()
-                    .language_for_path(std::path::Path::new("_.rs"))
-                    .unwrap()
-                    .make_parser();
-                parse_source(&mut fallback, "")
-            });
-            (p, t)
+            Self::plain_parser_and_tree()
         };
         let mut highlight_cache = HighlightCache::default();
         highlight_cache.setup(language.as_ref());
@@ -92,6 +82,61 @@ impl Document {
             tree,
             highlight_cache,
         }
+    }
+
+    /// Inert parser + empty tree for plain-text documents.
+    fn plain_parser_and_tree() -> (Parser, Tree) {
+        let mut p = Parser::new();
+        // parse with no language set returns None; fall back gracefully.
+        let t = p.parse("", None).unwrap_or_else(|| {
+            let mut fallback = LanguageRegistry::with_defaults()
+                .language_for_path(std::path::Path::new("_.rs"))
+                .unwrap()
+                .make_parser();
+            parse_source(&mut fallback, "")
+        });
+        (p, t)
+    }
+
+    /// Empty in-memory document with no path yet (File > New).
+    pub fn empty_untitled() -> Self {
+        let (parser, tree) = Self::plain_parser_and_tree();
+        let mut highlight_cache = HighlightCache::default();
+        highlight_cache.setup(None);
+        highlight_cache.compute(&tree, "");
+        Self {
+            rope: Rope::new(),
+            path: PathBuf::new(),
+            dirty: false,
+            language: None,
+            parser,
+            tree,
+            highlight_cache,
+        }
+    }
+
+    /// An untitled document has never been saved and has no path.
+    pub fn is_untitled(&self) -> bool {
+        self.path.as_os_str().is_empty()
+    }
+
+    /// Assign a real path (first save of an untitled doc) and re-resolve language.
+    pub fn assign_path(&mut self, path: PathBuf) {
+        self.path = path;
+        let registry = LanguageRegistry::with_defaults();
+        self.language = registry.language_for_path(&self.path);
+        let src = self.rope.to_string();
+        if let Some(ref lang) = self.language {
+            self.parser = lang.make_parser();
+            self.tree = parse_source(&mut self.parser, &src);
+        } else {
+            let (p, t) = Self::plain_parser_and_tree();
+            self.parser = p;
+            self.tree = t;
+        }
+        self.highlight_cache = HighlightCache::default();
+        self.highlight_cache.setup(self.language.as_ref());
+        self.highlight_cache.compute(&self.tree, &src);
     }
 
     pub fn len_chars(&self) -> usize {

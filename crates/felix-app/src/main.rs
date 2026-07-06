@@ -1,15 +1,18 @@
 mod editor_view;
+mod settings_view;
+mod sidebar;
 mod theme;
 mod ui;
+mod welcome_view;
+mod workspace;
 
-use editor_view::EditorView;
 use gpui::{
-    App, Application, Bounds, KeyBinding, Window, WindowBounds, WindowOptions, actions,
+    App, Application, Bounds, KeyBinding, Menu, MenuItem, WindowBounds, WindowOptions, actions,
     prelude::*, px, size,
 };
 use std::{env, time::Instant};
 
-use theme::RuntimeTheme;
+use workspace::Workspace;
 
 // ── actions ────────────────────────────────────────────────────────────────────
 
@@ -31,7 +34,6 @@ actions!(
         Tab, Enter,
         Copy, Cut, Paste,
         Undo, Redo,
-        Save,
         OpenSearch, OpenReplace, CloseSearch,
         FindNext, FindPrev,
         ReplaceOne, ReplaceAll,
@@ -39,15 +41,28 @@ actions!(
     ]
 );
 
+actions!(
+    workspace,
+    [
+        CloseTab, NextTab, PrevTab,
+        NewFile, OpenFile, OpenFolder,
+        SaveFile, CloseFile, CloseFolder,
+        ToggleSidebar, OpenSettings,
+        Quit,
+    ]
+);
+
 // ── main ───────────────────────────────────────────────────────────────────────
 
 fn main() {
     let start = Instant::now();
-    let path = env::args().nth(1).unwrap_or_else(|| "src/main.rs".into());
+    let paths: Vec<String> = env::args().skip(1).collect();
 
     Application::new().run(move |cx: &mut App| {
-        cx.set_global(RuntimeTheme::from(felix_theme::default::felix_dark()));
+        cx.set_global(settings_view::SettingsStore(felix_settings::load()));
+        theme::apply_settings(cx);
         register_keybindings(cx);
+        register_menus(cx);
 
         let bounds = Bounds::centered(None, size(px(1024.), px(768.)), cx);
 
@@ -57,13 +72,13 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |_, cx| cx.new(|cx| EditorView::new(&path, cx)),
+                |window, cx| cx.new(|cx| Workspace::new(&paths, window, cx)),
             )
             .unwrap();
 
         window
             .update(cx, |view, window, cx| {
-                window.focus(&view.focus_handle);
+                view.focus_active(window, cx);
                 cx.activate(true);
             })
             .unwrap();
@@ -118,7 +133,18 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-z", Undo, Some("Editor")),
         KeyBinding::new("cmd-shift-z", Redo, Some("Editor")),
         // File
-        KeyBinding::new("cmd-s", Save, Some("Editor")),
+        KeyBinding::new("cmd-n", NewFile, Some("Workspace")),
+        KeyBinding::new("cmd-o", OpenFile, Some("Workspace")),
+        KeyBinding::new("cmd-shift-o", OpenFolder, Some("Workspace")),
+        KeyBinding::new("cmd-s", SaveFile, Some("Workspace")),
+        KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
+        KeyBinding::new("cmd-q", Quit, Some("Workspace")),
+        // Sidebar
+        KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
+        // Tabs
+        KeyBinding::new("cmd-w", CloseTab, Some("Workspace")),
+        KeyBinding::new("ctrl-tab", NextTab, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Workspace")),
         // Search
         KeyBinding::new("cmd-f", OpenSearch, Some("Editor")),
         KeyBinding::new("cmd-alt-f", OpenReplace, Some("Editor")),
@@ -134,5 +160,34 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("enter", ReplaceOne, Some("ReplaceBar")),
         KeyBinding::new("cmd-enter", ReplaceAll, Some("ReplaceBar")),
         KeyBinding::new("backspace", ReplaceBackspace, Some("ReplaceBar")),
+    ]);
+}
+
+fn register_menus(cx: &mut App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "Felix".into(),
+            items: vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit Felix", Quit),
+            ],
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("New File", NewFile),
+                MenuItem::separator(),
+                MenuItem::action("Open File…", OpenFile),
+                MenuItem::action("Open Folder…", OpenFolder),
+                MenuItem::separator(),
+                MenuItem::action("Save", SaveFile),
+                MenuItem::separator(),
+                MenuItem::action("Close File", CloseFile),
+                MenuItem::action("Close Folder", CloseFolder),
+                MenuItem::separator(),
+                MenuItem::action("Exit", Quit),
+            ],
+        },
     ]);
 }

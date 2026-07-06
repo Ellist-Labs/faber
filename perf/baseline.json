@@ -1,8 +1,8 @@
 {
   "timestamp": "2026-07-06",
-  "startup_ms": 173,
-  "idle_rss_mb": 87,
-  "large_open_ms": 431,
-  "large_open_rss_mb": 160,
+  "startup_ms": 224,
+  "idle_rss_mb": 107,
+  "large_open_ms": 412,
+  "large_open_rss_mb": 180,
   "note": "Updated by perf/macro.sh --update-baseline"
 }

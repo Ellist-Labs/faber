@@ -1642,6 +1642,7 @@ name = "felix"
 version = "0.1.0"
 dependencies = [
  "felix-editor",
+ "felix-settings",
  "felix-theme",
  "gpui",
 ]
@@ -1675,6 +1676,14 @@ dependencies = [
  "ropey",
  "tree-sitter",
  "tree-sitter-rust",
+]
+
+[[package]]
+name = "felix-settings"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml 0.8.23",
 ]
 
 [[package]]
