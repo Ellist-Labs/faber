@@ -1,11 +1,12 @@
-use std::ops::Range;
+use std::{ops::Range, sync::Arc, time::Duration};
 
 use felix_editor::{
-    SyntaxToken,
+    LanguageRegistry, SyntaxToken,
     buffer::Document,
     cursor,
     edit_history::History,
     highlight::{HighlightSpan, byte_col_to_char_col},
+    markdown::{OutlineEntry, parse_markdown, edit::{EnterAction, enter_action, smart_wrap, looks_like_url, toggle_checkbox}},
     node_count,
     search::Query,
     Selection,
@@ -16,7 +17,9 @@ use gpui::{
     prelude::*, px, uniform_list,
 };
 
+use crate::markdown_preview::MarkdownPreviewView;
 use crate::theme::RuntimeTheme;
+use crate::ui::IconName;
 
 // ── layout ─────────────────────────────────────────────────────────────────────
 // Line height and char width live on RuntimeTheme (settings-scaled).
@@ -26,12 +29,13 @@ const GUTTER_COLS: f32 = 6.0;
 // ── actions ────────────────────────────────────────────────────────────────────
 
 use crate::{
-    Backspace, CloseSearch, Copy, Cut, Delete, DeleteWordLeft, DeleteWordRight, Enter, FindNext,
-    FindPrev, MoveDocEnd, MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart,
-    MovePageDown, MovePageUp, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace,
-    OpenSearch, Paste, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne, SearchBackspace,
-    SelectAll, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft, SelectLineEnd,
-    SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight, Tab, Undo,
+    Backspace, BoldSelection, CloseSearch, Copy, Cut, Delete, DeleteWordLeft, DeleteWordRight,
+    Enter, FindNext, FindPrev, ItalicSelection, MoveDocEnd, MoveDocStart, MoveDown, MoveLeft,
+    MoveLineEnd, MoveLineStart, MovePageDown, MovePageUp, MoveRight, MoveUp, MoveWordLeft,
+    MoveWordRight, OpenReplace, OpenSearch, Paste, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne,
+    SearchBackspace, SelectAll, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft,
+    SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight, Tab,
+    ToggleCheckbox, TogglePreview, Undo,
 };
 
 // ── EditorView ─────────────────────────────────────────────────────────────────
@@ -55,6 +59,12 @@ pub struct EditorView {
     pub scroll_handle: UniformListScrollHandle,
     last_scroll_line: usize,
 
+    // Markdown preview
+    pub preview: Option<gpui::Entity<MarkdownPreviewView>>,
+    pub show_preview: bool,
+    pub outline: Arc<Vec<OutlineEntry>>,
+    outline_gen: u64,
+
     // Search / replace
     pub show_search: bool,
     pub show_replace: bool,
@@ -73,7 +83,8 @@ impl EditorView {
             d.path = std::path::PathBuf::from(path);
             d
         });
-        Self::from_doc(doc, cx)
+        let view = Self::from_doc(doc, cx);
+        view
     }
 
     pub fn from_doc(doc: Document, cx: &mut Context<EditorView>) -> Self {
@@ -86,6 +97,10 @@ impl EditorView {
             line_starts: Vec::new(),
             scroll_handle: UniformListScrollHandle::new(),
             last_scroll_line: 0,
+            preview: None,
+            show_preview: false,
+            outline: Arc::new(vec![]),
+            outline_gen: 0,
             show_search: false,
             show_replace: false,
             search_handle: cx.focus_handle(),
@@ -96,6 +111,12 @@ impl EditorView {
             match_idx: 0,
         };
         view.rebuild_line_cache();
+        if view.is_markdown() {
+            let source = view.doc.rope.to_string();
+            let registry = LanguageRegistry::with_defaults();
+            let md = parse_markdown(&source, &view.doc.rope, &registry);
+            view.outline = Arc::new(md.outline);
+        }
         view
     }
 
@@ -110,8 +131,37 @@ impl EditorView {
     /// Post-mutation bookkeeping — every document edit funnels through here.
     fn after_edit(&mut self, cx: &mut Context<Self>) {
         self.update_matches();
+        if self.is_markdown() {
+            self.schedule_markdown_update(cx);
+        }
         cx.emit(EditorEvent::Edited);
         cx.notify();
+    }
+
+    /// Debounced (75 ms) background markdown parse → updates outline + preview.
+    fn schedule_markdown_update(&mut self, cx: &mut Context<Self>) {
+        self.outline_gen += 1;
+        let current_gen = self.outline_gen;
+        let rope = self.doc.rope.clone();
+        let update_preview = self.show_preview && self.preview.is_some();
+        cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(Duration::from_millis(75)).await;
+            let source = rope.to_string();
+            let registry = LanguageRegistry::with_defaults();
+            let md = Arc::new(parse_markdown(&source, &rope, &registry));
+            let outline = Arc::new(md.outline.clone());
+            let _ = view.update(cx, |this, cx| {
+                if this.outline_gen != current_gen { return; }
+                this.outline = outline;
+                if update_preview {
+                    if let Some(ref preview) = this.preview {
+                        let md2 = Arc::clone(&md);
+                        preview.update(cx, |pv, _cx| pv.apply_md(md2));
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
     }
 
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -426,6 +476,39 @@ impl EditorView {
         self.insert_text("\t", cx);
     }
     fn on_enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_markdown() {
+            let len = self.doc.len_chars();
+            let head = self.sel.head.min(len.saturating_sub(1));
+            let line_idx = self.doc.rope.char_to_line(head);
+            let line_char_start = self.doc.rope.line_to_char(line_idx);
+            let line_str: String = self.doc.rope.line(line_idx).to_string();
+            let cursor_col = head - line_char_start;
+
+            match enter_action(&line_str, cursor_col) {
+                EnterAction::ContinueList { insert } => {
+                    self.history.commit();
+                    self.insert_text(&insert, cx);
+                    self.history.commit();
+                    return;
+                }
+                EnterAction::ExitList { delete_cols } => {
+                    let char_start = line_char_start + line_str[..delete_cols.start].chars().count();
+                    let char_end   = line_char_start + line_str[..delete_cols.end].chars().count();
+                    self.history.commit();
+                    let edit = self.doc.delete(char_start..char_end);
+                    self.history.push_other(edit);
+                    self.sel = Selection::collapsed(char_start, &self.doc.rope);
+                    let edit = self.doc.insert(char_start, "\n");
+                    let end = char_start + 1;
+                    self.history.push_insert(edit, end);
+                    self.sel = Selection::collapsed(end, &self.doc.rope);
+                    self.after_edit(cx);
+                    self.history.commit();
+                    return;
+                }
+                EnterAction::Plain => {}
+            }
+        }
         self.history.commit();
         self.insert_text("\n", cx);
         self.history.commit();
@@ -452,9 +535,53 @@ impl EditorView {
     fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard() {
             if let Some(text) = item.text() {
+                if self.is_markdown() && !self.sel.is_empty() && looks_like_url(&text) {
+                    let sel_text: String = self.doc.rope.slice(self.sel.range()).to_string();
+                    let linked = format!("[{sel_text}]({text})");
+                    self.history.commit();
+                    self.insert_text(&linked, cx);
+                    return;
+                }
                 self.history.commit();
                 self.insert_text(&text.clone(), cx);
             }
+        }
+    }
+
+    fn on_bold_selection(&mut self, _: &BoldSelection, _: &mut Window, cx: &mut Context<Self>) {
+        if self.sel.is_empty() { return; }
+        let selected: String = self.doc.rope.slice(self.sel.range()).to_string();
+        let wrapped = smart_wrap(&selected, "**");
+        self.history.commit();
+        self.insert_text(&wrapped, cx);
+        self.history.commit();
+    }
+
+    fn on_italic_selection(&mut self, _: &ItalicSelection, _: &mut Window, cx: &mut Context<Self>) {
+        if self.sel.is_empty() { return; }
+        let selected: String = self.doc.rope.slice(self.sel.range()).to_string();
+        let wrapped = smart_wrap(&selected, "*");
+        self.history.commit();
+        self.insert_text(&wrapped, cx);
+        self.history.commit();
+    }
+
+    fn on_toggle_checkbox(&mut self, _: &ToggleCheckbox, _: &mut Window, cx: &mut Context<Self>) {
+        let head = self.sel.head.min(self.doc.len_chars().saturating_sub(1));
+        let line_idx = self.doc.rope.char_to_line(head);
+        let line_char_start = self.doc.rope.line_to_char(line_idx);
+        let line_str: String = self.doc.rope.line(line_idx).to_string();
+        if let Some((byte_range, replacement)) = toggle_checkbox(&line_str) {
+            let char_start = line_char_start + line_str[..byte_range.start].chars().count();
+            let char_end   = line_char_start + line_str[..byte_range.end].chars().count();
+            self.history.commit();
+            let edit = self.doc.delete(char_start..char_end);
+            self.history.push_other(edit);
+            let edit = self.doc.insert(char_start, replacement);
+            self.history.push_insert(edit, char_start + replacement.chars().count());
+            self.sel = Selection::collapsed(self.sel.head, &self.doc.rope);
+            self.after_edit(cx);
+            self.history.commit();
         }
     }
 
@@ -815,6 +942,50 @@ impl EditorView {
                     .child(replace_row),
             )
     }
+
+    // ── markdown preview ───────────────────────────────────────────────────────
+
+    pub fn is_markdown(&self) -> bool {
+        self.doc.language.as_ref().map_or(false, |l| l.id.0 == "markdown")
+    }
+
+    fn on_toggle_preview(&mut self, _: &TogglePreview, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_markdown() { return; }
+        let entering_preview = !self.show_preview;
+        self.show_preview = entering_preview;
+
+        if entering_preview {
+            let source_line = self.doc.rope.char_to_line(
+                self.sel.head.min(self.doc.len_chars().saturating_sub(1))
+            );
+            let registry = Arc::new(LanguageRegistry::with_defaults());
+            if self.preview.is_none() {
+                let rope = self.doc.rope.clone();
+                let path = self.doc.path.clone();
+                let reg = Arc::clone(&registry);
+                let preview = cx.new(|_cx| MarkdownPreviewView::new(&rope, &path, &reg));
+                preview.read(cx).scroll_to_source_line(source_line);
+                self.preview = Some(preview);
+            } else if let Some(ref preview) = self.preview {
+                let rope = self.doc.rope.clone();
+                preview.update(cx, |pv, _cx| {
+                    pv.reparse_now(&rope, &registry);
+                    pv.scroll_to_source_line(source_line);
+                });
+            }
+        } else {
+            // Leaving preview: sync scroll back to source.
+            let source_line = if let Some(ref preview) = self.preview {
+                let pv = preview.read(cx);
+                let block_ix = pv.list_state.logical_scroll_top().item_ix;
+                pv.md.blocks.get(block_ix).map(|b| b.source_lines.start).unwrap_or(0)
+            } else {
+                0
+            };
+            self.scroll_handle.scroll_to_item(source_line, ScrollStrategy::Top);
+        }
+        cx.notify();
+    }
 }
 
 // ── GPUI impls ─────────────────────────────────────────────────────────────────
@@ -831,22 +1002,50 @@ impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.global::<RuntimeTheme>().clone();
 
+        let is_md = self.is_markdown();
+        let show_preview = self.show_preview;
+
+        // Preview toggle button (only shown for markdown files)
+        let toggle_btn: AnyElement = if is_md {
+            let icon = if show_preview { IconName::Code } else { IconName::Visibility };
+            let color = if show_preview { t.accent } else { t.text_subtle };
+            div()
+                .id("preview-toggle")
+                .flex()
+                .items_center()
+                .px_2()
+                .py_1()
+                .rounded(px(t.radius_sm))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.line_highlight))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|v, _, window, cx| v.on_toggle_preview(&TogglePreview, window, cx)),
+                )
+                .child(gpui::svg().path(icon.path()).size(px(14.)).text_color(color))
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
         let header = div()
             .flex()
             .flex_row()
-            .justify_end()
-            .px_4()
-            .py_2()
+            .justify_between()
+            .items_center()
+            .px_3()
+            .py_1()
             .bg(t.bg_elevated)
             .border_b_1()
             .border_color(t.separator)
+            .child(toggle_btn)
             .child(
                 div()
                     .font_family(t.ui_family.clone())
                     .text_size(px(t.font_size_caption))
                     .text_color(t.text_subtle)
                     .child(format!(
-                        "{}L  {}N  ⌘S save · ⌘F find · ⌘⌥F replace",
+                        "{}L  {}N  ⌘S save · ⌘F find",
                         self.doc.len_lines(),
                         node_count(&self.doc.tree),
                     )),
@@ -875,12 +1074,32 @@ impl Render for EditorView {
         .bg(t.bg)
         .track_scroll(self.scroll_handle.clone());
 
+        // When in preview mode, show the MarkdownPreviewView instead of the editor.
+        if show_preview {
+            if let Some(ref preview_entity) = self.preview {
+                let preview = preview_entity.clone();
+                return div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .bg(t.bg)
+                    .key_context("Editor markdown")
+                    .track_focus(&self.focus_handle(cx))
+                    .on_action(cx.listener(Self::on_toggle_preview))
+                    .child(header)
+                    .child(div().flex_1().min_h(px(0.)).child(preview))
+                    .into_any();
+            }
+        }
+
+        let key_ctx = if is_md { "Editor markdown" } else { "Editor" };
+
         let root = div()
             .flex()
             .flex_col()
             .size_full()
             .bg(t.bg)
-            .key_context("Editor")
+            .key_context(key_ctx)
             .track_focus(&self.focus_handle(cx))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::on_move_left))
@@ -926,13 +1145,17 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_replace_all))
             .on_action(cx.listener(Self::on_search_backspace))
             .on_action(cx.listener(Self::on_replace_backspace))
+            .on_action(cx.listener(Self::on_toggle_preview))
+            .on_action(cx.listener(Self::on_bold_selection))
+            .on_action(cx.listener(Self::on_italic_selection))
+            .on_action(cx.listener(Self::on_toggle_checkbox))
             .child(header)
             .child(content);
 
         if self.show_search {
-            root.child(self.render_search_bar(window, &t))
+            root.child(self.render_search_bar(window, &t)).into_any()
         } else {
-            root
+            root.into_any()
         }
     }
 }

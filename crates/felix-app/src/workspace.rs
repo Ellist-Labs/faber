@@ -10,14 +10,15 @@ use felix_editor::{
 };
 use gpui::{
     AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, IntoElement, MouseButton,
-    PathPromptOptions, PromptLevel, Render, Stateful, Task, Window, div, prelude::*, px,
+    PathPromptOptions, PromptLevel, Render, Stateful, Task, Window, div, img, prelude::*, px,
+    svg,
 };
 
 use crate::editor_view::{EditorEvent, EditorView};
 use crate::settings_view::{SettingsStore, SettingsView};
 use crate::sidebar::{SidebarItem, SidebarItemKind, SidebarState, default_items};
 use crate::theme::RuntimeTheme;
-use crate::ui::{h_flex, v_flex};
+use crate::ui::{IconName, h_flex, v_flex};
 use crate::welcome_view::render_welcome;
 use crate::{
     CloseFile, CloseFolder, CloseTab, NewFile, NextTab, OpenFile, OpenFolder, OpenSettings,
@@ -35,7 +36,7 @@ pub struct Tab {
 }
 
 impl Tab {
-    fn editor(&self) -> Option<&Entity<EditorView>> {
+    pub(crate) fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.content {
             TabContent::Editor(e) => Some(e),
             TabContent::Settings(_) => None,
@@ -62,8 +63,8 @@ impl Tab {
 }
 
 pub struct Workspace {
-    tabs: Vec<Tab>,
-    active: Option<usize>,
+    pub(crate) tabs: Vec<Tab>,
+    pub(crate) active: Option<usize>,
     next_tab_id: usize,
     root_folder: Option<PathBuf>,
     focus_handle: FocusHandle,
@@ -133,6 +134,18 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Navigate the active editor to `line`, moving the cursor and scrolling.
+    pub(crate) fn outline_navigate(&mut self, line: usize, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active.and_then(|i| self.tabs.get(i)).and_then(|t| t.editor()) {
+            editor.update(cx, |ev, _cx| {
+                let char_idx = ev.line_starts.get(line).copied().unwrap_or(0);
+                ev.sel.head = char_idx;
+                ev.sel.anchor = char_idx;
+                ev.scroll_handle.scroll_to_item(line, gpui::ScrollStrategy::Top);
+            });
+        }
     }
 
     /// Saves every dirty document that has a path; untitled docs are skipped
@@ -493,11 +506,24 @@ impl Workspace {
         let (title, dirty) = tab.title(cx);
         let is_active = self.active == Some(ix);
 
-        let indicator = if dirty {
-            div().text_color(t.dirty).child("●")
-        } else {
-            div().text_color(t.text_subtle).child("")
+        let icon: AnyElement = match &tab.content {
+            TabContent::Editor(_) => img(crate::file_icons::icon_for_file(&title))
+                .size(px(14.0))
+                .flex_shrink_0()
+                .into_any_element(),
+            TabContent::Settings(_) => svg()
+                .path(IconName::Settings.path())
+                .size(px(14.0))
+                .flex_shrink_0()
+                .text_color(t.text_muted)
+                .into_any_element(),
         };
+
+        let indicator = div()
+            .size(px(7.0))
+            .flex_shrink_0()
+            .rounded_full()
+            .when(dirty, |el| el.bg(t.dirty));
 
         h_flex()
             .id(tab.id)
@@ -516,13 +542,16 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(move |ws, _, window, cx| ws.activate_tab(ix, window, cx)),
             )
-            .child(indicator)
+            .child(icon)
             .child(title)
+            .child(indicator)
             .child(
-                div()
+                svg()
+                    .path(IconName::Close.path())
+                    .size(px(13.0))
+                    .flex_shrink_0()
                     .text_color(t.text_subtle)
-                    .hover(|el| el.text_color(t.text))
-                    .child("×")
+                    .hover(|s| s.text_color(t.text))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |ws, _, window, cx| {

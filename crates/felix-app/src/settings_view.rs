@@ -5,7 +5,7 @@ use gpui::{
 };
 
 use crate::theme::{ActiveTheme, RuntimeTheme, apply_settings};
-use crate::ui::{Divider, h_flex, v_flex};
+use crate::ui::{Divider, Icon, IconName, h_flex, v_flex};
 
 /// App-wide settings global. The Settings tab is the sole writer; every
 /// change persists to disk immediately.
@@ -177,12 +177,11 @@ impl SettingsView {
             SettingControl::Stepper { min, max, step, unit, get, set } => {
                 let value = get(settings);
                 let color = if enabled { t.text } else { t.text_disabled };
-                let stepper_button = |id: &'static str, label: &'static str, delta: f32| {
+                let stepper_button = |id: &'static str, icon: IconName, delta: f32| {
                     div()
                         .id((id, entry_ix))
                         .px_2()
                         .py_1()
-                        .text_color(color)
                         .when(enabled, |el| {
                             el.cursor_pointer().hover(|el| el.bg(t.line_highlight)).on_mouse_down(
                                 MouseButton::Left,
@@ -194,14 +193,14 @@ impl SettingsView {
                                 }),
                             )
                         })
-                        .child(label)
+                        .child(Icon::new(icon).size(14.0).color(color))
                 };
                 h_flex()
                     .rounded(px(t.radius_md))
                     .border_1()
                     .border_color(t.border)
                     .text_size(px(t.font_size_caption))
-                    .child(stepper_button("dec", "−", -step))
+                    .child(stepper_button("dec", IconName::Remove, -step))
                     .child(
                         div()
                             .px_2()
@@ -210,7 +209,7 @@ impl SettingsView {
                             .text_color(color)
                             .child(format!("{} {unit}", value as i64)),
                     )
-                    .child(stepper_button("inc", "+", step))
+                    .child(stepper_button("inc", IconName::Add, step))
                     .into_any_element()
             }
         }

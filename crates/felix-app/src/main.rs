@@ -1,4 +1,8 @@
+mod assets;
 mod editor_view;
+mod file_icon_data;
+mod file_icons;
+mod markdown_preview;
 mod settings_view;
 mod sidebar;
 mod theme;
@@ -15,6 +19,16 @@ use std::{env, time::Instant};
 use workspace::Workspace;
 
 // ── actions ────────────────────────────────────────────────────────────────────
+
+actions!(
+    markdown,
+    [
+        TogglePreview,
+        BoldSelection,
+        ItalicSelection,
+        ToggleCheckbox,
+    ]
+);
 
 actions!(
     editor,
@@ -58,7 +72,7 @@ fn main() {
     let start = Instant::now();
     let paths: Vec<String> = env::args().skip(1).collect();
 
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         cx.set_global(settings_view::SettingsStore(felix_settings::load()));
         theme::apply_settings(cx);
         register_keybindings(cx);
@@ -145,6 +159,11 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-w", CloseTab, Some("Workspace")),
         KeyBinding::new("ctrl-tab", NextTab, Some("Workspace")),
         KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Workspace")),
+        // Markdown — cmd-b shadows ToggleSidebar while markdown editor is focused (VS Code parity)
+        KeyBinding::new("cmd-shift-v", TogglePreview, Some("Editor && markdown")),
+        KeyBinding::new("cmd-b", BoldSelection, Some("Editor && markdown")),
+        KeyBinding::new("cmd-i", ItalicSelection, Some("Editor && markdown")),
+        KeyBinding::new("cmd-shift-x", ToggleCheckbox, Some("Editor && markdown")),
         // Search
         KeyBinding::new("cmd-f", OpenSearch, Some("Editor")),
         KeyBinding::new("cmd-alt-f", OpenReplace, Some("Editor")),
