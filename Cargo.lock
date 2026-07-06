@@ -1645,6 +1645,8 @@ dependencies = [
  "felix-settings",
  "felix-theme",
  "gpui",
+ "ropey",
+ "rust-embed",
 ]
 
 [[package]]
@@ -1663,6 +1665,7 @@ dependencies = [
  "felix-core",
  "felix-lang",
  "proptest",
+ "pulldown-cmark",
  "ropey",
  "tree-sitter",
  "tree-sitter-rust",
@@ -1675,6 +1678,7 @@ dependencies = [
  "felix-core",
  "ropey",
  "tree-sitter",
+ "tree-sitter-md",
  "tree-sitter-rust",
 ]
 
@@ -3974,6 +3978,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.13.0",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5728,6 +5743,16 @@ name = "tree-sitter-language"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
+name = "tree-sitter-md"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2efd398be546456c814598ee56c0f51769a77241511b4a58077815d120afa882"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "tree-sitter-rust"

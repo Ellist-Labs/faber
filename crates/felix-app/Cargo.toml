@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 felix-editor = { path = "../felix-editor" }
+ropey = "1"
 felix-settings = { path = "../felix-settings" }
 felix-theme = { path = "../felix-theme" }
 gpui = "0.2"
+rust-embed = "8"
