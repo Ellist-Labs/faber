@@ -21,6 +21,10 @@ harness = false
 name = "edit_ops"
 harness = false
 
+[[bench]]
+name = "highlight"
+harness = false
+
 [dependencies]
 felix-core = { path = "../felix-core" }
 felix-lang = { path = "../felix-lang" }

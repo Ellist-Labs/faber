@@ -3,6 +3,7 @@ members = [
     "crates/felix-core",
     "crates/felix-lang",
     "crates/felix-editor",
+    "crates/felix-theme",
     "crates/felix-app",
 ]
 resolver = "2"

@@ -2,7 +2,7 @@ use ropey::Rope;
 use std::{io, ops::Range, path::PathBuf, sync::Arc};
 use tree_sitter::{InputEdit, Parser, Point, Tree};
 
-use crate::{parse_source, reparse_source};
+use crate::{highlight::HighlightCache, parse_source, reparse_source};
 use felix_lang::{Language, LanguageRegistry};
 
 /// A recorded change — enough to apply and invert for undo/redo.
@@ -33,6 +33,7 @@ pub struct Document {
     pub language: Option<Arc<Language>>,
     parser: Parser,
     pub tree: Tree,
+    pub highlight_cache: HighlightCache,
 }
 
 impl Document {
@@ -65,7 +66,10 @@ impl Document {
             });
             (p, t)
         };
-        Ok(Self { rope, path: pb, dirty: false, language, parser, tree })
+        let mut highlight_cache = HighlightCache::default();
+        highlight_cache.setup(language.as_ref());
+        highlight_cache.compute(&tree, &source);
+        Ok(Self { rope, path: pb, dirty: false, language, parser, tree, highlight_cache })
     }
 
     /// In-memory document (for tests / benches).
@@ -76,6 +80,9 @@ impl Document {
         let lang = registry.language_for_path(std::path::Path::new("_.rs")).unwrap();
         let mut parser = lang.make_parser();
         let tree = parse_source(&mut parser, source);
+        let mut highlight_cache = HighlightCache::default();
+        highlight_cache.setup(Some(&lang));
+        highlight_cache.compute(&tree, source);
         Self {
             rope,
             path: PathBuf::from("<memory>"),
@@ -83,6 +90,7 @@ impl Document {
             language: Some(lang),
             parser,
             tree,
+            highlight_cache,
         }
     }
 
@@ -123,6 +131,7 @@ impl Document {
         // Per-keystroke alloc — acceptable cost until Step 5 (Transaction rewrite).
         let src = self.rope.to_string();
         self.tree = reparse_source(&mut self.parser, &self.tree, &ie, &src);
+        self.highlight_cache.compute(&self.tree, &src);
         self.dirty = true;
 
         Edit { char_range: char_idx..char_idx, removed: String::new(), inserted: text.to_string() }
@@ -153,6 +162,7 @@ impl Document {
 
         let src = self.rope.to_string();
         self.tree = reparse_source(&mut self.parser, &self.tree, &ie, &src);
+        self.highlight_cache.compute(&self.tree, &src);
         self.dirty = true;
 
         Edit { char_range: range.start..range.start, removed, inserted: String::new() }

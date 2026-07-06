@@ -11,4 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 felix-editor = { path = "../felix-editor" }
+felix-theme = { path = "../felix-theme" }
 gpui = "0.2"

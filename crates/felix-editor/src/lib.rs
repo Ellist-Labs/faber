@@ -1,5 +1,6 @@
 pub mod buffer;
 pub mod edit_history;
+pub mod highlight;
 pub mod save;
 
 // Re-export from felix-core so felix-app's imports keep working.
@@ -9,7 +10,7 @@ pub use felix_core::selection::{Selection, SelectionSet};
 pub use felix_core::anchor::{Anchor, Bias};
 
 // Re-export felix-lang so consumers can set up the registry.
-pub use felix_lang::{Language, LanguageId, LanguageRegistry};
+pub use felix_lang::{Language, LanguageId, LanguageRegistry, SyntaxToken};
 
 use ropey::Rope;
 use std::{fs, io};

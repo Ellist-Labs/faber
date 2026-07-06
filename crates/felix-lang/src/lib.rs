@@ -6,5 +6,5 @@
 pub mod language;
 pub mod registry;
 
-pub use language::{Language, LanguageId};
+pub use language::{Language, LanguageId, SyntaxToken, capture_name_to_token};
 pub use registry::LanguageRegistry;
