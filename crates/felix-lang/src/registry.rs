@@ -19,6 +19,7 @@ impl LanguageRegistry {
     pub fn with_defaults() -> Self {
         let mut r = Self::new();
         r.register(crate::language::rust());
+        r.register(crate::language::markdown());
         r
     }
 
@@ -67,5 +68,21 @@ mod tests {
         let reg = LanguageRegistry::with_defaults();
         let id = LanguageId::new("rust");
         assert!(reg.language_by_id(&id).is_some());
+    }
+
+    #[test]
+    fn resolves_markdown_by_extension() {
+        let reg = LanguageRegistry::with_defaults();
+        let lang = reg.language_for_path(&PathBuf::from("README.md")).unwrap();
+        assert_eq!(lang.id.0, "markdown");
+        let lang2 = reg.language_for_path(&PathBuf::from("notes.markdown")).unwrap();
+        assert_eq!(lang2.id.0, "markdown");
+    }
+
+    #[test]
+    fn markdown_highlight_query_compiles() {
+        let reg = LanguageRegistry::with_defaults();
+        let lang = reg.language_for_path(&PathBuf::from("README.md")).unwrap();
+        assert!(lang.make_highlight_query().is_some());
     }
 }

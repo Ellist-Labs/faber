@@ -9,4 +9,5 @@ license = "MIT"
 felix-core = { path = "../felix-core" }
 ropey = "1"
 tree-sitter = "0.26"
+tree-sitter-md = "0.5"
 tree-sitter-rust = "0.24"

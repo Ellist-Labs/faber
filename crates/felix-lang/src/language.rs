@@ -1,4 +1,5 @@
 use tree_sitter::{Language as TsLanguage, Parser, Query};
+use tree_sitter_md;
 
 /// Opaque identifier for a language (e.g. `"rust"`, `"python"`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -40,6 +41,12 @@ pub enum SyntaxToken {
 /// Maps a tree-sitter capture name to a `SyntaxToken`.
 pub fn capture_name_to_token(name: &str) -> Option<SyntaxToken> {
     Some(match name {
+        // markdown-specific captures (tree-sitter-md block grammar)
+        "text.title" => SyntaxToken::Keyword,
+        "text.literal" => SyntaxToken::String,
+        "text.uri" => SyntaxToken::Constant,
+        "text.reference" => SyntaxToken::Label,
+        "string.escape" => SyntaxToken::String,
         "keyword" | "keyword.control" | "keyword.operator" | "keyword.special" => {
             SyntaxToken::Keyword
         }
@@ -113,6 +120,12 @@ impl Language {
             query.capture_names().iter().map(|n| capture_name_to_token(n)).collect();
         Some((query, cap_tokens))
     }
+}
+
+/// Built-in Markdown language definition (block grammar).
+pub fn markdown() -> Language {
+    Language::new("markdown", ["md", "markdown"], || tree_sitter_md::LANGUAGE.into())
+        .with_highlights(|| tree_sitter_md::HIGHLIGHT_QUERY_BLOCK)
 }
 
 /// Built-in Rust language definition.

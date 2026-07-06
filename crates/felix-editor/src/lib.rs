@@ -1,6 +1,7 @@
 pub mod buffer;
 pub mod edit_history;
 pub mod highlight;
+pub mod markdown;
 pub mod project;
 pub mod save;
 

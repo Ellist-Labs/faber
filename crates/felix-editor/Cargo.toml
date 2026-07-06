@@ -25,9 +25,14 @@ harness = false
 name = "highlight"
 harness = false
 
+[[bench]]
+name = "markdown"
+harness = false
+
 [dependencies]
 felix-core = { path = "../felix-core" }
 felix-lang = { path = "../felix-lang" }
+pulldown-cmark = { version = "0.13.4", default-features = false }
 ropey = "1"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
