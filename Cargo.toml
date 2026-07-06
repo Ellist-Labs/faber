@@ -5,9 +5,28 @@ edition = "2024"
 description = "A lean, fast, GPU-accelerated code editor"
 license = "MIT"
 
+[lib]
+name = "felix"
+path = "src/lib.rs"
+
+[[bin]]
+name = "felix"
+path = "src/main.rs"
+
+[[bench]]
+name = "rope_ops"
+harness = false
+
+[[bench]]
+name = "parse"
+harness = false
+
 [dependencies]
 gpui = "0.2"
 ropey = "1"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+divan = "0.1"

@@ -1,10 +1,9 @@
+use felix::{load_rope, make_rust_parser, node_count, parse_source};
 use gpui::{
     App, Application, Bounds, Context, SharedString, Window, WindowBounds, WindowOptions, div,
     prelude::*, px, rgb, size,
 };
-use ropey::Rope;
-use std::{env, fs};
-use tree_sitter::Parser;
+use std::{env, time::Instant};
 
 struct EditorView {
     file_path: SharedString,
@@ -15,15 +14,9 @@ struct EditorView {
 
 impl EditorView {
     fn new(path: &str) -> Self {
-        let source = fs::read_to_string(path).unwrap_or_default();
-        let rope = Rope::from_str(&source);
-
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_rust::LANGUAGE.into())
-            .expect("failed to load Rust grammar");
-        let tree = parser.parse(&source, None).expect("parse failed");
-        let node_count = tree.root_node().descendant_count();
+        let (source, rope) = load_rope(path).unwrap_or_default();
+        let mut parser = make_rust_parser();
+        let tree = parse_source(&mut parser, &source);
 
         let lines: Vec<SharedString> = rope
             .lines()
@@ -35,13 +28,11 @@ impl EditorView {
             })
             .collect();
 
-        let line_count = lines.len();
-
         Self {
             file_path: path.to_string().into(),
+            line_count: lines.len(),
+            node_count: node_count(&tree),
             lines,
-            line_count,
-            node_count,
         }
     }
 }
@@ -57,18 +48,12 @@ impl Render for EditorView {
             .bg(rgb(0x1e1e2e))
             .border_b_1()
             .border_color(rgb(0x313244))
+            .child(div().text_color(rgb(0xcdd6f4)).child(self.file_path.clone()))
             .child(
-                div()
-                    .text_color(rgb(0xcdd6f4))
-                    .child(self.file_path.clone()),
-            )
-            .child(
-                div()
-                    .text_color(rgb(0x6c7086))
-                    .child(format!(
-                        "{} lines  •  {} nodes",
-                        self.line_count, self.node_count
-                    )),
+                div().text_color(rgb(0x6c7086)).child(format!(
+                    "{} lines  •  {} nodes",
+                    self.line_count, self.node_count
+                )),
             );
 
         let content = div()
@@ -97,16 +82,12 @@ impl Render for EditorView {
 }
 
 fn main() {
+    let start = Instant::now();
     let path = env::args().nth(1).unwrap_or_else(|| "src/main.rs".into());
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1024.), px(768.)), cx);
         let view = EditorView::new(&path);
-
-        println!(
-            "felix: opened '{}' — {} lines, {} tree-sitter nodes",
-            view.file_path, view.line_count, view.node_count
-        );
 
         cx.open_window(
             WindowOptions {
@@ -117,5 +98,8 @@ fn main() {
         )
         .unwrap();
         cx.activate(true);
+
+        // Print after activation so perf/macro.sh can measure startup_ms
+        println!("FELIX_READY startup_ms={}", start.elapsed().as_millis());
     });
 }
