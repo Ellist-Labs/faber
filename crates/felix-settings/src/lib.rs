@@ -24,11 +24,21 @@ pub struct Settings {
     pub auto_save_delay_ms: u64,
     /// Base UI font size in px; the whole application scales from it.
     pub font_size: f32,
+    /// Whether to show the line-number gutter in the editor.
+    pub line_numbers: bool,
+    /// Whether to show the interactive scrollbar on scrollable views.
+    pub show_scrollbar: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_save: AutoSave::Off, auto_save_delay_ms: 1000, font_size: DEFAULT_FONT_SIZE }
+        Self {
+            auto_save: AutoSave::Off,
+            auto_save_delay_ms: 1000,
+            font_size: DEFAULT_FONT_SIZE,
+            line_numbers: true,
+            show_scrollbar: true,
+        }
     }
 }
 
@@ -83,6 +93,8 @@ mod tests {
             auto_save: AutoSave::AfterDelay,
             auto_save_delay_ms: 500,
             font_size: 16.0,
+            line_numbers: true,
+            show_scrollbar: false,
         };
         save_to(&s, &path).unwrap();
         assert_eq!(load_from(&path), s);

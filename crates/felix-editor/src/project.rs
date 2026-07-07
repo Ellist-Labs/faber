@@ -62,6 +62,53 @@ impl FileTree {
         }
     }
 
+    /// Expand the directory at `dir` if it isn't already, loading children lazily.
+    /// No-op for files or paths outside the tree.
+    fn ensure_expanded(&mut self, dir: &Path) -> io::Result<()> {
+        let mut nodes = &mut self.nodes;
+        loop {
+            let Some(ix) = nodes.iter().position(|n| dir.starts_with(&n.path)) else {
+                return Ok(());
+            };
+            if nodes[ix].path == dir {
+                let node = &mut nodes[ix];
+                if node.is_dir && !node.expanded {
+                    if node.children.is_none() {
+                        node.children = Some(read_dir_sorted(&node.path)?);
+                    }
+                    node.expanded = true;
+                }
+                return Ok(());
+            }
+            match nodes[ix].children {
+                Some(ref mut children) => nodes = children,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// Expand all ancestor directories of `path` so the entry becomes visible
+    /// in `visible()`. No-op if `path` is outside this tree's root.
+    pub fn reveal(&mut self, path: &Path) -> io::Result<()> {
+        if !path.starts_with(&self.root) {
+            return Ok(());
+        }
+        let Ok(rel) = path.strip_prefix(&self.root) else { return Ok(()); };
+        let components: Vec<_> = rel.components().collect();
+        let mut current = self.root.clone();
+        // Expand every ancestor (all components except the last = the target itself).
+        for component in components.iter().take(components.len().saturating_sub(1)) {
+            current = current.join(component);
+            self.ensure_expanded(&current)?;
+        }
+        Ok(())
+    }
+
+    /// Index of `path` in the current visible row list, or `None` if not visible.
+    pub fn visible_index_of(&self, path: &Path) -> Option<usize> {
+        self.visible().iter().position(|r| r.path == path)
+    }
+
     /// Flatten the expanded tree into render-ready rows (DFS order).
     /// Callers cache the result and rebuild only after `toggle`.
     pub fn visible(&self) -> Vec<VisibleRow> {
@@ -112,10 +159,14 @@ fn collect_visible(nodes: &[FileNode], depth: usize, rows: &mut Vec<VisibleRow>)
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static FIXTURE_N: AtomicUsize = AtomicUsize::new(0);
 
     fn fixture() -> PathBuf {
+        let n = FIXTURE_N.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir()
-            .join(format!("felix_tree_test_{}", std::process::id()));
+            .join(format!("felix_tree_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src/nested")).unwrap();
         fs::create_dir_all(root.join("docs")).unwrap();
@@ -165,6 +216,47 @@ mod tests {
         tree.toggle(&root.join("a.txt")).unwrap();
         tree.toggle(Path::new("/nonexistent/elsewhere")).unwrap();
         assert_eq!(tree.visible().len(), 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reveal_expands_ancestors_and_makes_file_visible() {
+        let root = fixture();
+        let mut tree = FileTree::new(root.clone()).unwrap();
+        let deep = root.join("src/nested/deep.rs");
+
+        // Initially deep.rs is not visible (src is collapsed).
+        assert!(tree.visible_index_of(&deep).is_none());
+
+        tree.reveal(&deep).unwrap();
+
+        // After reveal, deep.rs is visible.
+        assert!(tree.visible_index_of(&deep).is_some());
+        // Both intermediate dirs must be expanded.
+        let rows = tree.visible();
+        assert!(rows.iter().any(|r| r.name == "src" && r.expanded));
+        assert!(rows.iter().any(|r| r.name == "nested" && r.expanded));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reveal_outside_root_is_noop() {
+        let root = fixture();
+        let mut tree = FileTree::new(root.clone()).unwrap();
+        tree.reveal(Path::new("/nonexistent/elsewhere")).unwrap();
+        assert_eq!(tree.visible().len(), 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn visible_index_of_returns_correct_index() {
+        let root = fixture();
+        let mut tree = FileTree::new(root.clone()).unwrap();
+        tree.toggle(&root.join("src")).unwrap();
+        let rows = tree.visible();
+        let main_ix = rows.iter().position(|r| r.name == "main.rs").unwrap();
+        assert_eq!(tree.visible_index_of(&root.join("src/main.rs")), Some(main_ix));
+        assert_eq!(tree.visible_index_of(&root.join("src/nested/deep.rs")), None); // not expanded yet
         fs::remove_dir_all(root).unwrap();
     }
 }

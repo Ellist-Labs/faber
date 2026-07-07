@@ -7,19 +7,21 @@ use felix_editor::{
     edit_history::History,
     highlight::{HighlightSpan, byte_col_to_char_col},
     markdown::{OutlineEntry, parse_markdown, edit::{EnterAction, enter_action, smart_wrap, looks_like_url, toggle_checkbox}},
-    node_count,
     search::Query,
     Selection,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div,
-    prelude::*, px, uniform_list,
+    KeyDownEvent, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, prelude::*, px,
+    uniform_list,
 };
 
 use crate::markdown_preview::MarkdownPreviewView;
+use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
-use crate::ui::IconName;
+use crate::ui::{IconName, ScrollbarDrag, render_scrollbar};
+use crate::ui::scrollbar::{start_drag, update_drag};
 
 // ── layout ─────────────────────────────────────────────────────────────────────
 // Line height and char width live on RuntimeTheme (settings-scaled).
@@ -29,13 +31,14 @@ const GUTTER_COLS: f32 = 6.0;
 // ── actions ────────────────────────────────────────────────────────────────────
 
 use crate::{
-    Backspace, BoldSelection, CloseSearch, Copy, Cut, Delete, DeleteWordLeft, DeleteWordRight,
-    Enter, FindNext, FindPrev, ItalicSelection, MoveDocEnd, MoveDocStart, MoveDown, MoveLeft,
-    MoveLineEnd, MoveLineStart, MovePageDown, MovePageUp, MoveRight, MoveUp, MoveWordLeft,
-    MoveWordRight, OpenReplace, OpenSearch, Paste, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne,
-    SearchBackspace, SelectAll, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft,
-    SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight, Tab,
-    ToggleCheckbox, TogglePreview, Undo,
+    Backspace, BoldSelection, CloseSearch, Copy, Cut, Delete, DeleteLine, DeleteToLineEnd,
+    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, ItalicSelection,
+    MoveDocEnd, MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown,
+    MovePageUp, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste,
+    ProjectRoot, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne, SearchBackspace, SelectAll,
+    SelectDocEnd, SelectDocStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart,
+    SelectRight, SelectUp, SelectWordLeft, SelectWordRight, Tab, ToggleCheckbox, TogglePreview,
+    Undo,
 };
 
 // ── EditorView ─────────────────────────────────────────────────────────────────
@@ -55,9 +58,11 @@ pub struct EditorView {
     // Line display cache — rebuilt after every document mutation.
     pub line_cache: Vec<SharedString>,
     pub line_starts: Vec<usize>,
+    pub widest_line: usize,
 
     pub scroll_handle: UniformListScrollHandle,
     last_scroll_line: usize,
+    mouse_selecting: bool,
 
     // Markdown preview
     pub preview: Option<gpui::Entity<MarkdownPreviewView>>,
@@ -74,6 +79,12 @@ pub struct EditorView {
     pub replace_query: String,
     pub matches: Vec<Range<usize>>,
     pub match_idx: usize,
+
+    pub scrollbar_drag: Option<ScrollbarDrag>,
+
+    // Cursor blink
+    pub cursor_blink_on: bool,
+    cursor_blink_epoch: u64,
 }
 
 impl EditorView {
@@ -95,8 +106,10 @@ impl EditorView {
             focus_handle: cx.focus_handle(),
             line_cache: Vec::new(),
             line_starts: Vec::new(),
+            widest_line: 0,
             scroll_handle: UniformListScrollHandle::new(),
             last_scroll_line: 0,
+            mouse_selecting: false,
             preview: None,
             show_preview: false,
             outline: Arc::new(vec![]),
@@ -109,6 +122,9 @@ impl EditorView {
             replace_query: String::new(),
             matches: Vec::new(),
             match_idx: 0,
+            scrollbar_drag: None,
+            cursor_blink_on: true,
+            cursor_blink_epoch: 0,
         };
         view.rebuild_line_cache();
         if view.is_markdown() {
@@ -122,6 +138,25 @@ impl EditorView {
 
     // ── helpers ────────────────────────────────────────────────────────────────
 
+    /// Reset blink to "on" and restart the blink loop. Call after every user interaction.
+    fn reset_blink(&mut self, cx: &mut Context<Self>) {
+        self.cursor_blink_on = true;
+        self.cursor_blink_epoch += 1;
+        let epoch = self.cursor_blink_epoch;
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(530)).await;
+                let cont = view.update(cx, |this, cx| {
+                    if this.cursor_blink_epoch != epoch { return false; }
+                    this.cursor_blink_on = !this.cursor_blink_on;
+                    cx.notify();
+                    true
+                }).unwrap_or(false);
+                if !cont { break; }
+            }
+        }).detach();
+    }
+
     fn clamp_sel(&mut self) {
         let len = self.doc.len_chars();
         self.sel.head = self.sel.head.min(len);
@@ -134,6 +169,7 @@ impl EditorView {
         if self.is_markdown() {
             self.schedule_markdown_update(cx);
         }
+        self.reset_blink(cx);
         cx.emit(EditorEvent::Edited);
         cx.notify();
     }
@@ -247,6 +283,73 @@ impl EditorView {
         self.after_edit(cx);
     }
 
+    fn do_delete_to_line_start(&mut self, cx: &mut Context<Self>) {
+        self.history.commit();
+        let head = self.sel.head;
+        let line_idx = self.doc.rope.char_to_line(head.min(self.doc.len_chars().saturating_sub(1)));
+        let line_start = self.doc.rope.line_to_char(line_idx);
+        if !self.sel.is_empty() {
+            let edit = self.doc.delete(self.sel.range());
+            self.history.push_other(edit);
+            let pos = self.sel.start();
+            self.sel = Selection::collapsed(pos, &self.doc.rope);
+        } else if line_start < head {
+            let edit = self.doc.delete(line_start..head);
+            self.history.push_other(edit);
+            self.sel = Selection::collapsed(line_start, &self.doc.rope);
+        }
+        self.after_edit(cx);
+    }
+
+    fn do_delete_to_line_end(&mut self, cx: &mut Context<Self>) {
+        self.history.commit();
+        if !self.sel.is_empty() {
+            let edit = self.doc.delete(self.sel.range());
+            self.history.push_other(edit);
+            let pos = self.sel.start();
+            self.sel = Selection::collapsed(pos, &self.doc.rope);
+        } else {
+            let head = self.sel.head;
+            let len = self.doc.len_chars();
+            let line_idx = self.doc.rope.char_to_line(head.min(len.saturating_sub(1)));
+            let raw = self.doc.rope.line(line_idx).to_string();
+            let content_chars = raw.trim_end_matches(['\n', '\r']).chars().count();
+            let line_start = self.doc.rope.line_to_char(line_idx);
+            let line_end = line_start + content_chars;
+            if head < line_end {
+                let edit = self.doc.delete(head..line_end);
+                self.history.push_other(edit);
+                self.sel = Selection::collapsed(head, &self.doc.rope);
+            }
+        }
+        self.after_edit(cx);
+    }
+
+    fn do_delete_line(&mut self, cx: &mut Context<Self>) {
+        self.history.commit();
+        let len = self.doc.len_chars();
+        if len == 0 { return; }
+        let head = self.sel.head.min(len.saturating_sub(1));
+        let line_idx = self.doc.rope.char_to_line(head);
+        let line_start = self.doc.rope.line_to_char(line_idx);
+        let line_count = self.doc.rope.len_lines();
+        let (del_start, del_end, new_pos) = if line_idx + 1 < line_count {
+            let next = self.doc.rope.line_to_char(line_idx + 1);
+            (line_start, next, line_start)
+        } else if line_start > 0 {
+            (line_start - 1, len, line_start - 1)
+        } else {
+            (0, len, 0)
+        };
+        if del_start < del_end {
+            let edit = self.doc.delete(del_start..del_end);
+            self.history.push_other(edit);
+            let clamped = new_pos.min(self.doc.len_chars());
+            self.sel = Selection::collapsed(clamped, &self.doc.rope);
+            self.after_edit(cx);
+        }
+    }
+
     pub fn rebuild_line_cache(&mut self) {
         let rope = &self.doc.rope;
         let line_count = rope.len_lines();
@@ -254,13 +357,89 @@ impl EditorView {
         self.line_cache.reserve(line_count);
         self.line_starts.clear();
         self.line_starts.reserve(line_count);
+        let mut widest = 0usize;
+        let mut widest_chars = 0usize;
         for i in 0..line_count {
             let char_start = rope.line_to_char(i);
             self.line_starts.push(char_start);
             let raw = rope.line(i).to_string();
             let content = raw.trim_end_matches(['\n', '\r']);
-            self.line_cache.push(SharedString::from(format!("{:>4}  {}", i + 1, content)));
+            let chars = content.chars().count();
+            if chars > widest_chars {
+                widest_chars = chars;
+                widest = i;
+            }
+            self.line_cache.push(SharedString::from(content.to_string()));
         }
+        self.widest_line = widest;
+    }
+
+    /// Map a window-space point to a rope char offset.
+    /// Returns None if the scroll handle has not been painted yet (first frame).
+    fn offset_at(
+        &self,
+        p: gpui::Point<gpui::Pixels>,
+        t: &RuntimeTheme,
+        show_line_numbers: bool,
+    ) -> Option<usize> {
+        let st = self.scroll_handle.0.borrow();
+        let vb = st.base_handle.bounds();
+        let off = st.base_handle.offset();
+        drop(st);
+        if vb.size.width == gpui::Pixels::ZERO {
+            return None;
+        }
+        let gutter_px = if show_line_numbers {
+            (GUTTER_COLS + 2.0) * t.char_w_code
+        } else {
+            0.0
+        };
+        let px_y = f32::from(p.y);
+        let px_x = f32::from(p.x);
+        let vb_y = f32::from(vb.origin.y);
+        let vb_x = f32::from(vb.origin.x);
+        let off_y = f32::from(off.y);
+        let off_x = f32::from(off.x);
+        // offset().y is ≤ 0 when scrolled down; subtracting it raises the coordinate.
+        let rel_y = (px_y - vb_y) - off_y;
+        let line = (rel_y / t.line_height_code).floor().max(0.0) as usize;
+        let line = line.min(self.line_starts.len().saturating_sub(1));
+        let rel_x = (px_x - vb_x) - 8.0 - gutter_px - off_x;
+        // floor: clicking anywhere on a character selects it, not the next one
+        let col_f = (rel_x / t.char_w_code).max(0.0).floor();
+        let raw = self.doc.rope.line(line).to_string();
+        let content_chars = raw.trim_end_matches(['\n', '\r']).chars().count();
+        let col = (col_f as usize).min(content_chars);
+        Some(self.line_starts[line] + col)
+    }
+
+    fn on_mouse_down_editor(
+        &mut self,
+        ev: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle);
+        let t = cx.global::<RuntimeTheme>().clone();
+        let show_line_numbers = cx.global::<SettingsStore>().0.line_numbers;
+        let Some(offset) = self.offset_at(ev.position, &t, show_line_numbers) else { return };
+        if ev.modifiers.shift {
+            let goal_col = cursor::col_of(&self.doc.rope, offset);
+            self.sel = Selection {
+                anchor: self.sel.anchor,
+                head: offset,
+                goal_col,
+            };
+        } else {
+            self.sel = Selection::collapsed(offset, &self.doc.rope);
+        }
+        self.mouse_selecting = true;
+        self.reset_blink(cx);
+        // Suppress auto-recenter so clicking doesn't jump the view.
+        self.last_scroll_line = self.doc.rope.char_to_line(
+            offset.min(self.doc.len_chars().saturating_sub(1))
+        );
+        cx.notify();
     }
 
     fn update_matches(&mut self) {
@@ -332,82 +511,99 @@ impl EditorView {
     fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_left(&self.doc.rope, self.sel, false);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_right(&self.doc.rope, self.sel, false);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_up(&self.doc.rope, self.sel, false);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_down(&self.doc.rope, self.sel, false);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_word_left(&mut self, _: &MoveWordLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_word_left(&self.doc.rope, self.sel, false);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_word_right(&mut self, _: &MoveWordRight, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_word_right(&self.doc.rope, self.sel, false);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_line_start(&mut self, _: &MoveLineStart, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_home(&self.doc.rope, self.sel, false);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_line_end(&mut self, _: &MoveLineEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_end(&self.doc.rope, self.sel, false);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_doc_start(&mut self, _: &MoveDocStart, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_doc_start(self.sel, false);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_doc_end(&mut self, _: &MoveDocEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_doc_end(&self.doc.rope, self.sel, false);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_page_up(&mut self, _: &MovePageUp, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_page_up(&self.doc.rope, self.sel, false, 30);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_move_page_down(&mut self, _: &MovePageDown, _: &mut Window, cx: &mut Context<Self>) {
         self.history.commit();
         self.sel = cursor::move_page_down(&self.doc.rope, self.sel, false, 30);
+        self.reset_blink(cx);
         cx.notify();
     }
 
     fn on_select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.sel = cursor::move_left(&self.doc.rope, self.sel, true);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.sel = cursor::move_right(&self.doc.rope, self.sel, true);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
         self.sel = cursor::move_up(&self.doc.rope, self.sel, true);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
         self.sel = cursor::move_down(&self.doc.rope, self.sel, true);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.sel = cursor::move_word_left(&self.doc.rope, self.sel, true);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_select_word_right(
@@ -417,6 +613,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.sel = cursor::move_word_right(&self.doc.rope, self.sel, true);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_select_line_start(
@@ -426,10 +623,12 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.sel = cursor::move_home(&self.doc.rope, self.sel, true);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_select_line_end(&mut self, _: &SelectLineEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.sel = cursor::move_end(&self.doc.rope, self.sel, true);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_select_doc_start(
@@ -439,14 +638,17 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.sel = cursor::move_doc_start(self.sel, true);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_select_doc_end(&mut self, _: &SelectDocEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.sel = cursor::move_doc_end(&self.doc.rope, self.sel, true);
+        self.reset_blink(cx);
         cx.notify();
     }
     fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.sel = cursor::select_all(&self.doc.rope);
+        self.reset_blink(cx);
         cx.notify();
     }
 
@@ -471,6 +673,25 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.do_delete_word_right(cx);
+    }
+    fn on_delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.do_delete_to_line_start(cx);
+    }
+    fn on_delete_to_line_end(
+        &mut self,
+        _: &DeleteToLineEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.do_delete_to_line_end(cx);
+    }
+    fn on_delete_line(&mut self, _: &DeleteLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.do_delete_line(cx);
     }
     fn on_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
         self.insert_text("\t", cx);
@@ -656,13 +877,34 @@ impl EditorView {
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
-        let Some(ref text) = ks.key_char else { return };
+        // macOS routes cmd+backspace/delete through NSTextInputClient (doCommandBySelector:)
+        // before GPUI keybinding dispatch fires. Handle here to guarantee execution.
+        if ks.modifiers.platform && !ks.modifiers.control && !ks.modifiers.alt {
+            match (ks.key.as_str(), ks.modifiers.shift) {
+                ("backspace", false) => { self.do_delete_to_line_start(cx); return; }
+                ("delete", false)    => { self.do_delete_to_line_end(cx); return; }
+                ("k", true)          => { self.do_delete_line(cx); return; }
+                _ => {}
+            }
+        }
+        let Some(ref raw_text) = ks.key_char else { return };
         if ks.modifiers.control || ks.modifiers.platform {
             return;
         }
-        if text.chars().any(|c| c.is_control()) {
+        if raw_text.chars().any(|c| c.is_control()) {
             return;
         }
+        // GPUI's mac key_char ignores caps lock; apply it manually.
+        let text_buf;
+        let text: &str = if window.capslock().on {
+            text_buf = raw_text
+                .chars()
+                .map(|c| if c.is_ascii_alphabetic() { if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() } } else { c })
+                .collect::<String>();
+            &text_buf
+        } else {
+            raw_text.as_str()
+        };
         if self.show_replace && self.replace_handle.is_focused(window) {
             self.replace_query.push_str(text);
             cx.notify();
@@ -677,8 +919,8 @@ impl EditorView {
 
     // ── rendering helpers ──────────────────────────────────────────────────────
 
-    /// Render one line. `t` is the theme cloned once at top of `render()`.
-    fn render_line(&self, line_idx: usize, t: &RuntimeTheme) -> AnyElement {
+    /// Render one line. `cursor_visible` controls whether the cursor beam is painted.
+    fn render_line(&self, line_idx: usize, t: &RuntimeTheme, show_line_numbers: bool, cursor_visible: bool) -> AnyElement {
         let line_char_start = self.line_starts[line_idx];
         let next_line_start = self
             .line_starts
@@ -707,13 +949,27 @@ impl EditorView {
 
         // ── Fast path: no decoration at all ───────────────────────────────────
         if !cursor_on_line && !has_sel && !has_match && !has_spans {
-            return div()
+            let row = div()
+                .flex()
+                .flex_row()
                 .h(px(t.line_height_code))
                 .font_family(t.mono_family.clone())
                 .text_size(px(t.font_size_code))
-                .text_color(t.text)
-                .child(self.line_cache[line_idx].clone())
-                .into_any_element();
+                .text_color(t.text);
+            let row = if show_line_numbers {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(GUTTER_COLS * t.char_w_code))
+                        .text_size(px(t.font_size_gutter))
+                        .text_color(t.gutter)
+                        .child(format!("{:>4}", line_idx + 1)),
+                )
+                .child(div().flex_shrink_0().w(px(2.0 * t.char_w_code)))
+            } else {
+                row
+            };
+            return row.child(self.line_cache[line_idx].clone()).into_any_element();
         }
 
         // ── Slow path ─────────────────────────────────────────────────────────
@@ -757,13 +1013,6 @@ impl EditorView {
             })
             .collect();
 
-        let gutter = div()
-            .flex_shrink_0()
-            .w(px(GUTTER_COLS * t.char_w_code))
-            .text_color(t.gutter)
-            .child(format!("{:>4}", line_idx + 1));
-        let gutter_spacer = div().flex_shrink_0().w(px(2.0 * t.char_w_code)).child("  ");
-
         let mut content_children: Vec<AnyElement> = Vec::new();
         let mut breakpoints: Vec<usize> = vec![0, line_char_count];
         if has_sel {
@@ -791,12 +1040,13 @@ impl EditorView {
                 continue;
             }
             if cursor_on_line && cursor_col == seg_start {
+                let cursor_color = if cursor_visible { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
                 content_children.push(
                     div()
                         .flex_shrink_0()
                         .w(px(1.5))
                         .h(px(t.line_height_code))
-                        .bg(t.cursor)
+                        .bg(cursor_color)
                         .into_any(),
                 );
             }
@@ -821,22 +1071,33 @@ impl EditorView {
             content_children.push(seg_div.into_any());
         }
         if cursor_on_line && cursor_col == line_char_count {
+            let cursor_color = if cursor_visible { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
             content_children.push(
-                div().flex_shrink_0().w(px(1.5)).h(px(t.line_height_code)).bg(t.cursor).into_any(),
+                div().flex_shrink_0().w(px(1.5)).h(px(t.line_height_code)).bg(cursor_color).into_any(),
             );
         }
 
         let content = div().flex().flex_row().flex_1().children(content_children);
-        div()
+        let row = div()
             .flex()
             .flex_row()
             .h(px(t.line_height_code))
             .font_family(t.mono_family.clone())
-            .text_size(px(t.font_size_code))
-            .child(gutter)
-            .child(gutter_spacer)
-            .child(content)
-            .into_any_element()
+            .text_size(px(t.font_size_code));
+        let row = if show_line_numbers {
+            row.child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(GUTTER_COLS * t.char_w_code))
+                    .text_size(px(t.font_size_gutter))
+                    .text_color(t.gutter)
+                    .child(format!("{:>4}", line_idx + 1)),
+            )
+            .child(div().flex_shrink_0().w(px(2.0 * t.char_w_code)))
+        } else {
+            row
+        };
+        row.child(content).into_any_element()
     }
 
     fn token_color(token: SyntaxToken, t: &RuntimeTheme) -> gpui::Hsla {
@@ -976,9 +1237,7 @@ impl EditorView {
         } else {
             // Leaving preview: sync scroll back to source.
             let source_line = if let Some(ref preview) = self.preview {
-                let pv = preview.read(cx);
-                let block_ix = pv.list_state.logical_scroll_top().item_ix;
-                pv.md.blocks.get(block_ix).map(|b| b.source_lines.start).unwrap_or(0)
+                preview.read(cx).source_line_at_top()
             } else {
                 0
             };
@@ -1004,6 +1263,7 @@ impl Render for EditorView {
 
         let is_md = self.is_markdown();
         let show_preview = self.show_preview;
+        let cursor_visible = self.cursor_blink_on && self.focus_handle.is_focused(window);
 
         // Preview toggle button (only shown for markdown files)
         let toggle_btn: AnyElement = if is_md {
@@ -1028,28 +1288,44 @@ impl Render for EditorView {
             div().into_any_element()
         };
 
+        let root_folder = cx.try_global::<ProjectRoot>().and_then(|r| r.0.clone());
+        let path_label: String = if self.doc.is_untitled() {
+            "Untitled".to_string()
+        } else {
+            let path = &self.doc.path;
+            if let Some(root) = root_folder.as_ref() {
+                path.strip_prefix(root)
+                    .map(|rel| rel.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| {
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    })
+            } else {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned())
+            }
+        };
+
         let header = div()
             .flex()
             .flex_row()
             .justify_between()
             .items_center()
             .px_3()
-            .py_1()
+            .py(px(3.))
             .bg(t.bg_elevated)
             .border_b_1()
             .border_color(t.separator)
-            .child(toggle_btn)
             .child(
                 div()
                     .font_family(t.ui_family.clone())
                     .text_size(px(t.font_size_caption))
                     .text_color(t.text_subtle)
-                    .child(format!(
-                        "{}L  {}N  ⌘S save · ⌘F find",
-                        self.doc.len_lines(),
-                        node_count(&self.doc.tree),
-                    )),
-            );
+                    .child(path_label),
+            )
+            .child(toggle_btn);
 
         let line_count = self.doc.len_lines();
         let cursor_line = self.doc.rope.char_to_line(self.sel.head.min(self.doc.len_chars().saturating_sub(1)));
@@ -1058,37 +1334,141 @@ impl Render for EditorView {
             self.scroll_handle.scroll_to_item(cursor_line, ScrollStrategy::Center);
         }
 
+        let settings = &cx.global::<SettingsStore>().0;
+        let show_line_numbers = settings.line_numbers;
+        let show_scrollbar = settings.show_scrollbar;
+
+        let editor_base_handle = self.scroll_handle.0.borrow().base_handle.clone();
+        let is_dragging = self.scrollbar_drag.is_some();
+
+        let editor_scrollbar = render_scrollbar(
+            "editor-scrollbar",
+            "editor-scrollbar-thumb",
+            &editor_base_handle,
+            show_scrollbar,
+            is_dragging,
+            cx.listener(|view, ev: &MouseDownEvent, _, cx| {
+                let handle = view.scroll_handle.0.borrow().base_handle.clone();
+                view.scrollbar_drag = Some(start_drag(ev, &handle));
+                cx.notify();
+            }),
+            &t,
+        );
+
         let entity = cx.entity();
         let t2 = t.clone();
+        let widest = self.widest_line;
         let content = uniform_list(
             "editor-lines",
             line_count,
             move |range: std::ops::Range<usize>, _window, cx| {
                 let view = entity.read(cx);
-                range.map(|i| view.render_line(i, &t2)).collect::<Vec<AnyElement>>()
+                range.map(|i| view.render_line(i, &t2, show_line_numbers, cursor_visible)).collect::<Vec<AnyElement>>()
             },
         )
         .flex_1()
         .px_2()
-        .py_1()
         .bg(t.bg)
-        .track_scroll(self.scroll_handle.clone());
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(Some(widest))
+        .track_scroll(self.scroll_handle.clone())
+        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down_editor));
 
-        // When in preview mode, show the MarkdownPreviewView instead of the editor.
+        let editor_pane = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h(px(0.))
+            .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(content))
+            .child(editor_scrollbar);
+
+        // In preview mode: side-by-side split (editor left, preview right).
         if show_preview {
             if let Some(ref preview_entity) = self.preview {
                 let preview = preview_entity.clone();
-                return div()
+                let split = div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(editor_pane)
+                    .child(div().w(px(1.)).bg(t.separator).flex_shrink_0())
+                    .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(preview));
+                let key_ctx = if is_md { "Editor markdown" } else { "Editor" };
+                let root = div()
                     .flex()
                     .flex_col()
                     .size_full()
                     .bg(t.bg)
-                    .key_context("Editor markdown")
+                    .key_context(key_ctx)
                     .track_focus(&self.focus_handle(cx))
+                    .on_key_down(cx.listener(Self::on_key_down))
+                    .on_action(cx.listener(Self::on_move_left))
+                    .on_action(cx.listener(Self::on_move_right))
+                    .on_action(cx.listener(Self::on_move_up))
+                    .on_action(cx.listener(Self::on_move_down))
+                    .on_action(cx.listener(Self::on_move_word_left))
+                    .on_action(cx.listener(Self::on_move_word_right))
+                    .on_action(cx.listener(Self::on_move_line_start))
+                    .on_action(cx.listener(Self::on_move_line_end))
+                    .on_action(cx.listener(Self::on_move_doc_start))
+                    .on_action(cx.listener(Self::on_move_doc_end))
+                    .on_action(cx.listener(Self::on_move_page_up))
+                    .on_action(cx.listener(Self::on_move_page_down))
+                    .on_action(cx.listener(Self::on_select_left))
+                    .on_action(cx.listener(Self::on_select_right))
+                    .on_action(cx.listener(Self::on_select_up))
+                    .on_action(cx.listener(Self::on_select_down))
+                    .on_action(cx.listener(Self::on_select_word_left))
+                    .on_action(cx.listener(Self::on_select_word_right))
+                    .on_action(cx.listener(Self::on_select_line_start))
+                    .on_action(cx.listener(Self::on_select_line_end))
+                    .on_action(cx.listener(Self::on_select_doc_start))
+                    .on_action(cx.listener(Self::on_select_doc_end))
+                    .on_action(cx.listener(Self::on_select_all))
+                    .on_action(cx.listener(Self::on_backspace))
+                    .on_action(cx.listener(Self::on_delete))
+                    .on_action(cx.listener(Self::on_delete_word_left))
+                    .on_action(cx.listener(Self::on_delete_word_right))
+                    .on_action(cx.listener(Self::on_delete_to_line_start))
+                    .on_action(cx.listener(Self::on_delete_to_line_end))
+                    .on_action(cx.listener(Self::on_delete_line))
+                    .on_action(cx.listener(Self::on_tab))
+                    .on_action(cx.listener(Self::on_enter))
+                    .on_action(cx.listener(Self::on_copy))
+                    .on_action(cx.listener(Self::on_cut))
+                    .on_action(cx.listener(Self::on_paste))
+                    .on_action(cx.listener(Self::on_undo))
+                    .on_action(cx.listener(Self::on_redo))
+                    .on_action(cx.listener(Self::on_open_search))
+                    .on_action(cx.listener(Self::on_open_replace))
+                    .on_action(cx.listener(Self::on_close_search))
+                    .on_action(cx.listener(Self::on_find_next))
+                    .on_action(cx.listener(Self::on_find_prev))
+                    .on_action(cx.listener(Self::on_replace_one))
+                    .on_action(cx.listener(Self::on_replace_all))
+                    .on_action(cx.listener(Self::on_search_backspace))
+                    .on_action(cx.listener(Self::on_replace_backspace))
                     .on_action(cx.listener(Self::on_toggle_preview))
+                    .on_action(cx.listener(Self::on_bold_selection))
+                    .on_action(cx.listener(Self::on_italic_selection))
+                    .on_action(cx.listener(Self::on_toggle_checkbox))
+                    .when(is_dragging, |el| {
+                        el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _, cx| {
+                            if let Some(ref drag) = view.scrollbar_drag {
+                                let handle = view.scroll_handle.0.borrow().base_handle.clone();
+                                update_drag(drag, ev, &handle);
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, cx| {
+                            view.scrollbar_drag = None;
+                            cx.notify();
+                        }))
+                    })
                     .child(header)
-                    .child(div().flex_1().min_h(px(0.)).child(preview))
-                    .into_any();
+                    .child(split);
+                return root.into_any();
             }
         }
 
@@ -1129,6 +1509,9 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_delete_word_left))
             .on_action(cx.listener(Self::on_delete_word_right))
+            .on_action(cx.listener(Self::on_delete_to_line_start))
+            .on_action(cx.listener(Self::on_delete_to_line_end))
+            .on_action(cx.listener(Self::on_delete_line))
             .on_action(cx.listener(Self::on_tab))
             .on_action(cx.listener(Self::on_enter))
             .on_action(cx.listener(Self::on_copy))
@@ -1149,8 +1532,21 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_bold_selection))
             .on_action(cx.listener(Self::on_italic_selection))
             .on_action(cx.listener(Self::on_toggle_checkbox))
+            .when(is_dragging, |el| {
+                el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _, cx| {
+                    if let Some(ref drag) = view.scrollbar_drag {
+                        let handle = view.scroll_handle.0.borrow().base_handle.clone();
+                        update_drag(drag, ev, &handle);
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, cx| {
+                    view.scrollbar_drag = None;
+                    cx.notify();
+                }))
+            })
             .child(header)
-            .child(content);
+            .child(editor_pane);
 
         if self.show_search {
             root.child(self.render_search_bar(window, &t)).into_any()

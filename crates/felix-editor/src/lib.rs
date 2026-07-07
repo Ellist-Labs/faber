@@ -39,7 +39,9 @@ pub fn reparse_source(
 ) -> Tree {
     let mut tree = old_tree.clone();
     tree.edit(edit);
-    parser.parse(new_source, Some(&tree)).expect("reparse failed")
+    // Parser::parse returns None when no language is set or parsing is cancelled.
+    // Return the invalidated tree in that case so callers never panic on a hot path.
+    parser.parse(new_source, Some(&tree)).unwrap_or(tree)
 }
 
 pub fn node_count(tree: &Tree) -> usize {

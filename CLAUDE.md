@@ -7,7 +7,8 @@ Felix is a lean, GPU-accelerated code editor (Rust + GPUI). Its core value propo
 Every code decision must protect that premise.
 
 Stack: GPUI (GPU UI), Ropey (rope buffer), Tree-sitter (incremental parsing),
-LSP (language intelligence), WASM/wasmtime (extensions). Async via GPUI's own executor (no tokio).
+LSP (language intelligence), WASM/wasmtime (extensions
+). Async via GPUI's own executor (no tokio).
 
 ## Workspace structure
 

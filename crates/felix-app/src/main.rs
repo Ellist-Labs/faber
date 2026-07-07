@@ -11,10 +11,13 @@ mod welcome_view;
 mod workspace;
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, WindowBounds, WindowOptions, actions,
-    prelude::*, px, size,
+    App, Application, Bounds, Global, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
+    WindowOptions, actions, point, prelude::*, px, size,
 };
-use std::{env, time::Instant};
+use std::{env, path::PathBuf, time::Instant};
+
+pub struct ProjectRoot(pub Option<PathBuf>);
+impl Global for ProjectRoot {}
 
 use workspace::Workspace;
 
@@ -45,6 +48,7 @@ actions!(
         SelectAll,
         Backspace, Delete,
         DeleteWordLeft, DeleteWordRight,
+        DeleteToLineStart, DeleteToLineEnd, DeleteLine,
         Tab, Enter,
         Copy, Cut, Paste,
         Undo, Redo,
@@ -61,7 +65,8 @@ actions!(
         CloseTab, NextTab, PrevTab,
         NewFile, OpenFile, OpenFolder,
         SaveFile, CloseFile, CloseFolder,
-        ToggleSidebar, OpenSettings,
+        ToggleSidebar, ToggleBottomPanel, ToggleRightPanel,
+        OpenSettings,
         Quit,
     ]
 );
@@ -74,6 +79,7 @@ fn main() {
 
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         cx.set_global(settings_view::SettingsStore(felix_settings::load()));
+        cx.set_global(ProjectRoot(None));
         theme::apply_settings(cx);
         register_keybindings(cx);
         register_menus(cx);
@@ -83,6 +89,11 @@ fn main() {
         let window = cx
             .open_window(
                 WindowOptions {
+                    titlebar: Some(TitlebarOptions {
+                        title: None,
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(12.), px(18.))),
+                    }),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
@@ -137,6 +148,8 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("delete", Delete, Some("Editor")),
         KeyBinding::new("alt-backspace", DeleteWordLeft, Some("Editor")),
         KeyBinding::new("alt-delete", DeleteWordRight, Some("Editor")),
+        // cmd-backspace/delete/shift-k handled directly in on_key_down to bypass
+        // macOS NSTextInputClient interception of these selectors.
         KeyBinding::new("tab", Tab, Some("Editor")),
         KeyBinding::new("enter", Enter, Some("Editor")),
         // Clipboard
@@ -153,8 +166,10 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-s", SaveFile, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("cmd-q", Quit, Some("Workspace")),
-        // Sidebar
+        // Sidebar / panels
         KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
+        KeyBinding::new("cmd-j", ToggleBottomPanel, Some("Workspace")),
+        KeyBinding::new("ctrl-cmd-b", ToggleRightPanel, Some("Workspace")),
         // Tabs
         KeyBinding::new("cmd-w", CloseTab, Some("Workspace")),
         KeyBinding::new("ctrl-tab", NextTab, Some("Workspace")),

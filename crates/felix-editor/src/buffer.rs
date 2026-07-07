@@ -27,6 +27,8 @@ impl Edit {
 
 pub struct Document {
     pub rope: Rope,
+    /// Snapshot of the rope at last save (or at open). Used to compute `dirty`.
+    saved_rope: Rope,
     pub path: PathBuf,
     pub dirty: bool,
     /// The resolved language for this file; None for plain text.
@@ -59,7 +61,7 @@ impl Document {
         let mut highlight_cache = HighlightCache::default();
         highlight_cache.setup(language.as_ref());
         highlight_cache.compute(&tree, &source);
-        Ok(Self { rope, path: pb, dirty: false, language, parser, tree, highlight_cache })
+        Ok(Self { saved_rope: rope.clone(), rope, path: pb, dirty: false, language, parser, tree, highlight_cache })
     }
 
     /// In-memory document (for tests / benches).
@@ -74,6 +76,7 @@ impl Document {
         highlight_cache.setup(Some(&lang));
         highlight_cache.compute(&tree, source);
         Self {
+            saved_rope: rope.clone(),
             rope,
             path: PathBuf::from("<memory>"),
             dirty: false,
@@ -105,6 +108,7 @@ impl Document {
         highlight_cache.setup(None);
         highlight_cache.compute(&tree, "");
         Self {
+            saved_rope: Rope::new(),
             rope: Rope::new(),
             path: PathBuf::new(),
             dirty: false,
@@ -174,10 +178,13 @@ impl Document {
         };
 
         // Per-keystroke alloc — acceptable cost until Step 5 (Transaction rewrite).
-        let src = self.rope.to_string();
-        self.tree = reparse_source(&mut self.parser, &self.tree, &ie, &src);
-        self.highlight_cache.compute(&self.tree, &src);
-        self.dirty = true;
+        if self.language.is_some() {
+            let src = self.rope.to_string();
+            self.tree = reparse_source(&mut self.parser, &self.tree, &ie, &src);
+            self.highlight_cache.compute(&self.tree, &src);
+        }
+        self.dirty = self.rope.len_bytes() != self.saved_rope.len_bytes()
+            || self.rope != self.saved_rope;
 
         Edit { char_range: char_idx..char_idx, removed: String::new(), inserted: text.to_string() }
     }
@@ -205,11 +212,20 @@ impl Document {
             new_end_position: Point { row: start_line, column: start_col },
         };
 
-        let src = self.rope.to_string();
-        self.tree = reparse_source(&mut self.parser, &self.tree, &ie, &src);
-        self.highlight_cache.compute(&self.tree, &src);
-        self.dirty = true;
+        if self.language.is_some() {
+            let src = self.rope.to_string();
+            self.tree = reparse_source(&mut self.parser, &self.tree, &ie, &src);
+            self.highlight_cache.compute(&self.tree, &src);
+        }
+        self.dirty = self.rope.len_bytes() != self.saved_rope.len_bytes()
+            || self.rope != self.saved_rope;
 
         Edit { char_range: range.start..range.start, removed, inserted: String::new() }
+    }
+
+    /// Record the current rope as the saved baseline; clears the dirty flag.
+    pub fn mark_saved(&mut self) {
+        self.saved_rope = self.rope.clone();
+        self.dirty = false;
     }
 }

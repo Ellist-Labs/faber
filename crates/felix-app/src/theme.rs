@@ -60,6 +60,7 @@ pub struct RuntimeTheme {
     pub font_size_body: f32,
     pub font_size_caption: f32,
     pub font_size_code: f32,
+    pub font_size_gutter: f32,
     pub font_size_heading: f32,
     pub line_height_code: f32,
     /// Advance width of one monospace cell — drives cursor x-position math.
@@ -148,6 +149,7 @@ impl RuntimeTheme {
             font_size_body: ty.body.size_px * scale,
             font_size_caption: ty.caption.size_px * scale,
             font_size_code: ty.code.size_px * scale,
+            font_size_gutter: ty.code.size_px * scale * 0.85,
             font_size_heading: ty.heading.size_px * scale,
             line_height_code: ty.code.line_height_px * scale,
             // Linear fallback from the measured 8.4px @ 13px Monaco cell;

@@ -1,9 +1,10 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use felix_editor::markdown::OutlineEntry;
 use gpui::{
-    AnyElement, Context, Div, Entity, IntoElement, MouseButton, SharedString, Stateful, div, img,
-    prelude::*, px, svg, uniform_list,
+    AnyElement, Context, Div, Entity, IntoElement, ListHorizontalSizingBehavior, MouseButton,
+    SharedString, Stateful, div, img, prelude::*, px, svg, uniform_list,
 };
 
 use crate::file_icons;
@@ -11,7 +12,7 @@ use crate::theme::RuntimeTheme;
 use crate::ui::{IconName, h_flex, v_flex};
 use crate::workspace::Workspace;
 
-pub const ACTIVITY_BAR_W: f32 = 40.0;
+pub const ACTIVITY_BAR_W: f32 = 44.0;
 pub const SIDEBAR_PANEL_W: f32 = 240.0;
 const TREE_ROW_H: f32 = 24.0;
 const TREE_INDENT_W: f32 = 12.0;
@@ -42,11 +43,12 @@ pub fn default_items() -> Vec<SidebarItem> {
 pub struct SidebarState {
     pub open: bool,
     pub active: SidebarItemKind,
+    pub width: f32,
 }
 
 impl Default for SidebarState {
     fn default() -> Self {
-        Self { open: false, active: SidebarItemKind::Explorer }
+        Self { open: false, active: SidebarItemKind::Explorer, width: SIDEBAR_PANEL_W }
     }
 }
 
@@ -75,7 +77,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(30.0))
+                    .size(px(34.0))
                     .rounded(px(t.radius_md))
                     .when(is_active, |el| el.bg(t.bg))
                     .cursor_pointer()
@@ -86,7 +88,7 @@ impl Workspace {
                     .child(
                         svg()
                             .path(item.icon.path())
-                            .size(px(18.0))
+                            .size(px(21.0))
                             .text_color(if is_active { t.text } else { t.text_subtle })
                             .group_hover("activity-item", |s| s.text_color(t.text)),
                     )
@@ -111,7 +113,7 @@ impl Workspace {
             .text_size(px(t.font_size_caption))
             .text_color(t.text_muted)
             .font_family(t.ui_family.clone())
-            .child(title.to_uppercase());
+            .child(title);
 
         let body: AnyElement = match self.sidebar.active {
             SidebarItemKind::Explorer => self.render_explorer(t, cx),
@@ -120,12 +122,10 @@ impl Workspace {
         };
 
         v_flex()
-            .w(px(SIDEBAR_PANEL_W))
+            .w(px(self.sidebar.width))
             .flex_shrink_0()
             .h_full()
             .bg(t.bg_elevated)
-            .border_r_1()
-            .border_color(t.separator)
             .child(header)
             .child(body)
     }
@@ -148,28 +148,87 @@ impl Workspace {
 
         let entity = cx.entity();
         let t2 = t.clone();
-        uniform_list(
+        let active_path = self.active_editor_path(cx);
+        // Find the index of the widest-looking row so the list can self-size horizontally.
+        let char_w = t.char_w_code;
+        let widest_idx = self
+            .visible_rows
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, r)| {
+                (r.depth as f32 * TREE_INDENT_W + r.name.len() as f32 * char_w) as usize
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let show_scrollbar = cx.global::<crate::settings_view::SettingsStore>().0.show_scrollbar;
+        let is_dragging = self.tree_scrollbar_drag.is_some();
+        let tree_base_handle = self.tree_scroll.0.borrow().base_handle.clone();
+
+        let scrollbar = crate::ui::render_scrollbar(
+            "explorer-scrollbar",
+            "explorer-scrollbar-thumb",
+            &tree_base_handle,
+            show_scrollbar,
+            is_dragging,
+            cx.listener(|ws, ev, _, cx| {
+                let handle = ws.tree_scroll.0.borrow().base_handle.clone();
+                ws.tree_scrollbar_drag = Some(crate::ui::scrollbar::start_drag(ev, &handle));
+                cx.notify();
+            }),
+            t,
+        );
+
+        let tree_list = uniform_list(
             "file-tree",
             self.visible_rows.len(),
             move |range: std::ops::Range<usize>, _window, cx| {
                 let entity2 = entity.clone();
                 let ws = entity.read(cx);
                 range
-                    .map(|ix| ws.render_tree_row(ix, &entity2, &t2).into_any_element())
+                    .map(|ix| {
+                        ws.render_tree_row(ix, &entity2, active_path.as_deref(), &t2)
+                            .into_any_element()
+                    })
                     .collect::<Vec<AnyElement>>()
             },
         )
         .flex_1()
-        .into_any_element()
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(Some(widest_idx))
+        .track_scroll(self.tree_scroll.clone());
+
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h(px(0.))
+            .when(is_dragging, |el| {
+                el.on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, _, cx| {
+                    if let Some(ref drag) = ws.tree_scrollbar_drag {
+                        let handle = ws.tree_scroll.0.borrow().base_handle.clone();
+                        crate::ui::scrollbar::update_drag(drag, ev, &handle);
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up(gpui::MouseButton::Left, cx.listener(|ws, _, _, cx| {
+                    ws.tree_scrollbar_drag = None;
+                    cx.notify();
+                }))
+            })
+            .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(tree_list))
+            .child(scrollbar)
+            .into_any_element()
     }
 
     fn render_tree_row(
         &self,
         ix: usize,
         entity: &Entity<Workspace>,
+        active_path: Option<&Path>,
         t: &RuntimeTheme,
     ) -> Stateful<Div> {
         let row = &self.visible_rows[ix];
+        let is_active = active_path.map_or(false, |ap| ap == row.path);
         let path = row.path.clone();
         let is_dir = row.is_dir;
         let entity = entity.clone();
@@ -202,8 +261,9 @@ impl Workspace {
             .gap_1()
             .font_family(t.ui_family.clone())
             .text_size(px(t.font_size_caption))
-            .text_color(if is_dir { t.text } else { t.text_muted })
+            .text_color(if is_active || is_dir { t.text } else { t.text_muted })
             .cursor_pointer()
+            .when(is_active, |el| el.bg(t.selection))
             .hover(|el| el.bg(t.line_highlight))
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 entity.update(cx, |ws, cx| {
@@ -216,7 +276,7 @@ impl Workspace {
             })
             .child(div().flex_shrink_0().child(chevron))
             .child(img(icon).size(px(16.0)).flex_shrink_0())
-            .child(div().overflow_hidden().text_ellipsis().child(row.name.clone()))
+            .child(div().whitespace_nowrap().flex_shrink_0().child(row.name.clone()))
     }
 
     fn render_outline(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> AnyElement {
@@ -304,6 +364,28 @@ impl Workspace {
             .text_color(t.text_muted)
             .child("Project search coming soon")
             .into_any_element()
+    }
+
+    pub(crate) fn render_sidebar_resize_handle(
+        &self,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("sidebar-resize-handle")
+            .w(px(4.0))
+            .h_full()
+            .flex_shrink_0()
+            .bg(t.separator)
+            .cursor_col_resize()
+            .hover(|el| el.bg(t.accent))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ws, _, _, cx| {
+                    ws.sidebar_resizing = true;
+                    cx.notify();
+                }),
+            )
     }
 
     fn on_activity_click(&mut self, kind: SidebarItemKind, cx: &mut Context<Self>) {

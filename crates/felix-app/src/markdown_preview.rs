@@ -8,12 +8,15 @@ use felix_editor::{
 };
 use gpui::{
     AnyElement, App, Context, Font, FontStyle, FontWeight, Hsla, IntoElement,
-    Render, ScrollHandle, SharedString, StrikethroughStyle, Styled,
+    MouseButton, MouseMoveEvent, Render, ScrollHandle, SharedString, StrikethroughStyle, Styled,
     TextRun, UnderlineStyle, Window, div, img, prelude::*, px,
 };
 use ropey::Rope;
 
+use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
+use crate::ui::{ScrollbarDrag, render_scrollbar};
+use crate::ui::scrollbar::{start_drag, update_drag};
 
 // ── MarkdownPreviewView ───────────────────────────────────────────────────────
 
@@ -21,6 +24,7 @@ pub struct MarkdownPreviewView {
     pub md: Arc<MarkdownDoc>,
     pub scroll: ScrollHandle,
     pub base_dir: PathBuf,
+    pub scrollbar_drag: Option<ScrollbarDrag>,
 }
 
 impl MarkdownPreviewView {
@@ -31,6 +35,7 @@ impl MarkdownPreviewView {
             md,
             scroll: ScrollHandle::new(),
             base_dir: path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf(),
+            scrollbar_drag: None,
         }
     }
 
@@ -95,12 +100,28 @@ impl MarkdownPreviewView {
 impl Render for MarkdownPreviewView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.global::<RuntimeTheme>().clone();
+        let show_scrollbar = cx.global::<SettingsStore>().0.show_scrollbar;
         let md = Arc::clone(&self.md);
         let base_dir = self.base_dir.clone();
         let t2 = t.clone();
         let block_count = md.blocks.len();
+        let is_dragging = self.scrollbar_drag.is_some();
+        let scroll = self.scroll.clone();
 
-        div()
+        let preview_scroll = render_scrollbar(
+            "preview-scrollbar",
+            "preview-scrollbar-thumb",
+            &scroll,
+            show_scrollbar,
+            is_dragging,
+            cx.listener(|view, ev, _, cx| {
+                view.scrollbar_drag = Some(start_drag(ev, &view.scroll.clone()));
+                cx.notify();
+            }),
+            &t,
+        );
+
+        let content = div()
             .id("md-preview")
             .flex_1()
             .min_h(px(0.))
@@ -124,7 +145,28 @@ impl Render for MarkdownPreviewView {
                             .w_full()
                             .child(Self::render_block(&md, ix, &base_dir, &t2, cx))
                     })),
-            )
+            );
+
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h(px(0.))
+            .min_w(px(0.))
+            .when(is_dragging, |el| {
+                el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _, cx| {
+                    if let Some(ref drag) = view.scrollbar_drag {
+                        update_drag(drag, ev, &view.scroll.clone());
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, cx| {
+                    view.scrollbar_drag = None;
+                    cx.notify();
+                }))
+            })
+            .child(content)
+            .child(preview_scroll)
     }
 }
 

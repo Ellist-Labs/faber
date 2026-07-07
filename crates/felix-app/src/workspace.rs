@@ -9,25 +9,32 @@ use felix_editor::{
     save::save,
 };
 use gpui::{
-    AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, IntoElement, MouseButton,
-    PathPromptOptions, PromptLevel, Render, Stateful, Task, Window, div, img, prelude::*, px,
-    svg,
+    AnyElement, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel,
+    Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window,
+    anchored, deferred, div, img, prelude::*, px, svg,
 };
 
 use crate::editor_view::{EditorEvent, EditorView};
 use crate::settings_view::{SettingsStore, SettingsView};
 use crate::sidebar::{SidebarItem, SidebarItemKind, SidebarState, default_items};
 use crate::theme::RuntimeTheme;
-use crate::ui::{IconName, h_flex, v_flex};
+use crate::ui::{IconName, ScrollbarDrag, h_flex, v_flex};
+use crate::ui::scrollbar::update_drag;
 use crate::welcome_view::render_welcome;
 use crate::{
     CloseFile, CloseFolder, CloseTab, NewFile, NextTab, OpenFile, OpenFolder, OpenSettings,
-    PrevTab, Quit, SaveFile, ToggleSidebar,
+    PrevTab, ProjectRoot, Quit, SaveFile, ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
 };
 
 pub enum TabContent {
     Editor(Entity<EditorView>),
     Settings(Entity<SettingsView>),
+}
+
+struct TabMenu {
+    tab_id: usize,
+    pos: Point<Pixels>,
 }
 
 pub struct Tab {
@@ -70,8 +77,14 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     pub(crate) sidebar_items: Vec<SidebarItem>,
     pub(crate) sidebar: SidebarState,
+    pub(crate) sidebar_resizing: bool,
     pub(crate) tree: Option<FileTree>,
     pub(crate) visible_rows: Vec<VisibleRow>,
+    pub(crate) tree_scroll: UniformListScrollHandle,
+    pub(crate) tree_scrollbar_drag: Option<ScrollbarDrag>,
+    pub(crate) bottom_open: bool,
+    pub(crate) right_open: bool,
+    tab_menu: Option<TabMenu>,
     /// Bumped on every edit; a debounced auto-save fires only if no newer
     /// edit arrived while its timer slept.
     autosave_generation: u64,
@@ -87,8 +100,14 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             sidebar_items: default_items(),
             sidebar: SidebarState::default(),
+            sidebar_resizing: false,
             tree: None,
             visible_rows: Vec::new(),
+            tree_scroll: UniformListScrollHandle::new(),
+            tree_scrollbar_drag: None,
+            bottom_open: false,
+            right_open: false,
+            tab_menu: None,
             autosave_generation: 0,
         };
         for path in paths {
@@ -161,7 +180,7 @@ impl Workspace {
     fn save_doc_now(editor: &Entity<EditorView>, cx: &mut App) {
         editor.update(cx, |ed, cx| {
             if ed.doc.dirty && !ed.doc.is_untitled() && save(&ed.doc.rope, &ed.doc.path).is_ok() {
-                ed.doc.dirty = false;
+                ed.doc.mark_saved();
                 cx.notify();
             }
         });
@@ -197,6 +216,11 @@ impl Workspace {
         self.active = Some(ix);
         self.focus_active(window, cx);
         cx.notify();
+        // Reveal the newly active file in the explorer tree.
+        let path = self.active_editor_path(cx);
+        if let Some(path) = path {
+            self.reveal_in_tree(&path, cx);
+        }
     }
 
     pub fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -236,6 +260,36 @@ impl Workspace {
             .map_or_else(|| "untitled".to_string(), |n| n.to_string_lossy().to_string())
     }
 
+    /// Returns the file path of the active editor tab, or `None` for untitled/Settings tabs.
+    pub(crate) fn active_editor_path(&self, cx: &App) -> Option<PathBuf> {
+        let ix = self.active?;
+        let tab = self.tabs.get(ix)?;
+        let editor = tab.editor()?;
+        let path = editor.read(cx).doc.path.clone();
+        if path.as_os_str().is_empty() { None } else { Some(path) }
+    }
+
+    /// Expand the tree so `path` is visible, scroll the explorer to it, and notify.
+    /// No-op when no folder is open or `path` is outside the root.
+    pub(crate) fn reveal_in_tree(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(root) = self.root_folder.clone() else { return; };
+        if !path.starts_with(&root) { return; }
+        let rows = if let Some(tree) = &mut self.tree {
+            if tree.reveal(path).is_err() { return; }
+            Some(tree.visible())
+        } else {
+            None
+        };
+        if let Some(rows) = rows {
+            let scroll_ix = rows.iter().position(|r| r.path == path);
+            self.visible_rows = rows;
+            if let Some(ix) = scroll_ix {
+                self.tree_scroll.scroll_to_item(ix, ScrollStrategy::Top);
+            }
+            cx.notify();
+        }
+    }
+
     // ── folder / explorer ──────────────────────────────────────────────────────
 
     fn set_root_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
@@ -243,9 +297,10 @@ impl Workspace {
             Ok(tree) => {
                 self.visible_rows = tree.visible();
                 self.tree = Some(tree);
-                self.root_folder = Some(folder);
+                self.root_folder = Some(folder.clone());
                 self.sidebar.open = true;
                 self.sidebar.active = SidebarItemKind::Explorer;
+                cx.set_global(ProjectRoot(Some(folder)));
             }
             Err(err) => eprintln!("felix: can't open folder {}: {err}", folder.display()),
         }
@@ -287,7 +342,7 @@ impl Workspace {
                         ed.doc.assign_path(path);
                         let ok = save(&ed.doc.rope, &ed.doc.path).is_ok();
                         if ok {
-                            ed.doc.dirty = false;
+                            ed.doc.mark_saved();
                         }
                         ed.rebuild_line_cache();
                         cx.notify();
@@ -299,7 +354,7 @@ impl Workspace {
             let ok = editor.update(cx, |ed, cx| {
                 let ok = save(&ed.doc.rope, &ed.doc.path).is_ok();
                 if ok {
-                    ed.doc.dirty = false;
+                    ed.doc.mark_saved();
                 }
                 cx.notify();
                 ok
@@ -427,11 +482,22 @@ impl Workspace {
         self.root_folder = None;
         self.tree = None;
         self.visible_rows.clear();
+        cx.set_global(ProjectRoot(None));
         cx.notify();
     }
 
     fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.open = !self.sidebar.open;
+        cx.notify();
+    }
+
+    fn on_toggle_bottom_panel(&mut self, _: &ToggleBottomPanel, _: &mut Window, cx: &mut Context<Self>) {
+        self.bottom_open = !self.bottom_open;
+        cx.notify();
+    }
+
+    fn on_toggle_right_panel(&mut self, _: &ToggleRightPanel, _: &mut Window, cx: &mut Context<Self>) {
+        self.right_open = !self.right_open;
         cx.notify();
     }
 
@@ -485,6 +551,49 @@ impl Workspace {
         }
     }
 
+    /// Close all tabs except the one with `keep_id`.
+    fn close_other_tabs(&mut self, keep_id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<usize> =
+            self.tabs.iter().filter(|t| t.id != keep_id).map(|t| t.id).collect();
+        for id in ids {
+            if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
+                self.request_close_tab(ix, window, cx);
+            }
+        }
+    }
+
+    /// Close all tabs.
+    fn close_all_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<usize> = self.tabs.iter().map(|t| t.id).collect();
+        for id in ids {
+            if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
+                self.request_close_tab(ix, window, cx);
+            }
+        }
+    }
+
+    /// Close all tabs to the left of `anchor_id`.
+    fn close_tabs_to_left(&mut self, anchor_id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let anchor_ix = self.tabs.iter().position(|t| t.id == anchor_id).unwrap_or(0);
+        let ids: Vec<usize> = self.tabs[..anchor_ix].iter().map(|t| t.id).collect();
+        for id in ids {
+            if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
+                self.request_close_tab(ix, window, cx);
+            }
+        }
+    }
+
+    /// Close all tabs to the right of `anchor_id`.
+    fn close_tabs_to_right(&mut self, anchor_id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let anchor_ix = self.tabs.iter().position(|t| t.id == anchor_id).unwrap_or(0);
+        let ids: Vec<usize> = self.tabs[anchor_ix + 1..].iter().map(|t| t.id).collect();
+        for id in ids {
+            if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
+                self.request_close_tab(ix, window, cx);
+            }
+        }
+    }
+
     fn on_next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.active {
             let next = (ix + 1) % self.tabs.len();
@@ -519,14 +628,10 @@ impl Workspace {
                 .into_any_element(),
         };
 
-        let indicator = div()
-            .size(px(7.0))
-            .flex_shrink_0()
-            .rounded_full()
-            .when(dirty, |el| el.bg(t.dirty));
-
+        let tab_id = tab.id;
         h_flex()
             .id(tab.id)
+            .flex_shrink_0()
             .gap_2()
             .px_3()
             .h_full()
@@ -542,9 +647,24 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(move |ws, _, window, cx| ws.activate_tab(ix, window, cx)),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    ws.tab_menu = Some(TabMenu { tab_id, pos: ev.position });
+                    cx.notify();
+                }),
+            )
             .child(icon)
             .child(title)
-            .child(indicator)
+            .when(dirty, |el| {
+                el.child(
+                    div()
+                        .size(px(7.0))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(t.dirty),
+                )
+            })
             .child(
                 svg()
                     .path(IconName::Close.path())
@@ -562,14 +682,321 @@ impl Workspace {
             )
     }
 
+    fn render_context_menu(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.tab_menu.as_ref()?;
+        let tab_id = menu.tab_id;
+        let pos = menu.pos;
+
+        let tab_ix = self.tabs.iter().position(|t| t.id == tab_id)?;
+        let path = self.tabs.get(tab_ix)
+            .and_then(|t| t.editor())
+            .map(|e| e.read(cx).doc.path.clone())
+            .filter(|p| !p.as_os_str().is_empty());
+        let has_path = path.is_some();
+        let tab_count = self.tabs.len();
+        let has_left = tab_ix > 0;
+        let has_right = tab_ix + 1 < tab_count;
+        let has_others = tab_count > 1;
+        let root = self.root_folder.clone();
+
+        // ── helper: build a single menu row ──────────────────────────────────
+        let row = |label: &'static str, enabled: bool, t: &RuntimeTheme| {
+            h_flex()
+                .id(label)
+                .px(px(12.))
+                .py(px(4.))
+                .gap_2()
+                .font_family(t.ui_family.clone())
+                .text_size(px(t.font_size_caption))
+                .text_color(if enabled { t.text } else { t.text_subtle })
+                .when(enabled, |el| el.cursor_pointer().hover(|el| el.bg(t.line_highlight)))
+        };
+        let sep = || div().h(px(1.)).mx(px(4.)).my(px(2.)).bg(t.separator);
+
+        // ── close group ──────────────────────────────────────────────────────
+        let close_item = row("Close", true, t)
+            .on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
+                ws.tab_menu = None;
+                if let Some(ix) = ws.tabs.iter().position(|t| t.id == tab_id) {
+                    ws.request_close_tab(ix, window, cx);
+                }
+            }));
+
+        let close_others = row("Close Others", has_others, t)
+            .when(has_others, |el| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
+                ws.tab_menu = None;
+                ws.close_other_tabs(tab_id, window, cx);
+            })));
+
+        let close_all = row("Close All", true, t)
+            .on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
+                ws.tab_menu = None;
+                ws.close_all_tabs(window, cx);
+            }));
+
+        let close_left = row("Close to the Left", has_left, t)
+            .when(has_left, |el| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
+                ws.tab_menu = None;
+                ws.close_tabs_to_left(tab_id, window, cx);
+            })));
+
+        let close_right = row("Close to the Right", has_right, t)
+            .when(has_right, |el| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
+                ws.tab_menu = None;
+                ws.close_tabs_to_right(tab_id, window, cx);
+            })));
+
+        // ── copy group ───────────────────────────────────────────────────────
+        let copy_path = row("Copy Path", has_path, t)
+            .when(has_path, {
+                let p = path.clone().unwrap();
+                |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
+                    ws.tab_menu = None;
+                    cx.write_to_clipboard(ClipboardItem::new_string(p.display().to_string()));
+                    cx.notify();
+                }))
+            });
+
+        let copy_rel = row("Copy Relative Path", has_path, t)
+            .when(has_path, {
+                let rel = match (&root, &path) {
+                    (Some(r), Some(p)) => p.strip_prefix(r).ok()
+                        .map(|rel| rel.display().to_string())
+                        .unwrap_or_else(|| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                    (None, Some(p)) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
+                    ws.tab_menu = None;
+                    cx.write_to_clipboard(ClipboardItem::new_string(rel.clone()));
+                    cx.notify();
+                }))
+            });
+
+        // ── reveal group ─────────────────────────────────────────────────────
+        let reveal_finder = row("Reveal in Finder", has_path, t)
+            .when(has_path, {
+                let p = path.clone().unwrap();
+                |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
+                    ws.tab_menu = None;
+                    cx.reveal_path(&p);
+                    cx.notify();
+                }))
+            });
+
+        let reveal_explorer = row("Reveal in File Explorer", has_path, t)
+            .when(has_path, {
+                let p = path.clone().unwrap();
+                |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
+                    ws.tab_menu = None;
+                    ws.sidebar.open = true;
+                    ws.sidebar.active = crate::sidebar::SidebarItemKind::Explorer;
+                    let path = p.clone();
+                    ws.reveal_in_tree(&path, cx);
+                    cx.notify();
+                }))
+            });
+
+        let menu_div = v_flex()
+            .id("tab-ctx-menu")
+            .occlude()
+            .on_mouse_down_out(cx.listener(|ws, _, _, cx| {
+                ws.tab_menu = None;
+                cx.notify();
+            }))
+            .bg(t.bg_overlay)
+            .border_1()
+            .border_color(t.border)
+            .rounded(px(t.radius_md))
+            .py(px(4.))
+            .min_w(px(200.))
+            .child(close_item)
+            .child(close_others)
+            .child(close_all)
+            .child(close_left)
+            .child(close_right)
+            .child(sep())
+            .child(copy_path)
+            .child(copy_rel)
+            .child(sep())
+            .child(reveal_finder)
+            .child(reveal_explorer);
+
+        Some(
+            deferred(anchored().position(pos).snap_to_window().child(menu_div))
+                .with_priority(1)
+                .into_any_element(),
+        )
+    }
+
     fn render_tab_bar(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
+        div()
+            .id("tab-bar")
+            .flex()
+            .flex_row()
             .h(px(30.0))
             .flex_shrink_0()
+            .overflow_x_scroll()
             .bg(t.bg_elevated)
             .border_b_1()
             .border_color(t.separator)
             .children((0..self.tabs.len()).map(|ix| self.render_tab(ix, t, cx)))
+    }
+
+    fn render_titlebar(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> impl IntoElement {
+        let sidebar_open = self.sidebar.open;
+        let bottom_open = self.bottom_open;
+        let right_open = self.right_open;
+        let hover_bg = t.line_highlight;
+        let active_bg = t.line_highlight;
+        let accent = t.accent;
+        let text_subtle = t.text_subtle;
+        let radius = t.radius_sm;
+
+        let make_btn = |id: &'static str, icon: IconName, active: bool, color: gpui::Hsla| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(28.))
+                .rounded(px(radius))
+                .cursor_pointer()
+                .when(active, move |el| el.bg(active_bg))
+                .hover(move |s| s.bg(hover_bg))
+                .child(svg().path(icon.path()).size(px(15.)).text_color(color))
+        };
+
+        let left_btn = make_btn(
+            "titlebar-left-panel",
+            IconName::PanelLeft,
+            sidebar_open,
+            if sidebar_open { accent } else { text_subtle },
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|ws, _, window, cx| {
+                cx.stop_propagation();
+                ws.on_toggle_sidebar(&ToggleSidebar, window, cx);
+            }),
+        );
+
+        let right_btn = make_btn(
+            "titlebar-right-panel",
+            IconName::PanelRight,
+            right_open,
+            if right_open { accent } else { text_subtle },
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|ws, _, window, cx| {
+                cx.stop_propagation();
+                ws.on_toggle_right_panel(&ToggleRightPanel, window, cx);
+            }),
+        );
+
+        let bottom_btn = make_btn(
+            "titlebar-bottom-panel",
+            IconName::PanelBottom,
+            bottom_open,
+            if bottom_open { accent } else { text_subtle },
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|ws, _, window, cx| {
+                cx.stop_propagation();
+                ws.on_toggle_bottom_panel(&ToggleBottomPanel, window, cx);
+            }),
+        );
+
+        let settings_btn = make_btn("titlebar-settings", IconName::Settings, false, text_subtle)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ws, _, window, cx| {
+                    cx.stop_propagation();
+                    ws.on_open_settings(&OpenSettings, window, cx);
+                }),
+            );
+
+        h_flex()
+            .id("titlebar")
+            .h(px(36.))
+            .flex_shrink_0()
+            .px_2()
+            .bg(t.bg_elevated)
+            .border_b_1()
+            .border_color(t.separator)
+            .on_mouse_down(MouseButton::Left, |_, window, _cx| {
+                window.start_window_move();
+            })
+            .child(div().w(px(72.)).flex_shrink_0())
+            .child(div().flex_1())
+            .child(h_flex().gap_1().child(left_btn).child(right_btn).child(bottom_btn).child(settings_btn))
+            .child(div().w_2())
+    }
+
+    fn render_right_panel(&self, t: &RuntimeTheme) -> impl IntoElement {
+        v_flex()
+            .w(px(240.))
+            .flex_shrink_0()
+            .h_full()
+            .bg(t.bg_elevated)
+            .border_l_1()
+            .border_color(t.separator)
+            .child(
+                div()
+                    .px_3()
+                    .h(px(30.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .text_size(px(t.font_size_caption))
+                    .text_color(t.text_muted)
+                    .font_family(t.ui_family.clone())
+                    .child("Panel"),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(t.font_size_caption))
+                    .text_color(t.text_muted)
+                    .font_family(t.ui_family.clone())
+                    .child("Coming soon"),
+            )
+    }
+
+    fn render_bottom_panel(&self, t: &RuntimeTheme) -> impl IntoElement {
+        v_flex()
+            .w_full()
+            .h(px(180.))
+            .flex_shrink_0()
+            .bg(t.bg_elevated)
+            .border_t_1()
+            .border_color(t.separator)
+            .child(
+                div()
+                    .px_3()
+                    .h(px(30.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .text_size(px(t.font_size_caption))
+                    .text_color(t.text_muted)
+                    .font_family(t.ui_family.clone())
+                    .child("Terminal"),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(t.font_size_caption))
+                    .text_color(t.text_muted)
+                    .font_family(t.ui_family.clone())
+                    .child("Coming soon"),
+            )
     }
 }
 
@@ -589,19 +1016,7 @@ impl Render for Workspace {
                 TabContent::Settings(s) => s.clone().into_any_element(),
             });
 
-        let main = v_flex()
-            .flex_1()
-            .min_w(px(0.))
-            .h_full()
-            .child(self.render_tab_bar(&t, cx))
-            .map(|el| match content {
-                Some(view) => el.child(div().flex_1().min_h(px(0.)).child(view)),
-                None => el.child(render_welcome(&t)),
-            });
-
-        div()
-            .flex()
-            .flex_row()
+        let base = div()
             .size_full()
             .bg(t.bg)
             .key_context("Workspace")
@@ -616,10 +1031,78 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_close_file))
             .on_action(cx.listener(Self::on_close_folder))
             .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_toggle_bottom_panel))
+            .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_quit))
+            .when(self.sidebar_resizing, |el| {
+                el.on_mouse_move(cx.listener(|ws, event: &MouseMoveEvent, _, cx| {
+                    use crate::sidebar::ACTIVITY_BAR_W;
+                    let x = f32::from(event.position.x);
+                    ws.sidebar.width = (x - ACTIVITY_BAR_W).clamp(160.0, 600.0);
+                    cx.notify();
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|ws, _, _, cx| {
+                        ws.sidebar_resizing = false;
+                        cx.notify();
+                    }),
+                )
+            })
+            .when(self.tree_scrollbar_drag.is_some(), |el| {
+                el.on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, _, cx| {
+                    if let Some(ref drag) = ws.tree_scrollbar_drag {
+                        let handle = ws.tree_scroll.0.borrow().base_handle.clone();
+                        update_drag(drag, ev, &handle);
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|ws, _, _, cx| {
+                    ws.tree_scrollbar_drag = None;
+                    cx.notify();
+                }))
+            });
+
+        // Empty state: minimal UI — just the welcome screen, no chrome.
+        if content.is_none() {
+            return base.flex().items_center().justify_center().child(render_welcome(&t)).into_any();
+        }
+
+        let main = v_flex()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .child(self.render_tab_bar(&t, cx))
+            .child(div().flex_1().min_h(px(0.)).child(content.expect("checked above")));
+
+        let body_row = h_flex()
+            .flex_1()
+            .min_h(px(0.))
             .child(self.render_activity_bar(&t, cx))
-            .when(self.sidebar.open, |el| el.child(self.render_sidebar_panel(&t, cx)))
+            .when(self.sidebar.open, |el| {
+                el.child(self.render_sidebar_panel(&t, cx))
+                    .child(self.render_sidebar_resize_handle(&t, cx))
+            })
             .child(main)
+            .when(self.right_open, |el| el.child(self.render_right_panel(&t)));
+
+        let body = v_flex()
+            .flex_1()
+            .min_h(px(0.))
+            .child(body_row)
+            .when(self.bottom_open, |el| el.child(self.render_bottom_panel(&t)));
+
+        let root = base
+            .flex()
+            .flex_col()
+            .child(self.render_titlebar(&t, cx))
+            .child(body)
+            .map(|el| match self.render_context_menu(&t, cx) {
+                Some(menu) => el.child(menu),
+                None => el,
+            });
+
+        root.into_any()
     }
 }

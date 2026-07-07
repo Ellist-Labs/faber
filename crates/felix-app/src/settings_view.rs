@@ -30,6 +30,10 @@ enum SettingControl {
         get: fn(&Settings) -> f32,
         set: fn(&mut Settings, f32),
     },
+    Toggle {
+        get: fn(&Settings) -> bool,
+        set: fn(&mut Settings, bool),
+    },
 }
 
 struct SettingEntry {
@@ -49,6 +53,15 @@ fn sections() -> Vec<SettingsSectionDef> {
         SettingsSectionDef {
             title: "Editor",
             entries: vec![
+                SettingEntry {
+                    title: "Line Numbers",
+                    description: "Show line numbers in the gutter.",
+                    enabled: |_| true,
+                    control: SettingControl::Toggle {
+                        get: |s| s.line_numbers,
+                        set: |s, v| s.line_numbers = v,
+                    },
+                },
                 SettingEntry {
                     title: "Auto Save",
                     description: "Controls when dirty files are saved automatically.",
@@ -93,19 +106,30 @@ fn sections() -> Vec<SettingsSectionDef> {
         },
         SettingsSectionDef {
             title: "Appearance",
-            entries: vec![SettingEntry {
-                title: "Font Size",
-                description: "Base font size in pixels; the entire application scales from it.",
-                enabled: |_| true,
-                control: SettingControl::Stepper {
-                    min: 10.0,
-                    max: 24.0,
-                    step: 1.0,
-                    unit: "px",
-                    get: |s| s.font_size,
-                    set: |s, v| s.font_size = v,
+            entries: vec![
+                SettingEntry {
+                    title: "Font Size",
+                    description: "Base font size in pixels; the entire application scales from it.",
+                    enabled: |_| true,
+                    control: SettingControl::Stepper {
+                        min: 10.0,
+                        max: 24.0,
+                        step: 1.0,
+                        unit: "px",
+                        get: |s| s.font_size,
+                        set: |s, v| s.font_size = v,
+                    },
                 },
-            }],
+                SettingEntry {
+                    title: "Scrollbar",
+                    description: "Show an interactive scrollbar on scrollable views.",
+                    enabled: |_| true,
+                    control: SettingControl::Toggle {
+                        get: |s| s.show_scrollbar,
+                        set: |s, v| s.show_scrollbar = v,
+                    },
+                },
+            ],
         },
     ]
 }
@@ -212,6 +236,38 @@ impl SettingsView {
                     .child(stepper_button("inc", IconName::Add, step))
                     .into_any_element()
             }
+            SettingControl::Toggle { get, set } => {
+                let on = get(settings);
+                h_flex()
+                    .rounded(px(t.radius_md))
+                    .border_1()
+                    .border_color(t.border)
+                    .children([("On", true), ("Off", false)].iter().map(|&(label, value)| {
+                        let is_current = on == value;
+                        div()
+                            .id((label, entry_ix))
+                            .px_3()
+                            .py_1()
+                            .text_size(px(t.font_size_caption))
+                            .when(is_current, |el| el.bg(t.accent).text_color(t.text_on_accent))
+                            .when(!is_current && enabled, |el| {
+                                el.text_color(t.text_muted)
+                                    .cursor_pointer()
+                                    .hover(|el| el.bg(t.line_highlight).text_color(t.text))
+                            })
+                            .when(!enabled, |el| el.text_color(t.text_disabled))
+                            .when(enabled && !is_current, |el| {
+                                el.on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |view, _, _, cx| {
+                                        view.apply_change(|s| set(s, value), cx)
+                                    }),
+                                )
+                            })
+                            .child(label)
+                    }))
+                    .into_any_element()
+            }
         }
     }
 
@@ -223,7 +279,9 @@ impl SettingsView {
         t: &RuntimeTheme,
         cx: &mut Context<Self>,
     ) -> Div {
-        h_flex()
+        div()
+            .flex()
+            .flex_wrap()
             .justify_between()
             .items_start()
             .gap_4()
@@ -231,7 +289,8 @@ impl SettingsView {
             .child(
                 v_flex()
                     .gap_1()
-                    .max_w(px(420.0))
+                    .flex_1()
+                    .min_w(px(200.0))
                     .child(
                         div()
                             .text_size(px(t.font_size_body))
@@ -245,7 +304,11 @@ impl SettingsView {
                             .child(entry.description),
                     ),
             )
-            .child(self.render_control(entry_ix, entry, settings, t, cx))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .child(self.render_control(entry_ix, entry, settings, t, cx))
+            )
     }
 }
 
@@ -289,6 +352,7 @@ impl Render for SettingsView {
             .font_family(t.ui_family.clone())
             .child(
                 v_flex()
+                    .w_full()
                     .max_w(px(720.0))
                     .mx_auto()
                     .px_8()
