@@ -13,8 +13,8 @@ use faber_editor::{
 use gpui::{
     AnyElement, App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyDownEvent, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, prelude::*, px,
-    svg, uniform_list,
+    Render, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, UniformListScrollHandle,
+    Window, deferred, div, prelude::*, px, svg, uniform_list,
 };
 
 use crate::markdown_preview::MarkdownPreviewView;
@@ -28,6 +28,9 @@ use rust_i18n::t;
 // Line height and char width live on RuntimeTheme (settings-scaled).
 
 const GUTTER_COLS: f32 = 6.0;
+/// Max lines in a markdown file before switching back to the horizontal-scroll
+/// virtualized path. Above this cap wrapping is too expensive without a display map.
+const WRAP_LINE_CAP: usize = 5_000;
 
 // ── actions ────────────────────────────────────────────────────────────────────
 
@@ -90,6 +93,19 @@ pub struct EditorView {
 
     pub scrollbar_drag: Option<ScrollbarDrag>,
 
+    // Non-virtualized markdown wrap scroll handle (used when is_wrap_mode())
+    pub md_scroll: ScrollHandle,
+    // Cached top visible line — used to avoid redundant cx.notify() on scroll
+    last_top_line: usize,
+
+    // Outline overlay (heading navigator for markdown files)
+    pub outline_open: bool,
+    pub outline_query: String,
+    pub outline_cursor: usize,           // caret position in the query input
+    pub outline_hover: Option<usize>,    // index into the filtered list
+    pub outline_highlight: Option<(usize, usize)>, // (start_line, end_line) of hovered section
+    pub outline_handle: FocusHandle,
+
     // Cursor blink
     pub cursor_blink_on: bool,
     cursor_blink_epoch: u64,
@@ -136,6 +152,14 @@ impl EditorView {
             search_whole_word: false,
             search_regex: false,
             scrollbar_drag: None,
+            md_scroll: ScrollHandle::new(),
+            last_top_line: 0,
+            outline_open: false,
+            outline_query: String::new(),
+            outline_cursor: 0,
+            outline_hover: None,
+            outline_highlight: None,
+            outline_handle: cx.focus_handle(),
             cursor_blink_on: true,
             cursor_blink_epoch: 0,
         };
@@ -174,6 +198,46 @@ impl EditorView {
         let len = self.doc.len_chars();
         self.sel.head = self.sel.head.min(len);
         self.sel.anchor = self.sel.anchor.min(len);
+    }
+
+    /// True when this is a markdown file small enough for non-virtualized word-wrap.
+    fn is_wrap_mode(&self) -> bool {
+        self.is_markdown() && self.doc.len_lines() <= WRAP_LINE_CAP
+    }
+
+    /// Scroll to `line` on whichever scroll handle is active.
+    fn scroll_to_line(&self, line: usize) {
+        if self.is_wrap_mode() {
+            self.md_scroll.scroll_to_item(line);
+        } else {
+            self.scroll_handle.scroll_to_item(line, ScrollStrategy::Center);
+        }
+    }
+
+    /// Top visible logical line, read from whichever scroll handle is active.
+    fn top_visible_line(&self, t: &RuntimeTheme) -> usize {
+        if self.is_wrap_mode() {
+            self.md_scroll.top_item()
+        } else {
+            let off = self.scroll_handle.0.borrow().base_handle.offset();
+            let y = f32::from(off.y);
+            // offset.y is ≤ 0 when scrolled down; negate to get pixels scrolled
+            (-y / t.line_height_code).floor().max(0.0) as usize
+        }
+    }
+
+    /// Build a breadcrumb heading stack from the outline and the current top line.
+    /// Returns only the `text` fields of headings whose source_line ≤ top_line,
+    /// maintaining a stack that drops shallower entries when a deeper one arrives.
+    fn breadcrumb_stack(outline: &[OutlineEntry], top_line: usize) -> Vec<String> {
+        let mut stack: Vec<(u8, String)> = Vec::new();
+        for e in outline.iter().take_while(|e| e.source_line <= top_line) {
+            while stack.last().map_or(false, |(lvl, _)| *lvl >= e.level) {
+                stack.pop();
+            }
+            stack.push((e.level, e.text.clone()));
+        }
+        stack.into_iter().map(|(_, t)| t).collect()
     }
 
     /// Post-mutation bookkeeping — every document edit funnels through here.
@@ -426,6 +490,56 @@ impl EditorView {
         Some(self.line_starts[line] + col)
     }
 
+    /// Char-offset from a click in the non-virtualized wrap path.
+    /// Mirrors ScrollHandle::top_item logic: offset.y ≤ 0 when scrolled, so
+    /// lookup_y = mouse_y - offset_y maps screen coords back to layout space.
+    fn offset_at_wrap(
+        &self,
+        p: gpui::Point<gpui::Pixels>,
+        t: &RuntimeTheme,
+        show_line_numbers: bool,
+    ) -> Option<usize> {
+        let vb = self.md_scroll.bounds();
+        if vb.size.width == gpui::Pixels::ZERO {
+            return None;
+        }
+        let line_count = self.doc.len_lines();
+        if line_count == 0 {
+            return None;
+        }
+
+        // offset.y ≤ 0 when scrolled down.
+        // lookup_y maps the mouse screen-y back to the original layout-space y,
+        // matching how ScrollHandle::top_item computes: `top = bounds.top() - offset.y`.
+        let offset_y = f32::from(self.md_scroll.offset().y);
+        let lookup_y = f32::from(p.y) - offset_y;
+
+        // Binary search over line bounds (bounds_for_item returns original layout coords).
+        let mut lo = 0usize;
+        let mut hi = line_count;
+        let line = loop {
+            if lo >= hi { break lo.min(line_count.saturating_sub(1)); }
+            let mid = lo + (hi - lo) / 2;
+            match self.md_scroll.bounds_for_item(mid) {
+                None => break 0,
+                Some(b) if lookup_y < f32::from(b.top()) => {
+                    if mid == 0 { break 0; }
+                    hi = mid;
+                }
+                Some(b) if lookup_y >= f32::from(b.bottom()) => lo = mid + 1,
+                _ => break mid,
+            }
+        };
+
+        let gutter_px = if show_line_numbers { (GUTTER_COLS + 2.0) * t.char_w_code } else { 0.0 };
+        // 8.0 = px_2() left padding applied to each line row in wrap mode
+        let rel_x = (f32::from(p.x) - f32::from(vb.origin.x) - 8.0 - gutter_px).max(0.0);
+        let raw = self.doc.rope.line(line).to_string();
+        let content_chars = raw.trim_end_matches(['\n', '\r']).chars().count();
+        let col = ((rel_x / t.char_w_code).floor() as usize).min(content_chars);
+        Some(self.line_starts[line] + col)
+    }
+
     fn on_mouse_down_editor(
         &mut self,
         ev: &MouseDownEvent,
@@ -435,7 +549,11 @@ impl EditorView {
         window.focus(&self.focus_handle);
         let t = cx.global::<RuntimeTheme>().clone();
         let show_line_numbers = cx.global::<SettingsStore>().0.line_numbers;
-        let Some(offset) = self.offset_at(ev.position, &t, show_line_numbers) else { return };
+        let Some(offset) = (if self.is_wrap_mode() {
+            self.offset_at_wrap(ev.position, &t, show_line_numbers)
+        } else {
+            self.offset_at(ev.position, &t, show_line_numbers)
+        }) else { return };
         if ev.modifiers.shift {
             let goal_col = cursor::col_of(&self.doc.rope, offset);
             self.sel = Selection {
@@ -995,6 +1113,12 @@ impl EditorView {
         // before GPUI keybinding dispatch fires. Handle here to guarantee execution.
         if ks.modifiers.platform && !ks.modifiers.control && !ks.modifiers.alt {
             if ks.key.as_str() == "backspace" && !ks.modifiers.shift {
+                if self.outline_open && self.outline_handle.is_focused(window) {
+                    self.outline_query.clear();
+                    self.outline_cursor = 0;
+                    cx.notify();
+                    return;
+                }
                 if self.show_search && self.search_handle.is_focused(window) {
                     self.search_query.clear();
                     self.search_cursor = 0;
@@ -1018,6 +1142,67 @@ impl EditorView {
                 _ => {}
             }
         }
+        // Outline overlay key handling — escape first (regardless of which child has focus)
+        if self.outline_open && ks.key_char.is_none() && ks.key.as_str() == "escape" {
+            self.outline_open = false;
+            self.outline_highlight = None;
+            self.outline_hover = None;
+            window.focus(&self.focus_handle);
+            cx.notify();
+            return;
+        }
+        if self.outline_open && self.outline_handle.is_focused(window) {
+            let Some(ref raw_text) = ks.key_char else {
+                match ks.key.as_str() {
+                    "escape" => { /* handled above */ }
+                    "backspace" => {
+                        if self.outline_cursor > 0 {
+                            self.outline_query = delete_char_before(&self.outline_query, self.outline_cursor);
+                            self.outline_cursor = self.outline_cursor.saturating_sub(1);
+                            self.outline_hover = None;
+                            cx.notify();
+                        }
+                    }
+                    "left" => {
+                        if self.outline_cursor > 0 {
+                            self.outline_cursor -= 1;
+                            cx.notify();
+                        }
+                    }
+                    "right" => {
+                        let max = self.outline_query.chars().count();
+                        if self.outline_cursor < max {
+                            self.outline_cursor += 1;
+                            cx.notify();
+                        }
+                    }
+                    "enter" => {
+                        let q = self.outline_query.to_lowercase();
+                        let first_line = self.outline.iter().find(|e| {
+                            q.is_empty() || e.text.to_lowercase().contains(&q)
+                        }).map(|e| e.source_line);
+                        if let Some(line) = first_line {
+                            self.scroll_to_line(line);
+                        }
+                        self.outline_open = false;
+                        self.outline_highlight = None;
+                        self.outline_hover = None;
+                        window.focus(&self.focus_handle);
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+                return;
+            };
+            if ks.modifiers.control || ks.modifiers.platform { return; }
+            if raw_text.chars().any(|c| c.is_control()) { return; }
+            self.outline_query = insert_at(&self.outline_query, self.outline_cursor, raw_text);
+            self.outline_cursor += raw_text.chars().count();
+            self.outline_hover = None;
+            cx.notify();
+            return;
+        }
+
         let Some(ref raw_text) = ks.key_char else { return };
         if ks.modifiers.control || ks.modifiers.platform {
             return;
@@ -1054,8 +1239,19 @@ impl EditorView {
 
     // ── rendering helpers ──────────────────────────────────────────────────────
 
-    /// Render one line. `cursor_visible` controls whether the cursor beam is painted.
-    fn render_line(&self, line_idx: usize, t: &RuntimeTheme, show_line_numbers: bool, cursor_visible: bool) -> AnyElement {
+    /// Render one line.
+    /// - `cursor_visible`: whether the cursor beam is painted.
+    /// - `wrap`: use flex-wrap and min-h instead of fixed row height (for markdown wrap mode).
+    /// - `outline_hl`: if this line falls within the range, apply a subtle section highlight.
+    fn render_line(
+        &self,
+        line_idx: usize,
+        t: &RuntimeTheme,
+        show_line_numbers: bool,
+        cursor_visible: bool,
+        wrap: bool,
+        outline_hl: Option<(usize, usize)>,
+    ) -> AnyElement {
         let line_char_start = self.line_starts[line_idx];
         let next_line_start = self
             .line_starts
@@ -1082,12 +1278,16 @@ impl EditorView {
             .unwrap_or(&[]);
         let has_spans = !raw_spans.is_empty();
 
+        let hl_this_line = outline_hl.map_or(false, |(s, e)| line_idx >= s && line_idx < e);
+
         // ── Fast path: no decoration at all ───────────────────────────────────
         if !cursor_on_line && !has_sel && !has_match && !has_spans {
             let row = div()
                 .flex()
                 .flex_row()
-                .h(px(t.line_height_code))
+                .when(!wrap, |r| r.h(px(t.line_height_code)))
+                .when(wrap, |r| r.w_full().px_2().min_h(px(t.line_height_code)).flex_wrap())
+                .when(hl_this_line, |r| r.bg(t.line_highlight))
                 .font_family(t.mono_family.clone())
                 .text_size(px(t.font_size_code))
                 .text_color(t.text);
@@ -1201,9 +1401,18 @@ impl EditorView {
                 .unwrap_or(t.text);
 
             let seg_text: String = line_chars[seg_start..seg_end].iter().collect();
-            let seg_div = div().flex_shrink_0().text_color(fg_color).child(seg_text);
-            let seg_div = if let Some(color) = bg_color { seg_div.bg(color) } else { seg_div };
-            content_children.push(seg_div.into_any());
+            if wrap {
+                // Split at whitespace boundaries so flex_wrap can break between words.
+                for word in split_words_for_wrap(&seg_text) {
+                    let d = div().text_color(fg_color).child(word);
+                    let d = if let Some(color) = bg_color { d.bg(color) } else { d };
+                    content_children.push(d.into_any());
+                }
+            } else {
+                let seg_div = div().flex_shrink_0().text_color(fg_color).child(seg_text);
+                let seg_div = if let Some(color) = bg_color { seg_div.bg(color) } else { seg_div };
+                content_children.push(seg_div.into_any());
+            }
         }
         if cursor_on_line && cursor_col == line_char_count {
             let cursor_color = if cursor_visible { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
@@ -1212,11 +1421,18 @@ impl EditorView {
             );
         }
 
-        let content = div().flex().flex_row().flex_1().children(content_children);
+        let content = div()
+            .flex()
+            .flex_row()
+            .when(wrap, |d| d.flex_wrap())
+            .flex_1()
+            .children(content_children);
         let row = div()
             .flex()
             .flex_row()
-            .h(px(t.line_height_code))
+            .when(!wrap, |r| r.h(px(t.line_height_code)))
+            .when(wrap, |r| r.w_full().px_2().min_h(px(t.line_height_code)).flex_wrap())
+            .when(hl_this_line, |r| r.bg(t.line_highlight))
             .font_family(t.mono_family.clone())
             .text_size(px(t.font_size_code));
         let row = if show_line_numbers {
@@ -1669,6 +1885,66 @@ impl Render for EditorView {
             }
         };
 
+        // Breadcrumb: compute the heading stack at the current top visible line.
+        let top_line = self.top_visible_line(&t);
+        let crumb_stack = if is_md && !self.outline.is_empty() {
+            Self::breadcrumb_stack(&self.outline, top_line)
+        } else {
+            vec![]
+        };
+
+        // Build the full breadcrumb label: "path/to/file.md › H1 › H2"
+        let breadcrumb_text = if crumb_stack.is_empty() {
+            path_label.clone()
+        } else {
+            format!("{} › {}", path_label, crumb_stack.join(" › "))
+        };
+
+        let can_open_outline = is_md && !self.outline.is_empty();
+        let crumb_color = if can_open_outline { t.text_subtle } else { t.text_subtle };
+        let crumb_hover_bg = t.line_highlight;
+        let outline_active = self.outline_open;
+
+        let breadcrumb_label = div()
+            .id("editor-breadcrumb")
+            .flex()
+            .flex_row()
+            .items_center()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .px_1()
+            .py(px(1.))
+            .rounded(px(t.radius_sm))
+            .font_family(t.ui_family.clone())
+            .text_size(px(t.font_size_caption))
+            .text_color(crumb_color)
+            .when(outline_active, |el| el.bg(crumb_hover_bg))
+            .when(can_open_outline, |el| {
+                el.cursor_pointer().hover(move |s| s.bg(crumb_hover_bg))
+            })
+            .when(can_open_outline, |el| {
+                el.on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| {
+                    v.outline_open = !v.outline_open;
+                    v.outline_query.clear();
+                    v.outline_cursor = 0;
+                    v.outline_hover = None;
+                    if v.outline_open {
+                        window.focus(&v.outline_handle);
+                    } else {
+                        window.focus(&v.focus_handle);
+                    }
+                    cx.notify();
+                }))
+            })
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .pr_2()
+                    .child(breadcrumb_text),
+            );
+
         let search_icon_color = if self.show_search { t.accent } else { t.text_subtle };
         let search_btn = div()
             .id("header-search")
@@ -1695,13 +1971,7 @@ impl Render for EditorView {
             .bg(t.bg_elevated)
             .border_b_1()
             .border_color(t.separator)
-            .child(
-                div()
-                    .font_family(t.ui_family.clone())
-                    .text_size(px(t.font_size_caption))
-                    .text_color(t.text_subtle)
-                    .child(path_label),
-            )
+            .child(breadcrumb_label)
             .child(
                 div()
                     .flex()
@@ -1716,56 +1986,110 @@ impl Render for EditorView {
         let cursor_line = self.doc.rope.char_to_line(self.sel.head.min(self.doc.len_chars().saturating_sub(1)));
         if cursor_line != self.last_scroll_line {
             self.last_scroll_line = cursor_line;
-            self.scroll_handle.scroll_to_item(cursor_line, ScrollStrategy::Center);
+            self.scroll_to_line(cursor_line);
         }
 
         let settings = &cx.global::<SettingsStore>().0;
         let show_line_numbers = settings.line_numbers;
         let show_scrollbar = settings.show_scrollbar;
 
-        let editor_base_handle = self.scroll_handle.0.borrow().base_handle.clone();
         let is_dragging = self.scrollbar_drag.is_some();
+        let outline_hl = self.outline_highlight;
+        let use_wrap = self.is_wrap_mode();
 
-        let editor_scrollbar = render_scrollbar(
-            "editor-scrollbar",
-            "editor-scrollbar-thumb",
-            &editor_base_handle,
-            show_scrollbar,
-            is_dragging,
-            cx.listener(|view, ev: &MouseDownEvent, _, cx| {
-                let handle = view.scroll_handle.0.borrow().base_handle.clone();
-                view.scrollbar_drag = Some(start_drag(ev, &handle));
-                cx.notify();
-            }),
-            &t,
-        );
-
-        let entity = cx.entity();
-        let t2 = t.clone();
-        let widest = self.widest_line;
-        let content = uniform_list(
-            "editor-lines",
-            line_count,
-            move |range: std::ops::Range<usize>, _window, cx| {
-                let view = entity.read(cx);
-                range.map(|i| view.render_line(i, &t2, show_line_numbers, cursor_visible)).collect::<Vec<AnyElement>>()
-            },
-        )
-        .flex_1()
-        .px_2()
-        .bg(t.bg)
-        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-        .with_width_from_item(Some(widest))
-        .track_scroll(self.scroll_handle.clone())
-        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down_editor));
-
-        let editor_pane = div()
-            .flex()
-            .flex_row()
+        let editor_pane = if use_wrap {
+            // ── Non-virtualized word-wrap path (markdown, ≤WRAP_LINE_CAP lines) ──
+            // Lines are direct children of the scroll div so top_item() maps 1:1 to logical lines.
+            let md_scroll = self.md_scroll.clone();
+            let md_scroll_ref = self.md_scroll.clone();
+            let t_wrap = t.clone();
+            let all_lines: Vec<AnyElement> = (0..line_count)
+                .map(|i| self.render_line(i, &t_wrap, show_line_numbers, cursor_visible, true, outline_hl))
+                .collect();
+            let wrapped = div()
+                .id("md-wrap-scroll")
+                .flex_1()
+                .flex_col()
+                .min_h(px(0.))
+                .overflow_y_scroll()
+                .bg(t.bg)
+                .track_scroll(&md_scroll)
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down_editor))
+                .on_scroll_wheel(cx.listener(|view, _ev: &ScrollWheelEvent, _, cx| {
+                    let new_top = view.md_scroll.top_item();
+                    if new_top != view.last_top_line {
+                        view.last_top_line = new_top;
+                        cx.notify();
+                    }
+                }))
+                .children(all_lines);
+            let md_scrollbar = render_scrollbar(
+                "md-scrollbar",
+                "md-scrollbar-thumb",
+                &md_scroll_ref,
+                show_scrollbar,
+                is_dragging,
+                cx.listener(|view, ev: &MouseDownEvent, _, cx| {
+                    view.scrollbar_drag = Some(start_drag(ev, &view.md_scroll.clone()));
+                    cx.notify();
+                }),
+                &t,
+            );
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(wrapped))
+                .child(md_scrollbar)
+        } else {
+            // ── Virtualized horizontal-scroll path (all other files + large .md) ──
+            let editor_base_handle = self.scroll_handle.0.borrow().base_handle.clone();
+            let editor_scrollbar = render_scrollbar(
+                "editor-scrollbar",
+                "editor-scrollbar-thumb",
+                &editor_base_handle,
+                show_scrollbar,
+                is_dragging,
+                cx.listener(|view, ev: &MouseDownEvent, _, cx| {
+                    let handle = view.scroll_handle.0.borrow().base_handle.clone();
+                    view.scrollbar_drag = Some(start_drag(ev, &handle));
+                    cx.notify();
+                }),
+                &t,
+            );
+            let entity = cx.entity();
+            let t2 = t.clone();
+            let widest = self.widest_line;
+            let content = uniform_list(
+                "editor-lines",
+                line_count,
+                move |range: std::ops::Range<usize>, _window, cx| {
+                    let view = entity.read(cx);
+                    range.map(|i| view.render_line(i, &t2, show_line_numbers, cursor_visible, false, outline_hl)).collect::<Vec<AnyElement>>()
+                },
+            )
             .flex_1()
-            .min_h(px(0.))
-            .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(content))
-            .child(editor_scrollbar);
+            .px_2()
+            .bg(t.bg)
+            .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+            .with_width_from_item(Some(widest))
+            .track_scroll(self.scroll_handle.clone())
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down_editor))
+            .on_scroll_wheel(cx.listener(|view, _ev: &ScrollWheelEvent, _, cx| {
+                // Trigger re-render so the breadcrumb heading stack refreshes.
+                cx.notify();
+            }));
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(content))
+                .child(editor_scrollbar)
+        };
 
         // In preview mode: side-by-side split (editor left, preview right).
         if show_preview {
@@ -1779,13 +2103,12 @@ impl Render for EditorView {
                     .child(editor_pane)
                     .child(div().w(px(1.)).bg(t.separator).flex_shrink_0())
                     .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(preview));
-                let key_ctx = if is_md { "Editor markdown" } else { "Editor" };
                 let root = div()
                     .flex()
                     .flex_col()
                     .size_full()
+                    .relative()
                     .bg(t.bg)
-                    .key_context(key_ctx)
                     .track_focus(&self.focus_handle(cx))
                     .on_key_down(cx.listener(Self::on_key_down))
                     .on_action(cx.listener(Self::on_move_left))
@@ -1849,8 +2172,13 @@ impl Render for EditorView {
                     .when(is_dragging, |el| {
                         el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _, cx| {
                             if let Some(ref drag) = view.scrollbar_drag {
-                                let handle = view.scroll_handle.0.borrow().base_handle.clone();
-                                update_drag(drag, ev, &handle);
+                                if view.is_wrap_mode() {
+                                    let handle = view.md_scroll.clone();
+                                    update_drag(drag, ev, &handle);
+                                } else {
+                                    let handle = view.scroll_handle.0.borrow().base_handle.clone();
+                                    update_drag(drag, ev, &handle);
+                                }
                                 cx.notify();
                             }
                         }))
@@ -1860,19 +2188,26 @@ impl Render for EditorView {
                         }))
                     })
                     .child(header);
+                let key_ctx = if self.outline_open { "OutlineOverlay" } else if is_md { "Editor markdown" } else { "Editor" };
+                let root = root.key_context(key_ctx);
                 let root = if self.show_search {
                     root.child(self.render_search_bar(window, &t, cx))
                 } else { root };
-                return root.child(split).into_any();
+                let root = root.child(split);
+                let root = if self.outline_open {
+                    root.child(self.render_outline_overlay(&t, window, cx))
+                } else { root };
+                return root.into_any();
             }
         }
 
-        let key_ctx = if is_md { "Editor markdown" } else { "Editor" };
+        let key_ctx = if self.outline_open { "OutlineOverlay" } else if is_md { "Editor markdown" } else { "Editor" };
 
         let root = div()
             .flex()
             .flex_col()
             .size_full()
+            .relative()
             .bg(t.bg)
             .key_context(key_ctx)
             .track_focus(&self.focus_handle(cx))
@@ -1938,8 +2273,13 @@ impl Render for EditorView {
             .when(is_dragging, |el| {
                 el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _, cx| {
                     if let Some(ref drag) = view.scrollbar_drag {
-                        let handle = view.scroll_handle.0.borrow().base_handle.clone();
-                        update_drag(drag, ev, &handle);
+                        if view.is_wrap_mode() {
+                            let handle = view.md_scroll.clone();
+                            update_drag(drag, ev, &handle);
+                        } else {
+                            let handle = view.scroll_handle.0.borrow().base_handle.clone();
+                            update_drag(drag, ev, &handle);
+                        }
                         cx.notify();
                     }
                 }))
@@ -1953,11 +2293,251 @@ impl Render for EditorView {
         let root = if self.show_search {
             root.child(self.render_search_bar(window, &t, cx))
         } else { root };
-        root.child(editor_pane).into_any()
+        let root = root.child(editor_pane);
+        let root = if self.outline_open {
+            root.child(self.render_outline_overlay(&t, window, cx))
+        } else { root };
+        root.into_any()
+    }
+}
+
+// ── Outline overlay ────────────────────────────────────────────────────────────
+
+impl EditorView {
+    fn render_outline_overlay(
+        &self,
+        t: &RuntimeTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let outline = Arc::clone(&self.outline);
+        let query = self.outline_query.to_lowercase();
+        let caret_visible = self.cursor_blink_on;
+        let outline_focused = self.outline_handle.is_focused(window);
+
+        // Filter entries by query substring.
+        let filtered: Vec<(usize, OutlineEntry)> = outline
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| query.is_empty() || e.text.to_lowercase().contains(&query))
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+
+        // ── search input ──────────────────────────────────────────────────────
+        let (q_before, q_after) = split_at_char(&self.outline_query, self.outline_cursor);
+        let is_query_empty = self.outline_query.is_empty();
+        let caret_color = if outline_focused && caret_visible {
+            t.cursor
+        } else {
+            gpui::hsla(0., 0., 0., 0.)
+        };
+        let caret_h = t.font_size_code + 2.;
+
+        let search_input_base = div()
+            .id("outline-search-input")
+            .flex()
+            .flex_row()
+            .items_center()
+            .px_3()
+            .py(px(6.))
+            .border_b_1()
+            .border_color(t.separator)
+            .track_focus(&self.outline_handle)
+            .font_family(t.mono_family.clone())
+            .text_size(px(t.font_size_code))
+            .text_color(t.text)
+            .child(svg().path(IconName::Search.path()).size(px(14.)).text_color(t.text_subtle).flex_shrink_0())
+            .child(div().w(px(6.)).flex_shrink_0());
+
+        // Mirror search bar: show placeholder only when NOT focused and query is empty.
+        let search_input: gpui::AnyElement = if !outline_focused && is_query_empty {
+            search_input_base
+                .child(div().text_color(t.text_muted).child(t!("outline_overlay.placeholder").to_string()))
+                .into_any()
+        } else {
+            search_input_base
+                .child(div().flex_shrink_0().child(q_before))
+                .child(div().flex_shrink_0().w(px(1.5)).h(px(caret_h)).bg(caret_color))
+                .child(div().flex_shrink_0().child(q_after))
+                .into_any()
+        };
+
+        // ── heading list ──────────────────────────────────────────────────────
+        let hover_idx = self.outline_hover;
+
+        let list_body: AnyElement = if outline.is_empty() {
+            div()
+                .flex_1()
+                .flex()
+                .min_h(px(200.))
+                .items_center()
+                .justify_center()
+                .py(px(24.))
+                .font_family(t.ui_family.clone())
+                .text_size(px(t.font_size_caption))
+                .text_color(t.text_muted)
+                .child(t!("outline_overlay.no_headings").to_string())
+                .into_any()
+        } else if filtered.is_empty() {
+            div()
+                .flex_1()
+                .flex()
+                .min_h(px(200.))
+                .items_center()
+                .justify_center()
+                .py(px(24.))
+                .font_family(t.ui_family.clone())
+                .text_size(px(t.font_size_caption))
+                .text_color(t.text_muted)
+                .child(t!("outline_overlay.no_matches").to_string())
+                .into_any()
+        } else {
+            let entries: Vec<AnyElement> = filtered
+                .iter()
+                .enumerate()
+                .map(|(list_idx, (orig_idx, entry))| {
+                    let level = entry.level;
+                    let source_line = entry.source_line;
+                    let is_hovered = hover_idx == Some(list_idx);
+                    let indent = (level.saturating_sub(1) as f32) * 12.0;
+
+                    // Compute section end for highlight: next entry at same or higher level.
+                    let section_end = filtered
+                        .iter()
+                        .skip(list_idx + 1)
+                        .find(|(_, e)| e.level <= level)
+                        .map(|(_, e)| e.source_line)
+                        .unwrap_or(usize::MAX);
+
+                    let t_clone = t.clone();
+                    div()
+                        .id(("outline-entry", list_idx))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .px(px(8. + indent))
+                        .py(px(5.))
+                        .gap_2()
+                        .font_family(t.ui_family.clone())
+                        .text_size(px(t.font_size_caption))
+                        .text_color(t.text)
+                        .when(is_hovered, |el| el.bg(t.line_highlight))
+                        .cursor_pointer()
+                        .hover(|el| el.bg(t_clone.line_highlight))
+                        .on_mouse_move(cx.listener(move |view, _, _, cx| {
+                            if view.outline_hover != Some(list_idx) {
+                                view.outline_hover = Some(list_idx);
+                                // Highlight section in editor
+                                view.outline_highlight = Some((source_line, section_end));
+                                // Scroll editor to heading
+                                view.scroll_to_line(source_line);
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |view, _, window, cx| {
+                            view.scroll_to_line(source_line);
+                            view.outline_open = false;
+                            view.outline_hover = None;
+                            view.outline_highlight = None;
+                            window.focus(&view.focus_handle);
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .text_color(t.text_muted)
+                                .text_size(px(t.font_size_caption - 1.))
+                                .child("#".repeat(level as usize))
+                                .flex_shrink_0()
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .child(SharedString::from(entry.text.clone()))
+                        )
+                        .into_any()
+                })
+                .collect();
+
+            div()
+                .id("outline-list")
+                .flex_col()
+                .overflow_y_scroll()
+                .min_h(px(200.))
+                .max_h(px(320.))
+                .children(entries)
+                .into_any()
+        };
+
+        // ── modal container ───────────────────────────────────────────────────
+        // elevation: shadow_lg + large rounded corners clipped via overflow_hidden (Zed pattern).
+        // stop_propagation on inner click so backdrop's on_mouse_down doesn't fire.
+        let modal = div()
+            .id("outline-modal")
+            .occlude()
+            .w(px(520.))
+            .bg(t.bg_elevated)
+            .rounded_lg()
+            .border_1()
+            .border_color(t.border)
+            .shadow_lg()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(search_input)
+            .child(list_body);
+
+        // ── full-area backdrop — absolute+inset_0 so it fills the editor pane ──
+        // (root has .relative(), so absolute+inset_0 always covers it exactly,
+        //  and flex centering keeps the modal centered on resize — Zed modal_layer idiom)
+        deferred(
+            div()
+                .id("outline-backdrop")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(64.))
+                .bg(gpui::hsla(0., 0., 0., 0.35))
+                .on_mouse_down(MouseButton::Left, cx.listener(|view, _, window, cx| {
+                    view.outline_open = false;
+                    view.outline_hover = None;
+                    view.outline_highlight = None;
+                    window.focus(&view.focus_handle);
+                    cx.notify();
+                }))
+                .child(modal),
+        )
+        .with_priority(2)
+        .into_any()
     }
 }
 
 // ── string helpers for search/replace cursor ───────────────────────────────────
+
+/// Split a text string into word-and-space tokens so that `flex_wrap` can break
+/// between words. Each returned piece is either a run of non-space chars or a
+/// run of space chars, preserving the original content exactly.
+fn split_words_for_wrap(text: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_space = false;
+    for c in text.chars() {
+        let is_space = c == ' ' || c == '\t';
+        if is_space != in_space && !current.is_empty() {
+            parts.push(std::mem::take(&mut current));
+        }
+        in_space = is_space;
+        current.push(c);
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
 
 fn insert_at(s: &str, char_idx: usize, text: &str) -> String {
     let mut chars: Vec<char> = s.chars().collect();

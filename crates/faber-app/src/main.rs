@@ -97,7 +97,7 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: None,
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(12.), px(18.))),
+                        traffic_light_position: Some(point(px(12.), px(11.))),
                     }),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()

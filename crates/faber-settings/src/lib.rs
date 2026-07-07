@@ -88,6 +88,8 @@ pub struct Settings {
     pub line_numbers: bool,
     /// Whether to show the interactive scrollbar on scrollable views.
     pub show_scrollbar: bool,
+    /// Whether to show vertical indent-guide lines in the file explorer.
+    pub indent_guides: bool,
     /// Display language. Defaults to `System` (auto-detect from OS locale).
     pub language: Language,
 }
@@ -100,6 +102,7 @@ impl Default for Settings {
             font_size: DEFAULT_FONT_SIZE,
             line_numbers: true,
             show_scrollbar: true,
+            indent_guides: true,
             language: Language::default(),
         }
     }
@@ -158,6 +161,7 @@ mod tests {
             font_size: 16.0,
             line_numbers: true,
             show_scrollbar: false,
+            indent_guides: true,
             language: Language::En,
         };
         save_to(&s, &path).unwrap();

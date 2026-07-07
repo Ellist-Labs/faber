@@ -160,7 +160,9 @@ impl Workspace {
             })
             .map(|(i, _)| i)
             .unwrap_or(0);
-        let show_scrollbar = cx.global::<crate::settings_view::SettingsStore>().0.show_scrollbar;
+        let settings = &cx.global::<crate::settings_view::SettingsStore>().0;
+        let show_scrollbar = settings.show_scrollbar;
+        let indent_guides = settings.indent_guides;
         let is_dragging = self.tree_scrollbar_drag.is_some();
         let tree_base_handle = self.tree_scroll.0.borrow().base_handle.clone();
 
@@ -186,7 +188,7 @@ impl Workspace {
                 let ws = entity.read(cx);
                 range
                     .map(|ix| {
-                        ws.render_tree_row(ix, &entity2, active_path.as_deref(), &t2)
+                        ws.render_tree_row(ix, &entity2, active_path.as_deref(), &t2, indent_guides)
                             .into_any_element()
                     })
                     .collect::<Vec<AnyElement>>()
@@ -226,8 +228,10 @@ impl Workspace {
         entity: &Entity<Workspace>,
         active_path: Option<&Path>,
         t: &RuntimeTheme,
+        indent_guides: bool,
     ) -> Stateful<Div> {
         let row = &self.visible_rows[ix];
+        let depth = row.depth;
         let is_active = active_path.map_or(false, |ap| ap == row.path);
         let path = row.path.clone();
         let is_dir = row.is_dir;
@@ -253,10 +257,30 @@ impl Workspace {
             file_icons::icon_for_file(&row.name)
         };
 
+        // Vertical indent guide lines — one thin line per ancestor depth level.
+        // Each line is absolutely positioned at the center of that depth's indent column.
+        let guides: Vec<AnyElement> = if indent_guides && depth > 0 {
+            (0..depth)
+                .map(|d| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(1.0))
+                        .left(px(8.0 + d as f32 * TREE_INDENT_W + TREE_INDENT_W * 0.5 - 0.5))
+                        .bg(t.separator)
+                        .into_any_element()
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
         h_flex()
             .id(ix)
             .h(px(TREE_ROW_H))
-            .pl(px(8.0 + row.depth as f32 * TREE_INDENT_W))
+            .relative()
+            .pl(px(8.0 + depth as f32 * TREE_INDENT_W))
             .pr_2()
             .gap_1()
             .font_family(t.ui_family.clone())
@@ -274,6 +298,7 @@ impl Workspace {
                     }
                 });
             })
+            .children(guides)
             .child(div().flex_shrink_0().child(chevron))
             .child(img(icon).size(px(16.0)).flex_shrink_0())
             .child(div().whitespace_nowrap().flex_shrink_0().child(row.name.clone()))

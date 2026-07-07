@@ -39,6 +39,10 @@ desc = "Base font size in pixels; the entire application scales from it."
 title = "Scrollbar"
 desc = "Show an interactive scrollbar on scrollable views."
 
+[settings.indent_guides]
+title = "Indent Guides"
+desc = "Show vertical guide lines in the file explorer to indicate folder hierarchy."
+
 [settings.language]
 title = "Language"
 desc = "Interface language. Restart may be required for some changes."
@@ -102,6 +106,11 @@ coming_soon = "Coming soon"
 
 [editor]
 untitled = "Untitled"
+
+[outline_overlay]
+placeholder = "Go to heading…"
+no_headings = "No headings in this file"
+no_matches = "No matching headings"
 
 [search]
 placeholder = "Search…"

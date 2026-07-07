@@ -156,6 +156,15 @@ fn sections() -> Vec<SettingsSectionDef> {
                         set: |s, v| s.show_scrollbar = v,
                     },
                 },
+                SettingEntry {
+                    title: t!("settings.indent_guides.title").to_string(),
+                    description: t!("settings.indent_guides.desc").to_string(),
+                    enabled: |_| true,
+                    control: SettingControl::Toggle {
+                        get: |s| s.indent_guides,
+                        set: |s, v| s.indent_guides = v,
+                    },
+                },
             ],
         },
     ]
