@@ -35,12 +35,12 @@ fi
 # Build faber release
 cd "$PROJECT_DIR"
 cargo build --release -q
-FELIX="$PROJECT_DIR/target/release/felix"
+FABER="$PROJECT_DIR/target/release/faber"
 
 # ── Editor discovery ──────────────────────────────────────────────────────────
 declare -a EDITOR_CMDS EDITOR_NAMES
 
-EDITOR_CMDS+=("$FELIX")
+EDITOR_CMDS+=("$FABER")
 EDITOR_NAMES+=("faber")
 
 for ed in zed code; do

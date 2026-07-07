@@ -48,7 +48,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                         .text_color(text)
                         .text_size(px(font_size_heading * 2.0))
                         .font_family(ui_family.clone())
-                        .child("Felix"),
+                        .child("Faber"),
                 )
                 .child(
                     div()

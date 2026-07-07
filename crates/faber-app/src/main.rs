@@ -110,7 +110,7 @@ fn main() {
             })
             .unwrap();
 
-        println!("FELIX_READY startup_ms={}", start.elapsed().as_millis());
+        println!("FABER_READY startup_ms={}", start.elapsed().as_millis());
     });
 }
 
@@ -218,11 +218,11 @@ fn register_keybindings(cx: &mut App) {
 fn register_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
-            name: "Felix".into(),
+            name: "Faber".into(),
             items: vec![
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
-                MenuItem::action("Quit Felix", Quit),
+                MenuItem::action("Quit Faber", Quit),
             ],
         },
         Menu {

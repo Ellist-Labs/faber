@@ -17,7 +17,7 @@ A lean, GPU-accelerated code editor built with Rust and GPUI. Lower RAM and CPU 
 
 ```sh
 # Clone
-git clone git@github.com:ellist/felix.git
+git clone git@github.com:ellist/faber.git
 cd faber
 
 # Install Rust toolchain (if not already installed)

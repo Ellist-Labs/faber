@@ -37,7 +37,7 @@ fi
 echo "Building release binary..."
 cd "$PROJECT_DIR"
 cargo build --release -q
-BINARY="$PROJECT_DIR/target/release/felix"
+BINARY="$PROJECT_DIR/target/release/faber"
 echo "  $BINARY"
 echo ""
 
