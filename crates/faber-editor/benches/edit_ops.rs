@@ -1,7 +1,8 @@
 use divan::Bencher;
 use faber_core::transaction::ChangeSet;
-use faber_editor::{buffer::Document, search::Query};
+use faber_editor::{LanguageRegistry, buffer::Document, search::Query};
 use ropey::Rope;
+use std::path::Path;
 
 fn main() {
     divan::main();
@@ -15,15 +16,21 @@ fn make_fixture(target_lines: usize) -> String {
     SEED.repeat(reps)
 }
 
+fn rust_doc(content: &str) -> Document {
+    let reg = LanguageRegistry::with_defaults();
+    let lang = reg.language_for_path(Path::new("_.rs")).expect("rust language");
+    Document::from_str(content, Some(&lang))
+}
+
 /// Insert a single char near the middle of a medium file, including incremental reparse.
 #[divan::bench]
 fn edit_insert_mid(b: Bencher) {
     let content = make_fixture(5_000);
-    b.with_inputs(|| Document::from_str(&content))
+    b.with_inputs(|| rust_doc(&content))
         .bench_values(|mut doc| {
             let mid = doc.len_chars() / 2;
             doc.insert(mid, "x");
-            divan::black_box(doc.tree.root_node().descendant_count())
+            divan::black_box(doc.len_chars())
         });
 }
 
@@ -31,11 +38,11 @@ fn edit_insert_mid(b: Bencher) {
 #[divan::bench]
 fn edit_delete_mid(b: Bencher) {
     let content = make_fixture(5_000);
-    b.with_inputs(|| Document::from_str(&content))
+    b.with_inputs(|| rust_doc(&content))
         .bench_values(|mut doc| {
             let mid = doc.len_chars() / 2;
             doc.delete(mid..mid + 1);
-            divan::black_box(doc.tree.root_node().descendant_count())
+            divan::black_box(doc.len_chars())
         });
 }
 

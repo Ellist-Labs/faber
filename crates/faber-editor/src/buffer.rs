@@ -1,28 +1,24 @@
 use ropey::Rope;
-use std::{io, ops::Range, path::PathBuf, sync::Arc};
-use tree_sitter::{InputEdit, Parser, Point, Tree};
+use std::{
+    io,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tree_sitter::{Parser, Tree};
 
-use crate::{highlight::HighlightCache, parse_source, reparse_source};
+use crate::{
+    highlight::{HighlightCache, HighlightSpan},
+    parse_source,
+};
+use faber_core::transaction::{ChangeSet, Transaction};
 use faber_lang::{Language, LanguageRegistry};
 
-/// A recorded change — enough to apply and invert for undo/redo.
-/// Replaced by `Transaction` in Step 5; kept for undo machinery in the interim.
-pub struct Edit {
-    /// Char range in the document *before* this edit was applied.
-    pub char_range: Range<usize>,
-    pub removed: String,
-    pub inserted: String,
-}
-
-impl Edit {
-    pub fn invert(&self) -> Edit {
-        let new_end = self.char_range.start + self.inserted.chars().count();
-        Edit {
-            char_range: self.char_range.start..new_end,
-            removed: self.inserted.clone(),
-            inserted: self.removed.clone(),
-        }
-    }
+/// Syntax layer for a document: the tree-sitter parser and its current tree.
+/// Present only when the document has a resolved language; `None` for plain text.
+struct SyntaxState {
+    parser: Parser,
+    tree: Tree,
 }
 
 pub struct Document {
@@ -33,88 +29,67 @@ pub struct Document {
     pub dirty: bool,
     /// The resolved language for this file; None for plain text.
     pub language: Option<Arc<Language>>,
-    parser: Parser,
-    pub tree: Tree,
-    pub highlight_cache: HighlightCache,
+    /// Syntax parsing state; `None` for plain-text documents.
+    syntax: Option<SyntaxState>,
+    pub(crate) highlight_cache: HighlightCache,
 }
 
 impl Document {
-    /// Open a file, resolving its language from the default registry.
-    pub fn open(path: &str) -> io::Result<Self> {
-        let registry = LanguageRegistry::with_defaults();
-        Self::open_with_registry(path, &registry)
-    }
-
-    /// Open a file using the provided registry (useful for tests / custom grammars).
+    /// Open a file using the provided registry.
     pub fn open_with_registry(path: &str, registry: &LanguageRegistry) -> io::Result<Self> {
         let source = std::fs::read_to_string(path)?;
         let rope = Rope::from_str(&source);
         let pb = PathBuf::from(path);
         let language = registry.language_for_path(&pb);
-        let (parser, tree) = if let Some(ref lang) = language {
-            let mut p = lang.make_parser();
-            let t = parse_source(&mut p, &source);
-            (p, t)
-        } else {
-            Self::plain_parser_and_tree()
-        };
+        let syntax = language.as_ref().map(|lang| {
+            let mut parser = lang.make_parser();
+            let tree = parse_source(&mut parser, &source);
+            SyntaxState { parser, tree }
+        });
         let mut highlight_cache = HighlightCache::default();
         highlight_cache.setup(language.as_ref());
-        highlight_cache.compute(&tree, &source);
-        Ok(Self { saved_rope: rope.clone(), rope, path: pb, dirty: false, language, parser, tree, highlight_cache })
+        if let Some(ref syn) = syntax {
+            highlight_cache.compute(&syn.tree, &source);
+        }
+        Ok(Self { saved_rope: rope.clone(), rope, path: pb, dirty: false, language, syntax, highlight_cache })
     }
 
-    /// In-memory document (for tests / benches).
-    pub fn from_str(source: &str) -> Self {
+    /// In-memory document (for tests / benches). `language` selects the syntax
+    /// layer; pass `None` for plain text.
+    pub fn from_str(source: &str, language: Option<&Arc<Language>>) -> Self {
         let rope = Rope::from_str(source);
-        let registry = LanguageRegistry::with_defaults();
-        // Use Rust grammar as the default for in-memory docs (all fixtures are Rust).
-        let lang = registry.language_for_path(std::path::Path::new("_.rs")).unwrap();
-        let mut parser = lang.make_parser();
-        let tree = parse_source(&mut parser, source);
+        let syntax = language.map(|lang| {
+            let mut parser = lang.make_parser();
+            let tree = parse_source(&mut parser, source);
+            SyntaxState { parser, tree }
+        });
         let mut highlight_cache = HighlightCache::default();
-        highlight_cache.setup(Some(&lang));
-        highlight_cache.compute(&tree, source);
+        highlight_cache.setup(language);
+        if let Some(ref syn) = syntax {
+            highlight_cache.compute(&syn.tree, source);
+        }
         Self {
             saved_rope: rope.clone(),
             rope,
             path: PathBuf::from("<memory>"),
             dirty: false,
-            language: Some(lang),
-            parser,
-            tree,
+            language: language.cloned(),
+            syntax,
             highlight_cache,
         }
     }
 
-    /// Inert parser + empty tree for plain-text documents.
-    fn plain_parser_and_tree() -> (Parser, Tree) {
-        let mut p = Parser::new();
-        // parse with no language set returns None; fall back gracefully.
-        let t = p.parse("", None).unwrap_or_else(|| {
-            let mut fallback = LanguageRegistry::with_defaults()
-                .language_for_path(std::path::Path::new("_.rs"))
-                .unwrap()
-                .make_parser();
-            parse_source(&mut fallback, "")
-        });
-        (p, t)
-    }
-
     /// Empty in-memory document with no path yet (File > New).
     pub fn empty_untitled() -> Self {
-        let (parser, tree) = Self::plain_parser_and_tree();
         let mut highlight_cache = HighlightCache::default();
         highlight_cache.setup(None);
-        highlight_cache.compute(&tree, "");
         Self {
             saved_rope: Rope::new(),
             rope: Rope::new(),
             path: PathBuf::new(),
             dirty: false,
             language: None,
-            parser,
-            tree,
+            syntax: None,
             highlight_cache,
         }
     }
@@ -124,23 +99,36 @@ impl Document {
         self.path.as_os_str().is_empty()
     }
 
+    /// The document's path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Whether the document has unsaved changes.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     /// Assign a real path (first save of an untitled doc) and re-resolve language.
-    pub fn assign_path(&mut self, path: PathBuf) {
+    pub fn assign_path(&mut self, path: PathBuf, registry: &LanguageRegistry) {
         self.path = path;
-        let registry = LanguageRegistry::with_defaults();
         self.language = registry.language_for_path(&self.path);
         let src = self.rope.to_string();
-        if let Some(ref lang) = self.language {
-            self.parser = lang.make_parser();
-            self.tree = parse_source(&mut self.parser, &src);
-        } else {
-            let (p, t) = Self::plain_parser_and_tree();
-            self.parser = p;
-            self.tree = t;
-        }
+        self.syntax = self.language.as_ref().map(|lang| {
+            let mut parser = lang.make_parser();
+            let tree = parse_source(&mut parser, &src);
+            SyntaxState { parser, tree }
+        });
         self.highlight_cache = HighlightCache::default();
         self.highlight_cache.setup(self.language.as_ref());
-        self.highlight_cache.compute(&self.tree, &src);
+        if let Some(ref syn) = self.syntax {
+            self.highlight_cache.compute(&syn.tree, &src);
+        }
+    }
+
+    /// Syntax-highlight spans for the given display line (empty when none).
+    pub fn highlight_spans(&self, line_idx: usize) -> &[HighlightSpan] {
+        self.highlight_cache.lines.get(line_idx).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn len_chars(&self) -> usize {
@@ -151,81 +139,93 @@ impl Document {
         self.rope.len_lines()
     }
 
-    /// Insert `text` at char offset `char_idx`. Returns the edit record.
-    pub fn insert(&mut self, char_idx: usize, text: &str) -> Edit {
-        let start_byte = self.rope.char_to_byte(char_idx);
-        let start_line = self.rope.char_to_line(char_idx);
-        let start_col = char_idx - self.rope.line_to_char(start_line);
+    /// Single mutation choke-point. Applies `tx` to the rope, reparses any syntax
+    /// layer, updates the dirty flag, and returns the inverse ChangeSet for undo.
+    pub fn apply(&mut self, tx: Transaction) -> ChangeSet {
+        let inverse = tx.changes.invert(&self.rope); // capture before applying
+        tx.changes.apply(&mut self.rope);
 
-        self.rope.insert(char_idx, text);
-
-        let new_end_byte = start_byte + text.len();
-        let newlines = text.chars().filter(|&c| c == '\n').count();
-        let new_end_line = start_line + newlines;
-        let new_end_col = if newlines == 0 {
-            start_col + text.chars().count()
-        } else {
-            text.rfind('\n').map_or(0, |i| text[i + 1..].chars().count())
-        };
-
-        let ie = InputEdit {
-            start_byte,
-            old_end_byte: start_byte,
-            new_end_byte,
-            start_position: Point { row: start_line, column: start_col },
-            old_end_position: Point { row: start_line, column: start_col },
-            new_end_position: Point { row: new_end_line, column: new_end_col },
-        };
-
-        // Per-keystroke alloc — acceptable cost until Step 5 (Transaction rewrite).
-        if self.language.is_some() {
+        if let Some(ref mut syn) = self.syntax {
             let src = self.rope.to_string();
-            self.tree = reparse_source(&mut self.parser, &self.tree, &ie, &src);
-            self.highlight_cache.compute(&self.tree, &src);
+            syn.tree = syn
+                .parser
+                .parse(&src, Some(&syn.tree))
+                .or_else(|| syn.parser.parse(&src, None))
+                .expect("parse must succeed");
+            self.highlight_cache.compute(&syn.tree, &src);
         }
-        self.dirty = self.rope.len_bytes() != self.saved_rope.len_bytes()
-            || self.rope != self.saved_rope;
 
-        Edit { char_range: char_idx..char_idx, removed: String::new(), inserted: text.to_string() }
+        self.dirty = self.rope != self.saved_rope;
+        inverse
     }
 
-    /// Delete `range` (char offsets, exclusive end). Returns the edit record.
-    pub fn delete(&mut self, range: Range<usize>) -> Edit {
-        debug_assert!(range.start <= range.end && range.end <= self.rope.len_chars());
+    /// Insert `text` at char offset `char_idx`. Returns the inverse ChangeSet.
+    pub fn insert(&mut self, char_idx: usize, text: &str) -> ChangeSet {
+        let tx = Transaction::insert(&self.rope, char_idx, text);
+        self.apply(tx)
+    }
 
-        let start_byte = self.rope.char_to_byte(range.start);
-        let end_byte = self.rope.char_to_byte(range.end);
-        let start_line = self.rope.char_to_line(range.start);
-        let start_col = range.start - self.rope.line_to_char(start_line);
-        let end_line = self.rope.char_to_line(range.end);
-        let end_col = range.end - self.rope.line_to_char(end_line);
-
-        let removed: String = self.rope.slice(range.start..range.end).to_string();
-        self.rope.remove(range.start..range.end);
-
-        let ie = InputEdit {
-            start_byte,
-            old_end_byte: end_byte,
-            new_end_byte: start_byte,
-            start_position: Point { row: start_line, column: start_col },
-            old_end_position: Point { row: end_line, column: end_col },
-            new_end_position: Point { row: start_line, column: start_col },
-        };
-
-        if self.language.is_some() {
-            let src = self.rope.to_string();
-            self.tree = reparse_source(&mut self.parser, &self.tree, &ie, &src);
-            self.highlight_cache.compute(&self.tree, &src);
-        }
-        self.dirty = self.rope.len_bytes() != self.saved_rope.len_bytes()
-            || self.rope != self.saved_rope;
-
-        Edit { char_range: range.start..range.start, removed, inserted: String::new() }
+    /// Delete `range` (char offsets, exclusive end). Returns the inverse ChangeSet.
+    pub fn delete(&mut self, range: Range<usize>) -> ChangeSet {
+        let tx = Transaction::delete(&self.rope, range);
+        self.apply(tx)
     }
 
     /// Record the current rope as the saved baseline; clears the dirty flag.
     pub fn mark_saved(&mut self) {
         self.saved_rope = self.rope.clone();
         self.dirty = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_registry() -> LanguageRegistry {
+        LanguageRegistry::with_defaults()
+    }
+
+    #[test]
+    fn insert_updates_rope_and_dirty() {
+        let mut doc = Document::from_str("hello", None);
+        assert_eq!(doc.rope.to_string(), "hello");
+        assert!(!doc.dirty);
+        doc.insert(5, " world");
+        assert_eq!(doc.rope.to_string(), "hello world");
+        assert!(doc.dirty);
+        doc.mark_saved();
+        assert!(!doc.dirty);
+    }
+
+    #[test]
+    fn delete_updates_rope() {
+        let mut doc = Document::from_str("hello world", None);
+        doc.delete(5..11);
+        assert_eq!(doc.rope.to_string(), "hello");
+        assert!(doc.dirty);
+    }
+
+    #[test]
+    fn mark_saved_clears_dirty() {
+        let mut doc = Document::from_str("abc", None);
+        doc.insert(3, "d");
+        assert!(doc.dirty);
+        doc.mark_saved();
+        assert!(!doc.dirty);
+        doc.insert(4, "e");
+        assert!(doc.dirty);
+    }
+
+    #[test]
+    fn tree_node_count_increases_after_insert() {
+        use crate::node_count;
+        let reg = test_registry();
+        let lang = reg.language_for_path(Path::new("foo.rs")).unwrap();
+        let mut doc = Document::from_str("fn main() {}", Some(&lang));
+        let before = doc.syntax.as_ref().map(|s| node_count(&s.tree)).unwrap_or(0);
+        doc.insert(11, " let x = 1;");
+        let after = doc.syntax.as_ref().map(|s| node_count(&s.tree)).unwrap_or(0);
+        assert!(after >= before, "tree should grow after insert");
     }
 }

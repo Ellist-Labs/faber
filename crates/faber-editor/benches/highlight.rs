@@ -1,5 +1,6 @@
 use divan::Bencher;
-use faber_editor::buffer::Document;
+use faber_editor::{LanguageRegistry, buffer::Document};
+use std::path::Path;
 
 fn main() {
     divan::main();
@@ -13,13 +14,19 @@ fn make_fixture(target_lines: usize) -> String {
     SEED.repeat(reps)
 }
 
+fn rust_doc(content: &str) -> Document {
+    let reg = LanguageRegistry::with_defaults();
+    let lang = reg.language_for_path(Path::new("_.rs")).expect("rust language");
+    Document::from_str(content, Some(&lang))
+}
+
 /// Full highlight computation on first open — cold path.
 #[divan::bench]
 fn highlight_open_medium(b: Bencher) {
     let content = make_fixture(5_000);
     b.bench(|| {
-        let doc = Document::from_str(divan::black_box(&content));
-        divan::black_box(doc.highlight_cache.lines.len())
+        let doc = rust_doc(divan::black_box(&content));
+        divan::black_box(doc.len_lines())
     });
 }
 
@@ -29,9 +36,9 @@ fn highlight_open_medium(b: Bencher) {
 fn highlight_incremental_insert(b: Bencher) {
     let content = make_fixture(5_000);
     b.bench_local(|| {
-        let mut doc = Document::from_str(&content);
+        let mut doc = rust_doc(&content);
         doc.insert(0, "x");
-        divan::black_box(doc.highlight_cache.lines.len())
+        divan::black_box(doc.len_lines())
     });
 }
 
@@ -40,7 +47,7 @@ fn highlight_incremental_insert(b: Bencher) {
 fn highlight_open_large(b: Bencher) {
     let content = make_fixture(20_000);
     b.bench(|| {
-        let doc = Document::from_str(divan::black_box(&content));
-        divan::black_box(doc.highlight_cache.lines.len())
+        let doc = rust_doc(divan::black_box(&content));
+        divan::black_box(doc.len_lines())
     });
 }

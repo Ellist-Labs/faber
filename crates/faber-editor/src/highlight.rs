@@ -19,16 +19,11 @@ struct Inner {
 
 /// Per-document syntax highlight cache.
 /// Rebuilt on every edit; not recomputed per frame.
+#[derive(Default)]
 pub struct HighlightCache {
     /// Spans indexed by line. Empty Vec for lines with no highlighted spans.
     pub lines: Vec<Vec<HighlightSpan>>,
     inner: Option<Inner>,
-}
-
-impl Default for HighlightCache {
-    fn default() -> Self {
-        Self { lines: Vec::new(), inner: None }
-    }
 }
 
 impl HighlightCache {
@@ -125,4 +120,49 @@ pub fn byte_col_to_char_col(line_str: &str, byte_col: u32) -> usize {
         return byte_col;
     }
     line_str[..byte_col].chars().count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::Document;
+    use faber_lang::LanguageRegistry;
+    use std::path::Path;
+
+    fn rust_doc(src: &str) -> Document {
+        let reg = LanguageRegistry::with_defaults();
+        let lang = reg.language_for_path(Path::new("foo.rs")).unwrap();
+        Document::from_str(src, Some(&lang))
+    }
+
+    #[test]
+    fn multiline_string_produces_spans_on_each_row() {
+        let doc = rust_doc("let s = \"\nline2\n\";");
+        let cache = &doc.highlight_cache;
+        assert!(cache.lines.len() >= 3, "should have at least 3 lines");
+        assert!(!cache.lines[0].is_empty(), "first line of string should have spans");
+    }
+
+    #[test]
+    fn block_comment_spans_middle_rows() {
+        let doc = rust_doc("/* line0\nline1\nline2 */\nfn f() {}");
+        let cache = &doc.highlight_cache;
+        if cache.lines.len() > 1 {
+            assert!(!cache.lines[1].is_empty(), "middle of block comment should have span");
+        }
+    }
+
+    #[test]
+    fn byte_col_ascii() {
+        assert_eq!(byte_col_to_char_col("hello", 3), 3);
+    }
+
+    #[test]
+    fn byte_col_multibyte() {
+        // "héllo": h=1 byte, é=2 bytes. Char boundaries at bytes 0,1,3,4,5,6.
+        // byte 1 = after 'h' = char 1; byte 3 = after 'é' = char 2.
+        let s = "héllo";
+        assert_eq!(byte_col_to_char_col(s, 1), 1);
+        assert_eq!(byte_col_to_char_col(s, 3), 2);
+    }
 }

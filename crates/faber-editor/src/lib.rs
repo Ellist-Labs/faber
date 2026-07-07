@@ -10,6 +10,7 @@ pub use faber_core::movement as cursor;
 pub use faber_core::search;
 pub use faber_core::selection::{Selection, SelectionSet};
 pub use faber_core::anchor::{Anchor, Bias};
+pub use faber_core::transaction::{ChangeSet, Transaction};
 
 // Re-export faber-lang so consumers can set up the registry.
 pub use faber_lang::{Language, LanguageId, LanguageRegistry, SyntaxToken};
