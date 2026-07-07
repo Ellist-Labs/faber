@@ -15,7 +15,9 @@ impl LanguageRegistry {
         Self { languages: Vec::new() }
     }
 
-    /// Pre-populated registry with all built-in languages.
+    /// Bootstrap registry with all built-in languages.
+    /// To add a language: call `register()` after construction, or extend this function.
+    /// The WASM extension host will call `register()` per plugin at runtime.
     pub fn with_defaults() -> Self {
         let mut r = Self::new();
         r.register(crate::language::rust());
@@ -23,6 +25,8 @@ impl LanguageRegistry {
         r
     }
 
+    /// Primary extension point: add a language definition to the registry.
+    /// Built-in languages, and (in future) each WASM plugin, funnel through here.
     pub fn register(&mut self, lang: Language) {
         self.languages.push(Arc::new(lang));
     }

@@ -42,10 +42,15 @@ impl Language {
         }
     }
 
+    /// Map an OS locale (BCP-47) to a supported `Language`.
+    /// Unrecognised locales fall back to `En` (logged to stderr).
     fn from_locale(locale: &str) -> Language {
         match locale.split(['-', '_']).next().unwrap_or("") {
             "en" => Language::En,
-            _ => Language::En,
+            other => {
+                eprintln!("[faber-settings] locale {:?} not supported; defaulting to English", other);
+                Language::En
+            }
         }
     }
 

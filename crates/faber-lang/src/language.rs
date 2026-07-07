@@ -39,6 +39,10 @@ pub enum SyntaxToken {
 }
 
 /// Maps a tree-sitter capture name to a `SyntaxToken`.
+///
+/// Global fallback shared by all languages. Language-specific overrides live in
+/// each `Language`'s `token_map`; this function covers the common tokens plus a
+/// few widely-used extended captures (e.g. `text.title` from markdown).
 pub fn capture_name_to_token(name: &str) -> Option<SyntaxToken> {
     Some(match name {
         // markdown-specific captures (tree-sitter-md block grammar)
@@ -72,6 +76,9 @@ pub fn capture_name_to_token(name: &str) -> Option<SyntaxToken> {
     })
 }
 
+/// Language-specific capture-name → token override table.
+type TokenMapFn = fn() -> &'static [(&'static str, SyntaxToken)];
+
 /// A supported language: its id, file extensions, and how to build a parser.
 pub struct Language {
     pub id: LanguageId,
@@ -80,7 +87,10 @@ pub struct Language {
     /// Returns the tree-sitter grammar for this language.
     grammar: fn() -> TsLanguage,
     /// Returns the highlights query source for this language (optional).
-    pub highlights_query: Option<fn() -> &'static str>,
+    pub(crate) highlights_query: Option<fn() -> &'static str>,
+    /// Language-specific capture-name → token overrides, consulted before the
+    /// global `capture_name_to_token` fallback. `None` = use fallback only.
+    pub(crate) token_map: Option<TokenMapFn>,
 }
 
 impl Language {
@@ -94,6 +104,7 @@ impl Language {
             extensions: extensions.into_iter().map(Into::into).collect(),
             grammar,
             highlights_query: None,
+            token_map: None,
         }
     }
 
@@ -101,6 +112,23 @@ impl Language {
     pub fn with_highlights(mut self, query_fn: fn() -> &'static str) -> Self {
         self.highlights_query = Some(query_fn);
         self
+    }
+
+    /// Attach a language-specific capture-name → token override table.
+    pub fn with_token_map(mut self, map_fn: TokenMapFn) -> Self {
+        self.token_map = Some(map_fn);
+        self
+    }
+
+    /// Resolve a capture name to a token: language-specific `token_map` first,
+    /// then the global `capture_name_to_token` fallback.
+    fn resolve_capture(&self, name: &str) -> Option<SyntaxToken> {
+        if let Some(map_fn) = self.token_map
+            && let Some((_, tok)) = map_fn().iter().find(|(n, _)| *n == name)
+        {
+            return Some(*tok);
+        }
+        capture_name_to_token(name)
     }
 
     /// Build a tree-sitter parser configured for this language.
@@ -113,23 +141,66 @@ impl Language {
     /// Build a `tree_sitter::Query` + capture-index→`SyntaxToken` mapping.
     /// Returns `None` if no highlights query is configured or the query fails to compile.
     pub fn make_highlight_query(&self) -> Option<(Query, Vec<Option<SyntaxToken>>)> {
-        let q_src = (self.highlights_query?)(  );
+        let q_src = (self.highlights_query?)();
         let ts_lang: TsLanguage = (self.grammar)();
         let query = Query::new(&ts_lang, q_src).ok()?;
         let cap_tokens: Vec<Option<SyntaxToken>> =
-            query.capture_names().iter().map(|n| capture_name_to_token(n)).collect();
+            query.capture_names().iter().map(|n| self.resolve_capture(n)).collect();
         Some((query, cap_tokens))
     }
+}
+
+/// Markdown-specific capture-name → token overrides (tree-sitter-md block grammar).
+fn markdown_token_map() -> &'static [(&'static str, SyntaxToken)] {
+    &[
+        ("text.title", SyntaxToken::Keyword),
+        ("text.literal", SyntaxToken::String),
+        ("text.uri", SyntaxToken::Constant),
+        ("text.reference", SyntaxToken::Label),
+        ("string.escape", SyntaxToken::String),
+    ]
 }
 
 /// Built-in Markdown language definition (block grammar).
 pub fn markdown() -> Language {
     Language::new("markdown", ["md", "markdown"], || tree_sitter_md::LANGUAGE.into())
         .with_highlights(|| tree_sitter_md::HIGHLIGHT_QUERY_BLOCK)
+        .with_token_map(markdown_token_map)
 }
 
 /// Built-in Rust language definition.
 pub fn rust() -> Language {
     Language::new("rust", ["rs"], || tree_sitter_rust::LANGUAGE.into())
         .with_highlights(|| tree_sitter_rust::HIGHLIGHTS_QUERY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_capture_names_map_to_tokens() {
+        assert_eq!(capture_name_to_token("keyword"), Some(SyntaxToken::Keyword));
+        assert_eq!(capture_name_to_token("comment"), Some(SyntaxToken::Comment));
+        assert_eq!(capture_name_to_token("string"), Some(SyntaxToken::String));
+        assert_eq!(capture_name_to_token("unknown_xyz_abc"), None);
+    }
+
+    #[test]
+    fn text_title_maps_via_global_fallback() {
+        // text.title is a markdown capture retained in the global fallback.
+        assert_eq!(capture_name_to_token("text.title"), Some(SyntaxToken::Keyword));
+    }
+
+    #[test]
+    fn token_map_overrides_global_fallback() {
+        fn map() -> &'static [(&'static str, SyntaxToken)] {
+            &[("keyword", SyntaxToken::Type)]
+        }
+        let lang = rust().with_token_map(map);
+        // token_map wins over the global fallback for the same capture name.
+        assert_eq!(lang.resolve_capture("keyword"), Some(SyntaxToken::Type));
+        // Names absent from token_map fall through to the global fallback.
+        assert_eq!(lang.resolve_capture("comment"), Some(SyntaxToken::Comment));
+    }
 }
