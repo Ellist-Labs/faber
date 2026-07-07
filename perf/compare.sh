@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cross-editor performance comparison.
-# Runs felix, Zed, and VS Code on the same fixture and writes a report.
+# Runs faber, Zed, and VS Code on the same fixture and writes a report.
 #
 # Prereqs:
 #   brew install hyperfine
@@ -32,7 +32,7 @@ if [ ! -f "$FIXTURES_DIR/small.rs" ]; then
   bash "$FIXTURES_DIR/gen.sh"
 fi
 
-# Build felix release
+# Build faber release
 cd "$PROJECT_DIR"
 cargo build --release -q
 FELIX="$PROJECT_DIR/target/release/felix"
@@ -41,7 +41,7 @@ FELIX="$PROJECT_DIR/target/release/felix"
 declare -a EDITOR_CMDS EDITOR_NAMES
 
 EDITOR_CMDS+=("$FELIX")
-EDITOR_NAMES+=("felix")
+EDITOR_NAMES+=("faber")
 
 for ed in zed code; do
   if command -v "$ed" &>/dev/null; then
@@ -53,7 +53,7 @@ for ed in zed code; do
 done
 
 if [ ${#EDITOR_CMDS[@]} -lt 2 ]; then
-  echo "WARNING: Only felix found. Install Zed and/or VS Code for a full comparison."
+  echo "WARNING: Only faber found. Install Zed and/or VS Code for a full comparison."
 fi
 
 # ── Startup benchmark via hyperfine ──────────────────────────────────────────
@@ -120,8 +120,8 @@ TODAY=$(date -u +%Y-%m-%d)
   echo ""
   echo "## Budget gate"
   echo ""
-  echo "felix must beat VS Code on startup time and idle RAM."
-  echo "_(Results above should show felix < code on both metrics.)_"
+  echo "faber must beat VS Code on startup time and idle RAM."
+  echo "_(Results above should show faber < code on both metrics.)_"
   echo ""
   echo "## Notes"
   echo "- Measurements are wall-clock on this machine only; reproduce on same hardware."

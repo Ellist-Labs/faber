@@ -1,4 +1,4 @@
-# Felix performance budgets
+# Faber performance budgets
 # These are the pass/fail thresholds enforced by perf/macro.sh.
 #
 # Current tier: "beat VS Code" (Electron baseline)

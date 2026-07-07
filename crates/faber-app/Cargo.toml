@@ -1,0 +1,18 @@
+[package]
+name = "faber"
+version = "0.1.0"
+edition = "2024"
+description = "A lean, fast, GPU-accelerated code editor"
+license = "MIT"
+
+[[bin]]
+name = "faber"
+path = "src/main.rs"
+
+[dependencies]
+faber-editor = { path = "../faber-editor" }
+ropey = "1"
+faber-settings = { path = "../faber-settings" }
+faber-theme = { path = "../faber-theme" }
+gpui = "0.2"
+rust-embed = "8"

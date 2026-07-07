@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "crates/felix-core",
-    "crates/felix-lang",
-    "crates/felix-editor",
-    "crates/felix-theme",
-    "crates/felix-settings",
-    "crates/felix-app",
+    "crates/faber-core",
+    "crates/faber-lang",
+    "crates/faber-editor",
+    "crates/faber-theme",
+    "crates/faber-settings",
+    "crates/faber-app",
 ]
 resolver = "2"

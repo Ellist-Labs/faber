@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Felix macro performance harness.
+# Faber macro performance harness.
 # Measures startup time and RSS against perf/budgets.toml thresholds.
 # Must run in a graphical session (opens a real window).
 #
@@ -23,7 +23,7 @@ FIXTURES_DIR="$SCRIPT_DIR/fixtures"
 BASELINE="$SCRIPT_DIR/baseline.json"
 UPDATE_BASELINE="${1:-}"
 
-echo "=== felix macro benchmark ==="
+echo "=== faber macro benchmark ==="
 echo ""
 
 # Generate fixtures if missing
@@ -41,36 +41,36 @@ BINARY="$PROJECT_DIR/target/release/felix"
 echo "  $BINARY"
 echo ""
 
-TMPOUT=$(mktemp /tmp/felix_perf_XXXXXX)
+TMPOUT=$(mktemp /tmp/faber_perf_XXXXXX)
 FAILED=0
 
-# Run felix on a fixture, wait for FELIX_READY, measure startup_ms + RSS.
+# Run faber on a fixture, wait for FABER_READY, measure startup_ms + RSS.
 # Prints two space-separated values: startup_ms rss_mb
-run_felix() {
+run_faber() {
   local fixture="$1"
 
   "$BINARY" "$fixture" > "$TMPOUT" 2>&1 &
   local FPID=$!
 
-  # Wait up to 15s for FELIX_READY
+  # Wait up to 15s for FABER_READY
   local timeout=150
   while [ $timeout -gt 0 ]; do
-    if grep -q "FELIX_READY" "$TMPOUT" 2>/dev/null; then
+    if grep -q "FABER_READY" "$TMPOUT" 2>/dev/null; then
       break
     fi
     sleep 0.1
     timeout=$(( timeout - 1 ))
   done
 
-  if ! grep -q "FELIX_READY" "$TMPOUT" 2>/dev/null; then
-    echo "ERROR: FELIX_READY not seen within 15s for $fixture" >&2
+  if ! grep -q "FABER_READY" "$TMPOUT" 2>/dev/null; then
+    echo "ERROR: FABER_READY not seen within 15s for $fixture" >&2
     kill "$FPID" 2>/dev/null; wait "$FPID" 2>/dev/null || true
     rm -f "$TMPOUT"
     exit 1
   fi
 
   local STARTUP_MS
-  STARTUP_MS=$(grep "FELIX_READY" "$TMPOUT" | grep -oE 'startup_ms=[0-9]+' | head -1 | cut -d= -f2)
+  STARTUP_MS=$(grep "FABER_READY" "$TMPOUT" | grep -oE 'startup_ms=[0-9]+' | head -1 | cut -d= -f2)
 
   # Settle 1s, then snapshot RSS
   sleep 1
@@ -96,14 +96,14 @@ check() {
 
 # ── Test 1: small file (startup + idle RSS) ──────────────────────────────────
 echo "--- small file (startup + idle RSS) ---"
-read -r STARTUP_MS IDLE_RSS_MB < <(run_felix "$FIXTURES_DIR/small.rs")
+read -r STARTUP_MS IDLE_RSS_MB < <(run_faber "$FIXTURES_DIR/small.rs")
 check "startup_ms"   "$STARTUP_MS"  "$BUDGET_STARTUP_MS"
 check "idle_rss_mb"  "$IDLE_RSS_MB" "$BUDGET_IDLE_RSS_MB"
 echo ""
 
 # ── Test 2: large file (open time + RSS) ─────────────────────────────────────
 echo "--- large file (open time + RSS) ---"
-read -r LARGE_OPEN_MS LARGE_RSS_MB < <(run_felix "$FIXTURES_DIR/large.rs")
+read -r LARGE_OPEN_MS LARGE_RSS_MB < <(run_faber "$FIXTURES_DIR/large.rs")
 check "large_open_ms"  "$LARGE_OPEN_MS"  "$BUDGET_LARGE_OPEN_MS"
 check "large_rss_mb"   "$LARGE_RSS_MB"   "$BUDGET_LARGE_OPEN_RSS_MB"
 echo ""

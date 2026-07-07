@@ -1608,6 +1608,67 @@ dependencies = [
 ]
 
 [[package]]
+name = "faber"
+version = "0.1.0"
+dependencies = [
+ "faber-editor",
+ "faber-settings",
+ "faber-theme",
+ "gpui",
+ "ropey",
+ "rust-embed",
+]
+
+[[package]]
+name = "faber-core"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "ropey",
+]
+
+[[package]]
+name = "faber-editor"
+version = "0.1.0"
+dependencies = [
+ "divan",
+ "faber-core",
+ "faber-lang",
+ "proptest",
+ "pulldown-cmark",
+ "ropey",
+ "tree-sitter",
+ "tree-sitter-rust",
+]
+
+[[package]]
+name = "faber-lang"
+version = "0.1.0"
+dependencies = [
+ "faber-core",
+ "ropey",
+ "tree-sitter",
+ "tree-sitter-md",
+ "tree-sitter-rust",
+]
+
+[[package]]
+name = "faber-settings"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "faber-theme"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fastrand"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1635,67 +1696,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
-]
-
-[[package]]
-name = "felix"
-version = "0.1.0"
-dependencies = [
- "felix-editor",
- "felix-settings",
- "felix-theme",
- "gpui",
- "ropey",
- "rust-embed",
-]
-
-[[package]]
-name = "felix-core"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "ropey",
-]
-
-[[package]]
-name = "felix-editor"
-version = "0.1.0"
-dependencies = [
- "divan",
- "felix-core",
- "felix-lang",
- "proptest",
- "pulldown-cmark",
- "ropey",
- "tree-sitter",
- "tree-sitter-rust",
-]
-
-[[package]]
-name = "felix-lang"
-version = "0.1.0"
-dependencies = [
- "felix-core",
- "ropey",
- "tree-sitter",
- "tree-sitter-md",
- "tree-sitter-rust",
-]
-
-[[package]]
-name = "felix-settings"
-version = "0.1.0"
-dependencies = [
- "serde",
- "toml 0.8.23",
-]
-
-[[package]]
-name = "felix-theme"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

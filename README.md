@@ -1,4 +1,4 @@
-# Felix
+# Faber
 
 A lean, GPU-accelerated code editor built with Rust and GPUI. Lower RAM and CPU than Electron editors while remaining extensible.
 
@@ -18,7 +18,7 @@ A lean, GPU-accelerated code editor built with Rust and GPUI. Lower RAM and CPU 
 ```sh
 # Clone
 git clone git@github.com:ellist/felix.git
-cd felix
+cd faber
 
 # Install Rust toolchain (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -73,10 +73,10 @@ Budget thresholds are defined in `perf/budgets.toml`. Current tier: beat VS Code
 ## Workspace Layout
 
 ```
-crates/felix-core/      Rope helpers, Selection, Anchor, movement, search — no gpui
-crates/felix-lang/      Language, LanguageRegistry, grammar loading — no gpui
-crates/felix-editor/    Document, Command dispatch, syntax, history — no gpui
-crates/felix-app/       GPUI shell: EditorView, Workspace, keybindings, UI
+crates/faber-core/      Rope helpers, Selection, Anchor, movement, search — no gpui
+crates/faber-lang/      Language, LanguageRegistry, grammar loading — no gpui
+crates/faber-editor/    Document, Command dispatch, syntax, history — no gpui
+crates/faber-app/       GPUI shell: EditorView, Workspace, keybindings, UI
 ```
 
-Dependency direction is strictly downward — `gpui` is absent from every crate except `felix-app`.
+Dependency direction is strictly downward — `gpui` is absent from every crate except `faber-app`.

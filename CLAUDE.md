@@ -1,8 +1,8 @@
-# Felix — Agent Instructions
+# Faber — Agent Instructions
 
 ## Project
 
-Felix is a lean, GPU-accelerated code editor (Rust + GPUI). Its core value proposition is
+Faber is a lean, GPU-accelerated code editor (Rust + GPUI). Its core value proposition is
 **lower RAM and CPU than Electron editors while being extensible like VSCode**.
 Every code decision must protect that premise.
 
@@ -13,15 +13,15 @@ LSP (language intelligence), WASM/wasmtime (extensions
 ## Workspace structure
 
 4-crate Cargo workspace. Dependency direction is strictly downward — gpui is absent from every
-crate except felix-app, enforced by the compiler.
+crate except faber-app, enforced by the compiler.
 
 ```
-crates/felix-core/    NO gpui — rope helpers, Selection/SelectionSet, Transaction/ChangeSet,
+crates/faber-core/    NO gpui — rope helpers, Selection/SelectionSet, Transaction/ChangeSet,
                       Anchor+Bias, movement, search, utf16 helpers
-crates/felix-lang/    NO gpui — Language, LanguageId, LanguageRegistry, grammar loading
-crates/felix-editor/  NO gpui — Document (text+syntax+history+per-view selections),
+crates/faber-lang/    NO gpui — Language, LanguageId, LanguageRegistry, grammar loading
+crates/faber-editor/  NO gpui — Document (text+syntax+history+per-view selections),
                       Command + dispatch (UI-free editing engine)
-crates/felix-app/     gpui shell — EditorView, virtualized render, keybindings, Workspace
+crates/faber-app/     gpui shell — EditorView, virtualized render, keybindings, Workspace
 ```
 
 ## Performance Guardrails
@@ -60,7 +60,7 @@ Budgets are comments in `perf/budgets.toml`; enforcement is in `perf/macro.sh`.
 
 Run `perf/compare.sh` at feature milestones (requires `brew install hyperfine`
 plus Zed and VS Code installed with CLI launchers).
-Felix must beat VS Code on startup time and idle RAM. See the `/cross-editor-benchmark` skill.
+Faber must beat VS Code on startup time and idle RAM. See the `/cross-editor-benchmark` skill.
 
 ### Deferred metrics (add once input handling exists)
 
@@ -70,12 +70,12 @@ Add to `perf/budgets.toml` and `perf/macro.sh` when the infrastructure is in pla
 
 ## Architecture Rules
 
-- **felix-core and felix-editor must never import gpui.** The workspace enforces this at compile time.
-- **felix-app is the thin GPUI shell only** — UI wiring, no business logic.
+- **faber-core and faber-editor must never import gpui.** The workspace enforces this at compile time.
+- **faber-app is the thin GPUI shell only** — UI wiring, no business logic.
 - All document mutations flow through a single choke-point: `Document::apply(Transaction)`.
-- New subsystems: logic in felix-core/felix-editor, UI wiring in felix-app.
+- New subsystems: logic in faber-core/faber-editor, UI wiring in faber-app.
 - Extension API design is a long-term contract; design the surface carefully before stabilizing it.
-- Benches live in `crates/felix-editor/benches/` (hot-path coverage, divan, harness=false).
+- Benches live in `crates/faber-editor/benches/` (hot-path coverage, divan, harness=false).
 
 ## Code Style
 

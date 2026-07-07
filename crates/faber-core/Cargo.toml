@@ -1,0 +1,12 @@
+[package]
+name = "faber-core"
+version = "0.1.0"
+edition = "2024"
+description = "UI-agnostic core primitives: rope helpers, selection, transaction, search"
+license = "MIT"
+
+[dependencies]
+ropey = "1"
+
+[dev-dependencies]
+proptest = "1"
