@@ -11,14 +11,14 @@ use faber_editor::{
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel,
-    Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window,
+    Render, ScrollStrategy, SharedString, Stateful, Task, UniformListScrollHandle, Window,
     anchored, deferred, div, img, prelude::*, px, svg,
 };
 
 use crate::editor_view::{EditorEvent, EditorView};
 use crate::settings_view::{SettingsStore, SettingsView};
 use crate::sidebar::{SidebarItem, SidebarItemKind, SidebarState, default_items};
-use crate::theme::RuntimeTheme;
+use crate::theme::{ActiveTheme, RuntimeTheme};
 use crate::ui::{IconName, ScrollbarDrag, h_flex, v_flex};
 use crate::ui::scrollbar::update_drag;
 use crate::welcome_view::render_welcome;
@@ -35,6 +35,39 @@ pub enum TabContent {
 struct TabMenu {
     tab_id: usize,
     pos: Point<Pixels>,
+}
+
+type MenuClickFn = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
+
+/// A single row in the tab context menu. Disabled rows render dimmed and
+/// ignore clicks.
+#[derive(IntoElement)]
+struct ContextMenuItem {
+    label: SharedString,
+    enabled: bool,
+    on_click: MenuClickFn,
+}
+
+impl RenderOnce for ContextMenuItem {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let t = cx.theme().clone();
+        div()
+            .id(self.label.clone())
+            .flex()
+            .items_center()
+            .px(px(t.sp5))
+            .py(px(t.sp2))
+            .text_color(if self.enabled { t.text } else { t.text_subtle })
+            .text_size(px(t.font_size_caption))
+            .font_family(t.ui_family.clone())
+            .when(self.enabled, |el| el.cursor_pointer().hover(|s| s.bg(t.line_highlight)))
+            .when(self.enabled, |el| {
+                el.on_mouse_down(MouseButton::Left, move |e, w, cx| {
+                    (self.on_click)(e, w, cx)
+                })
+            })
+            .child(self.label)
+    }
 }
 
 pub struct Tab {
@@ -708,104 +741,132 @@ impl Workspace {
         let has_others = tab_count > 1;
         let root = self.root_folder.clone();
 
-        // ── helper: build a single menu row ──────────────────────────────────
-        let row = |id: &'static str, label: String, enabled: bool, t: &RuntimeTheme| {
-            h_flex()
-                .id(id)
-                .px(px(12.))
-                .py(px(4.))
-                .gap_2()
-                .font_family(t.ui_family.clone())
-                .text_size(px(t.font_size_caption))
-                .text_color(if enabled { t.text } else { t.text_subtle })
-                .when(enabled, |el| el.cursor_pointer().hover(|el| el.bg(t.line_highlight)))
-                .child(label)
+        let ws = cx.entity();
+
+        // ── helper: build a single menu item ─────────────────────────────────
+        let item = |label: SharedString, enabled: bool, on_click: MenuClickFn| {
+            ContextMenuItem { label, enabled, on_click }
         };
-        let sep = || div().h(px(1.)).mx(px(4.)).my(px(2.)).bg(t.separator);
+        let sep = || div().h(px(1.)).mx(px(t.sp2)).my(px(t.sp1)).bg(t.separator);
 
         // ── close group ──────────────────────────────────────────────────────
-        let close_item = row("close", rust_i18n::t!("tab_menu.close").to_string(), true, t)
-            .on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
-                ws.tab_menu = None;
-                if let Some(ix) = ws.tabs.iter().position(|t| t.id == tab_id) {
-                    ws.request_close_tab(ix, window, cx);
-                }
-            }));
+        let close_item = {
+            let ws = ws.clone();
+            item(rust_i18n::t!("tab_menu.close").into(), true, Box::new(move |_, window, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.tab_menu = None;
+                    if let Some(ix) = ws.tabs.iter().position(|t| t.id == tab_id) {
+                        ws.request_close_tab(ix, window, cx);
+                    }
+                });
+            }))
+        };
 
-        let close_others = row("close-others", rust_i18n::t!("tab_menu.close_others").to_string(), has_others, t)
-            .when(has_others, |el| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
-                ws.tab_menu = None;
-                ws.close_other_tabs(tab_id, window, cx);
-            })));
+        let close_others = {
+            let ws = ws.clone();
+            item(rust_i18n::t!("tab_menu.close_others").into(), has_others, Box::new(move |_, window, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.tab_menu = None;
+                    ws.close_other_tabs(tab_id, window, cx);
+                });
+            }))
+        };
 
-        let close_all = row("close-all", rust_i18n::t!("tab_menu.close_all").to_string(), true, t)
-            .on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
-                ws.tab_menu = None;
-                ws.close_all_tabs(window, cx);
-            }));
+        let close_all = {
+            let ws = ws.clone();
+            item(rust_i18n::t!("tab_menu.close_all").into(), true, Box::new(move |_, window, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.tab_menu = None;
+                    ws.close_all_tabs(window, cx);
+                });
+            }))
+        };
 
-        let close_left = row("close-left", rust_i18n::t!("tab_menu.close_left").to_string(), has_left, t)
-            .when(has_left, |el| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
-                ws.tab_menu = None;
-                ws.close_tabs_to_left(tab_id, window, cx);
-            })));
+        let close_left = {
+            let ws = ws.clone();
+            item(rust_i18n::t!("tab_menu.close_left").into(), has_left, Box::new(move |_, window, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.tab_menu = None;
+                    ws.close_tabs_to_left(tab_id, window, cx);
+                });
+            }))
+        };
 
-        let close_right = row("close-right", rust_i18n::t!("tab_menu.close_right").to_string(), has_right, t)
-            .when(has_right, |el| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
-                ws.tab_menu = None;
-                ws.close_tabs_to_right(tab_id, window, cx);
-            })));
+        let close_right = {
+            let ws = ws.clone();
+            item(rust_i18n::t!("tab_menu.close_right").into(), has_right, Box::new(move |_, window, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.tab_menu = None;
+                    ws.close_tabs_to_right(tab_id, window, cx);
+                });
+            }))
+        };
 
         // ── copy group ───────────────────────────────────────────────────────
-        let copy_path = row("copy-path", rust_i18n::t!("tab_menu.copy_path").to_string(), has_path, t)
-            .when(has_path, {
-                let p = path.clone().unwrap();
-                |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
+        let copy_path = {
+            let ws = ws.clone();
+            let p = path.clone();
+            item(rust_i18n::t!("tab_menu.copy_path").into(), has_path, Box::new(move |_, _, cx| {
+                let Some(p) = p.clone() else { return };
+                ws.update(cx, |ws, cx| {
                     ws.tab_menu = None;
                     cx.write_to_clipboard(ClipboardItem::new_string(p.display().to_string()));
                     cx.notify();
-                }))
-            });
+                });
+            }))
+        };
 
-        let copy_rel = row("copy-rel", rust_i18n::t!("tab_menu.copy_relative_path").to_string(), has_path, t)
-            .when(has_path, {
-                let rel = match (&root, &path) {
-                    (Some(r), Some(p)) => p.strip_prefix(r).ok()
-                        .map(|rel| rel.display().to_string())
-                        .unwrap_or_else(|| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
-                    (None, Some(p)) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                    _ => String::new(),
-                };
-                |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
+        let copy_rel = {
+            let ws = ws.clone();
+            let rel = match (&root, &path) {
+                (Some(r), Some(p)) => p.strip_prefix(r).ok()
+                    .map(|rel| rel.display().to_string())
+                    .unwrap_or_else(|| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                (None, Some(p)) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                _ => String::new(),
+            };
+            item(rust_i18n::t!("tab_menu.copy_relative_path").into(), has_path, Box::new(move |_, _, cx| {
+                let rel = rel.clone();
+                ws.update(cx, |ws, cx| {
                     ws.tab_menu = None;
-                    cx.write_to_clipboard(ClipboardItem::new_string(rel.clone()));
+                    cx.write_to_clipboard(ClipboardItem::new_string(rel));
                     cx.notify();
-                }))
-            });
+                });
+            }))
+        };
 
         // ── reveal group ─────────────────────────────────────────────────────
-        let reveal_finder = row("reveal-finder", rust_i18n::t!("tab_menu.reveal_in_finder").to_string(), has_path, t)
-            .when(has_path, {
-                let p = path.clone().unwrap();
-                |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
+        let reveal_finder = {
+            let ws = ws.clone();
+            let p = path.clone();
+            item(rust_i18n::t!("tab_menu.reveal_in_finder").into(), has_path, Box::new(move |_, _, cx| {
+                let Some(p) = p.clone() else { return };
+                ws.update(cx, |ws, cx| {
                     ws.tab_menu = None;
                     cx.reveal_path(&p);
                     cx.notify();
-                }))
-            });
+                });
+            }))
+        };
 
-        let reveal_explorer = row("reveal-explorer", rust_i18n::t!("tab_menu.reveal_in_explorer").to_string(), has_path, t)
-            .when(has_path, {
-                let p = path.clone().unwrap();
-                |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
+        let reveal_explorer = {
+            let ws = ws.clone();
+            let p = path.clone();
+            item(rust_i18n::t!("tab_menu.reveal_in_explorer").into(), has_path, Box::new(move |_, _, cx| {
+                let Some(p) = p.clone() else { return };
+                ws.update(cx, |ws, cx| {
                     ws.tab_menu = None;
                     ws.sidebar.open = true;
-                    ws.sidebar.active = crate::sidebar::SidebarItemKind::Explorer;
-                    let path = p.clone();
-                    ws.reveal_in_tree(&path, cx);
+                    ws.sidebar.active = SidebarItemKind::Explorer;
+                    ws.reveal_in_tree(&p, cx);
                     cx.notify();
-                }))
-            });
+                });
+            }))
+        };
+
+        let items: Vec<ContextMenuItem> = vec![close_item, close_others, close_all, close_left, close_right];
+        let copy_items: Vec<ContextMenuItem> = vec![copy_path, copy_rel];
+        let reveal_items: Vec<ContextMenuItem> = vec![reveal_finder, reveal_explorer];
 
         let menu_div = v_flex()
             .id("tab-ctx-menu")
@@ -818,19 +879,13 @@ impl Workspace {
             .border_1()
             .border_color(t.border)
             .rounded(px(t.radius_md))
-            .py(px(4.))
+            .py(px(t.sp2))
             .min_w(px(200.))
-            .child(close_item)
-            .child(close_others)
-            .child(close_all)
-            .child(close_left)
-            .child(close_right)
+            .children(items)
             .child(sep())
-            .child(copy_path)
-            .child(copy_rel)
+            .children(copy_items)
             .child(sep())
-            .child(reveal_finder)
-            .child(reveal_explorer);
+            .children(reveal_items);
 
         Some(
             deferred(anchored().position(pos).snap_to_window().child(menu_div))

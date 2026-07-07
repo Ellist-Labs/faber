@@ -29,14 +29,16 @@ pub enum SidebarItemKind {
 pub struct SidebarItem {
     pub kind: SidebarItemKind,
     pub icon: IconName,
-    pub title: &'static str,
+    /// Stable GPUI element ID for the activity-bar button — not a display
+    /// label (the visible title comes from i18n `t!()` in `render_sidebar_panel`).
+    pub id: &'static str,
 }
 
 pub fn default_items() -> Vec<SidebarItem> {
     vec![
-        SidebarItem { kind: SidebarItemKind::Explorer, icon: IconName::FileCopy, title: "Explorer" },
-        SidebarItem { kind: SidebarItemKind::Search, icon: IconName::Search, title: "Search" },
-        SidebarItem { kind: SidebarItemKind::Outline, icon: IconName::Toc, title: "Outline" },
+        SidebarItem { kind: SidebarItemKind::Explorer, icon: IconName::FileCopy, id: "Explorer" },
+        SidebarItem { kind: SidebarItemKind::Search, icon: IconName::Search, id: "Search" },
+        SidebarItem { kind: SidebarItemKind::Outline, icon: IconName::Toc, id: "Outline" },
     ]
 }
 
@@ -72,7 +74,7 @@ impl Workspace {
                 let kind = item.kind;
                 let is_active = self.sidebar.open && self.sidebar.active == kind;
                 div()
-                    .id(item.title)
+                    .id(item.id)
                     .group("activity-item")
                     .flex()
                     .items_center()
