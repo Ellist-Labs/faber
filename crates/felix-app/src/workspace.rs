@@ -1064,8 +1064,8 @@ impl Render for Workspace {
                 }))
             });
 
-        // Empty state: minimal UI — just the welcome screen, no chrome.
-        if content.is_none() {
+        // Empty state: show welcome screen only when no folder and no tabs are open.
+        if content.is_none() && self.root_folder.is_none() {
             return base.flex().items_center().justify_center().child(render_welcome(&t)).into_any();
         }
 
@@ -1074,7 +1074,7 @@ impl Render for Workspace {
             .min_w(px(0.))
             .h_full()
             .child(self.render_tab_bar(&t, cx))
-            .child(div().flex_1().min_h(px(0.)).child(content.expect("checked above")));
+            .child(div().flex_1().min_h(px(0.)).when_some(content, |el, c| el.child(c)));
 
         let body_row = h_flex()
             .flex_1()
