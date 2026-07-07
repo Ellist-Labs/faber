@@ -86,7 +86,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                                 .on_click(|_, window: &mut Window, cx: &mut App| {
                                     window.dispatch_action(Box::new(NewFile), cx)
                                 })
-                                .child(Icon::new(IconName::Add).size(16.0).color(text_muted))
+                                .child(Icon::new(IconName::Add).size(px(16.)).color(text_muted))
                                 .child(
                                     div()
                                         .flex_1()
@@ -114,7 +114,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                                     window.dispatch_action(Box::new(OpenFile), cx)
                                 })
                                 .child(
-                                    Icon::new(IconName::FileCopy).size(16.0).color(text_muted),
+                                    Icon::new(IconName::FileCopy).size(px(16.)).color(text_muted),
                                 )
                                 .child(
                                     div()
@@ -142,7 +142,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                                 .on_click(|_, window: &mut Window, cx: &mut App| {
                                     window.dispatch_action(Box::new(OpenFolder), cx)
                                 })
-                                .child(Icon::new(IconName::Toc).size(16.0).color(text_muted))
+                                .child(Icon::new(IconName::Toc).size(px(16.)).color(text_muted))
                                 .child(
                                     div()
                                         .flex_1()
@@ -175,7 +175,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                                 .on_click(|_, window: &mut Window, cx: &mut App| {
                                     window.dispatch_action(Box::new(OpenSettings), cx)
                                 })
-                                .child(Icon::new(IconName::Settings).size(16.0).color(text_muted))
+                                .child(Icon::new(IconName::Settings).size(px(16.)).color(text_muted))
                                 .child(
                                     div()
                                         .flex_1()

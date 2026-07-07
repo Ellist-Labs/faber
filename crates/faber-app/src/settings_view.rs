@@ -255,7 +255,7 @@ impl SettingsView {
                                 }),
                             )
                         })
-                        .child(Icon::new(icon).size(14.0).color(color))
+                        .child(Icon::new(icon).size(px(14.)).color(color))
                 };
                 h_flex()
                     .rounded(px(t.radius_md))
