@@ -77,6 +77,14 @@ Add to `perf/budgets.toml` and `perf/macro.sh` when the infrastructure is in pla
 - Extension API design is a long-term contract; design the surface carefully before stabilizing it.
 - Benches live in `crates/faber-editor/benches/` (hot-path coverage, divan, harness=false).
 
+## Internationalization
+
+- Every user-facing string in `faber-app` must use `t!("namespace.key")` — never hardcode literals.
+- New string = new key in `crates/faber-app/locales/en.toml` first, then `t!()` in code.
+- Exceptions: app name `"Faber"`, GPUI element IDs, log/stderr messages, serde config keys, symbolic chips (`"Aa"`, `"W"`, `".*"`).
+- Before finishing string-touching work: run `/i18n-guardrails` skill + `cargo test -p faber --test i18n_parity`.
+- Adding a locale: copy `en.toml`, translate values (keep all keys), add `Language` variant to `faber-settings`. See `.claude/skills/i18n-guardrails/SKILL.md`.
+
 ## Code Style
 
 - Comments: minimum. Only document non-obvious invariants or perf constraints.

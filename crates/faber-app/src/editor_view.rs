@@ -22,6 +22,7 @@ use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
 use crate::ui::{IconName, ScrollbarDrag, render_scrollbar};
 use crate::ui::scrollbar::{start_drag, update_drag};
+use rust_i18n::t;
 
 // ── layout ─────────────────────────────────────────────────────────────────────
 // Line height and char width live on RuntimeTheme (settings-scaled).
@@ -1266,7 +1267,7 @@ impl EditorView {
         let match_info = if !self.search_query.is_empty() && !self.matches.is_empty() {
             format!("{}/{}", self.match_idx + 1, self.matches.len())
         } else if !self.search_query.is_empty() {
-            "no matches".to_string()
+            t!("search.no_matches").to_string()
         } else {
             String::new()
         };
@@ -1433,7 +1434,7 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(|v, _, window, cx| v.on_replace_one(&ReplaceOne, window, cx)),
             )
-            .child("Replace");
+            .child(t!("search.replace").to_string());
 
         let replace_all_btn = div()
             .id("replace-all")
@@ -1453,7 +1454,7 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(|v, _, window, cx| v.on_replace_all(&ReplaceAll, window, cx)),
             )
-            .child("Replace All");
+            .child(t!("search.replace_all").to_string());
 
         // ── right-side wrappers (same fixed width → inputs are identical size) ──
         // Search: [|] [◄][count][►] [|] [Aa][W][.*] [|] [✕]
@@ -1505,7 +1506,7 @@ impl EditorView {
                         v.reset_blink(cx);
                     }))
                     .child(if !search_focused && self.search_query.is_empty() {
-                        div().text_color(t.text_subtle).child("Search…").into_any()
+                        div().text_color(t.text_subtle).child(t!("search.placeholder").to_string()).into_any()
                     } else {
                         div().flex().flex_row().items_center()
                             .child(div().text_color(t.text).child(SharedString::from(s_before)))
@@ -1536,7 +1537,7 @@ impl EditorView {
                         v.reset_blink(cx);
                     }))
                     .child(if !replace_focused && self.replace_query.is_empty() {
-                        div().text_color(t.text_subtle).child("Replace with…").into_any()
+                        div().text_color(t.text_subtle).child(t!("search.replace_placeholder").to_string()).into_any()
                     } else {
                         div().flex().flex_row().items_center()
                             .child(div().text_color(t.text).child(SharedString::from(r_before)))
@@ -1650,7 +1651,7 @@ impl Render for EditorView {
 
         let root_folder = cx.try_global::<ProjectRoot>().and_then(|r| r.0.clone());
         let path_label: String = if self.doc.is_untitled() {
-            "Untitled".to_string()
+            t!("editor.untitled").to_string()
         } else {
             let path = &self.doc.path;
             if let Some(root) = root_folder.as_ref() {

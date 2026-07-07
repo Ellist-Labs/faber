@@ -5,6 +5,66 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 
+/// UI display language. `System` auto-detects from the OS locale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Language {
+    #[default]
+    System,
+    En,
+}
+
+impl Language {
+    /// All concrete locales supported by this build (excludes `System`).
+    pub const SUPPORTED: &'static [Language] = &[Language::En];
+
+    /// BCP-47 code, or `None` for `System`.
+    pub fn code(self) -> Option<&'static str> {
+        match self {
+            Language::System => None,
+            Language::En => Some("en"),
+        }
+    }
+
+    /// The language's own name (autonym). Not translated — used in the settings picker.
+    pub fn autonym(self) -> &'static str {
+        match self {
+            Language::System => "",
+            Language::En => "English",
+        }
+    }
+
+    /// Serde key used to round-trip through settings.toml.
+    pub fn key(self) -> &'static str {
+        match self {
+            Language::System => "system",
+            Language::En => "en",
+        }
+    }
+
+    fn from_locale(locale: &str) -> Language {
+        match locale.split(['-', '_']).next().unwrap_or("") {
+            "en" => Language::En,
+            _ => Language::En,
+        }
+    }
+
+    fn detect_system() -> Language {
+        sys_locale::get_locale()
+            .as_deref()
+            .map(Language::from_locale)
+            .unwrap_or(Language::En)
+    }
+
+    /// Resolved BCP-47 code — never empty (fallback: `"en"`).
+    pub fn effective_code(self) -> &'static str {
+        match self {
+            Language::System => Language::detect_system().code().unwrap_or("en"),
+            other => other.code().unwrap_or("en"),
+        }
+    }
+}
+
 /// When to automatically save dirty documents. Mirrors VS Code's
 /// `files.autoSave` values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -28,6 +88,8 @@ pub struct Settings {
     pub line_numbers: bool,
     /// Whether to show the interactive scrollbar on scrollable views.
     pub show_scrollbar: bool,
+    /// Display language. Defaults to `System` (auto-detect from OS locale).
+    pub language: Language,
 }
 
 impl Default for Settings {
@@ -38,6 +100,7 @@ impl Default for Settings {
             font_size: DEFAULT_FONT_SIZE,
             line_numbers: true,
             show_scrollbar: true,
+            language: Language::default(),
         }
     }
 }
@@ -95,6 +158,7 @@ mod tests {
             font_size: 16.0,
             line_numbers: true,
             show_scrollbar: false,
+            language: Language::En,
         };
         save_to(&s, &path).unwrap();
         assert_eq!(load_from(&path), s);
@@ -133,5 +197,43 @@ mod tests {
         let s = Settings { auto_save: AutoSave::OnFocusChange, ..Default::default() };
         let text = toml::to_string(&s).unwrap();
         assert!(text.contains("onFocusChange"), "{text}");
+    }
+
+    #[test]
+    fn language_roundtrip() {
+        let path = tmp_path("lang");
+        let s = Settings { language: Language::En, ..Default::default() };
+        save_to(&s, &path).unwrap();
+        assert_eq!(load_from(&path).language, Language::En);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn language_default_is_system() {
+        assert_eq!(Settings::default().language, Language::System);
+    }
+
+    #[test]
+    fn language_effective_code_en() {
+        assert_eq!(Language::En.effective_code(), "en");
+    }
+
+    #[test]
+    fn language_system_resolves_non_empty() {
+        let code = Language::System.effective_code();
+        assert!(!code.is_empty());
+    }
+
+    #[test]
+    fn language_from_locale_english_variants() {
+        assert_eq!(Language::from_locale("en-US"), Language::En);
+        assert_eq!(Language::from_locale("en"), Language::En);
+        assert_eq!(Language::from_locale("en_GB"), Language::En);
+    }
+
+    #[test]
+    fn language_from_locale_unknown_falls_back() {
+        assert_eq!(Language::from_locale("klingon"), Language::En);
+        assert_eq!(Language::from_locale(""), Language::En);
     }
 }

@@ -16,3 +16,7 @@ faber-settings = { path = "../faber-settings" }
 faber-theme = { path = "../faber-theme" }
 gpui = "0.2"
 rust-embed = "8"
+rust-i18n = "3"
+
+[dev-dependencies]
+toml = "0.8"

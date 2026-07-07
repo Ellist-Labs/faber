@@ -1,0 +1,114 @@
+# English translations — the source of truth.
+# All other locale files must contain exactly these keys.
+# Rules: never hardcode user-facing strings in code; always add a key here first.
+
+[welcome]
+tagline = "Lean, GPU-accelerated code editor"
+get_started = "GET STARTED"
+new_file = "New File"
+open_file = "Open File…"
+open_folder = "Open Folder…"
+configure = "CONFIGURE"
+open_settings = "Open Settings"
+
+[settings]
+title = "Settings"
+
+[settings.section]
+editor = "Editor"
+appearance = "Appearance"
+general = "General"
+
+[settings.line_numbers]
+title = "Line Numbers"
+desc = "Show line numbers in the gutter."
+
+[settings.auto_save]
+title = "Auto Save"
+desc = "Controls when dirty files are saved automatically."
+
+[settings.auto_save_delay]
+title = "Auto Save Delay"
+desc = "Idle time before a dirty file is saved (After Delay only)."
+
+[settings.font_size]
+title = "Font Size"
+desc = "Base font size in pixels; the entire application scales from it."
+
+[settings.scrollbar]
+title = "Scrollbar"
+desc = "Show an interactive scrollbar on scrollable views."
+
+[settings.language]
+title = "Language"
+desc = "Interface language. Restart may be required for some changes."
+system = "Use System Language"
+
+[settings.auto_save_options]
+off = "Off"
+after_delay = "After Delay"
+on_focus_change = "On Focus Change"
+on_window_change = "On Window Change"
+
+[common]
+on = "On"
+off = "Off"
+
+[menu]
+settings = "Settings…"
+quit = "Quit Faber"
+file = "File"
+new_file = "New File"
+open_file = "Open File…"
+open_folder = "Open Folder…"
+save = "Save"
+close_file = "Close File"
+close_folder = "Close Folder"
+exit = "Exit"
+
+[tab_menu]
+close = "Close"
+close_others = "Close Others"
+close_all = "Close All"
+close_left = "Close to the Left"
+close_right = "Close to the Right"
+copy_path = "Copy Path"
+copy_relative_path = "Copy Relative Path"
+reveal_in_finder = "Reveal in Finder"
+reveal_in_explorer = "Reveal in File Explorer"
+
+[dialog]
+save_changes = "Save changes to %{name}?"
+unsaved_count = "%{count} file(s) have unsaved changes."
+save = "Save"
+dont_save = "Don't Save"
+cancel = "Cancel"
+save_all_quit = "Save All & Quit"
+quit_without_saving = "Quit Without Saving"
+
+[sidebar]
+explorer = "Explorer"
+search = "Search"
+outline = "Outline"
+no_folder = "No folder open"
+open_folder_hint = "Use File › Open Folder…"
+no_headings = "No headings"
+search_coming_soon = "Project search coming soon"
+
+[panel]
+panel = "Panel"
+terminal = "Terminal"
+coming_soon = "Coming soon"
+
+[editor]
+untitled = "Untitled"
+
+[search]
+placeholder = "Search…"
+replace_placeholder = "Replace with…"
+replace = "Replace"
+replace_all = "Replace All"
+no_matches = "no matches"
+
+[tab]
+settings = "Settings"

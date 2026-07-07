@@ -2,6 +2,7 @@ mod assets;
 mod editor_view;
 mod file_icon_data;
 mod file_icons;
+mod i18n;
 mod markdown_preview;
 mod settings_view;
 mod sidebar;
@@ -9,6 +10,8 @@ mod theme;
 mod ui;
 mod welcome_view;
 mod workspace;
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 use gpui::{
     App, Application, Bounds, Global, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
@@ -82,9 +85,9 @@ fn main() {
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         cx.set_global(settings_view::SettingsStore(faber_settings::load()));
         cx.set_global(ProjectRoot(None));
+        i18n::apply(cx);
         theme::apply_settings(cx);
         register_keybindings(cx);
-        register_menus(cx);
 
         let bounds = Bounds::centered(None, size(px(1024.), px(768.)), cx);
 
@@ -215,30 +218,31 @@ fn register_keybindings(cx: &mut App) {
     ]);
 }
 
-fn register_menus(cx: &mut App) {
+pub(crate) fn register_menus(cx: &mut App) {
+    use rust_i18n::t;
     cx.set_menus(vec![
         Menu {
             name: "Faber".into(),
             items: vec![
-                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action(t!("menu.settings").to_string(), OpenSettings),
                 MenuItem::separator(),
-                MenuItem::action("Quit Faber", Quit),
+                MenuItem::action(t!("menu.quit").to_string(), Quit),
             ],
         },
         Menu {
-            name: "File".into(),
+            name: t!("menu.file").to_string().into(),
             items: vec![
-                MenuItem::action("New File", NewFile),
+                MenuItem::action(t!("menu.new_file").to_string(), NewFile),
                 MenuItem::separator(),
-                MenuItem::action("Open File…", OpenFile),
-                MenuItem::action("Open Folder…", OpenFolder),
+                MenuItem::action(t!("menu.open_file").to_string(), OpenFile),
+                MenuItem::action(t!("menu.open_folder").to_string(), OpenFolder),
                 MenuItem::separator(),
-                MenuItem::action("Save", SaveFile),
+                MenuItem::action(t!("menu.save").to_string(), SaveFile),
                 MenuItem::separator(),
-                MenuItem::action("Close File", CloseFile),
-                MenuItem::action("Close Folder", CloseFolder),
+                MenuItem::action(t!("menu.close_file").to_string(), CloseFile),
+                MenuItem::action(t!("menu.close_folder").to_string(), CloseFolder),
                 MenuItem::separator(),
-                MenuItem::action("Exit", Quit),
+                MenuItem::action(t!("menu.exit").to_string(), Quit),
             ],
         },
     ]);

@@ -1,4 +1,5 @@
 use gpui::{App, IntoElement, StyleRefinement, Window, div, prelude::*, px};
+use rust_i18n::t;
 
 use crate::theme::RuntimeTheme;
 use crate::ui::{Icon, IconName, KeyHint, h_flex, v_flex};
@@ -18,7 +19,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
     let radius_sm = t.radius_sm;
 
     let ui_fam = ui_family.clone();
-    let section_label = move |label: &'static str| {
+    let section_label = move |label: String| {
         h_flex()
             .w_full()
             .gap_2()
@@ -55,7 +56,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                         .text_color(text_subtle)
                         .text_size(px(font_size_body))
                         .font_family(ui_family.clone())
-                        .child("Lean, GPU-accelerated code editor"),
+                        .child(t!("welcome.tagline").to_string()),
                 ),
         )
         // ── Action panel ─────────────────────────────────────────────────────
@@ -68,7 +69,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                 .child(
                     v_flex()
                         .gap_px()
-                        .child(section_label("GET STARTED"))
+                        .child(section_label(t!("welcome.get_started").to_string()))
                         .child(
                             div()
                                 .id("welcome-new-file")
@@ -92,7 +93,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                                         .text_color(text)
                                         .text_size(px(font_size_body))
                                         .font_family(ui_family.clone())
-                                        .child("New File"),
+                                        .child(t!("welcome.new_file").to_string()),
                                 )
                                 .child(KeyHint::new("⌘N")),
                         )
@@ -121,7 +122,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                                         .text_color(text)
                                         .text_size(px(font_size_body))
                                         .font_family(ui_family.clone())
-                                        .child("Open File…"),
+                                        .child(t!("welcome.open_file").to_string()),
                                 )
                                 .child(KeyHint::new("⌘O")),
                         )
@@ -148,7 +149,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                                         .text_color(text)
                                         .text_size(px(font_size_body))
                                         .font_family(ui_family.clone())
-                                        .child("Open Folder…"),
+                                        .child(t!("welcome.open_folder").to_string()),
                                 )
                                 .child(KeyHint::new("⇧⌘O")),
                         ),
@@ -157,7 +158,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                 .child(
                     v_flex()
                         .gap_px()
-                        .child(section_label("CONFIGURE"))
+                        .child(section_label(t!("welcome.configure").to_string()))
                         .child(
                             div()
                                 .id("welcome-settings")
@@ -181,7 +182,7 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                                         .text_color(text)
                                         .text_size(px(font_size_body))
                                         .font_family(ui_family.clone())
-                                        .child("Open Settings"),
+                                        .child(t!("welcome.open_settings").to_string()),
                                 )
                                 .child(KeyHint::new("⌘,")),
                         ),

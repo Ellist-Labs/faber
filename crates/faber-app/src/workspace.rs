@@ -57,7 +57,7 @@ impl Tab {
                 let doc = &e.read(cx).doc;
                 (Workspace::doc_display_name(doc), doc.dirty)
             }
-            TabContent::Settings(_) => ("Settings".to_string(), false),
+            TabContent::Settings(_) => (rust_i18n::t!("tab.settings").to_string(), false),
         }
     }
 
@@ -257,7 +257,7 @@ impl Workspace {
     fn doc_display_name(doc: &Document) -> String {
         doc.path
             .file_name()
-            .map_or_else(|| "untitled".to_string(), |n| n.to_string_lossy().to_string())
+            .map_or_else(|| rust_i18n::t!("editor.untitled").to_string(), |n| n.to_string_lossy().to_string())
     }
 
     /// Returns the file path of the active editor tab, or `None` for untitled/Settings tabs.
@@ -378,9 +378,13 @@ impl Workspace {
         let name = Self::doc_display_name(&editor.read(cx).doc);
         let rx = window.prompt(
             PromptLevel::Warning,
-            &format!("Save changes to {name}?"),
+            &rust_i18n::t!("dialog.save_changes", name = name),
             None,
-            &["Save", "Don't Save", "Cancel"],
+            &[
+                rust_i18n::t!("dialog.save").as_ref(),
+                rust_i18n::t!("dialog.dont_save").as_ref(),
+                rust_i18n::t!("dialog.cancel").as_ref(),
+            ],
             cx,
         );
         cx.spawn_in(window, async move |ws, cx| {
@@ -513,11 +517,16 @@ impl Workspace {
             cx.quit();
             return;
         }
+        let count = dirty.len();
         let rx = window.prompt(
             PromptLevel::Warning,
-            &format!("{} file(s) have unsaved changes.", dirty.len()),
+            &rust_i18n::t!("dialog.unsaved_count", count = count),
             None,
-            &["Save All & Quit", "Quit Without Saving", "Cancel"],
+            &[
+                rust_i18n::t!("dialog.save_all_quit").as_ref(),
+                rust_i18n::t!("dialog.quit_without_saving").as_ref(),
+                rust_i18n::t!("dialog.cancel").as_ref(),
+            ],
             cx,
         );
         cx.spawn_in(window, async move |ws, cx| {
@@ -700,9 +709,9 @@ impl Workspace {
         let root = self.root_folder.clone();
 
         // ── helper: build a single menu row ──────────────────────────────────
-        let row = |label: &'static str, enabled: bool, t: &RuntimeTheme| {
+        let row = |id: &'static str, label: String, enabled: bool, t: &RuntimeTheme| {
             h_flex()
-                .id(label)
+                .id(id)
                 .px(px(12.))
                 .py(px(4.))
                 .gap_2()
@@ -710,11 +719,12 @@ impl Workspace {
                 .text_size(px(t.font_size_caption))
                 .text_color(if enabled { t.text } else { t.text_subtle })
                 .when(enabled, |el| el.cursor_pointer().hover(|el| el.bg(t.line_highlight)))
+                .child(label)
         };
         let sep = || div().h(px(1.)).mx(px(4.)).my(px(2.)).bg(t.separator);
 
         // ── close group ──────────────────────────────────────────────────────
-        let close_item = row("Close", true, t)
+        let close_item = row("close", rust_i18n::t!("tab_menu.close").to_string(), true, t)
             .on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
                 ws.tab_menu = None;
                 if let Some(ix) = ws.tabs.iter().position(|t| t.id == tab_id) {
@@ -722,32 +732,32 @@ impl Workspace {
                 }
             }));
 
-        let close_others = row("Close Others", has_others, t)
+        let close_others = row("close-others", rust_i18n::t!("tab_menu.close_others").to_string(), has_others, t)
             .when(has_others, |el| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
                 ws.tab_menu = None;
                 ws.close_other_tabs(tab_id, window, cx);
             })));
 
-        let close_all = row("Close All", true, t)
+        let close_all = row("close-all", rust_i18n::t!("tab_menu.close_all").to_string(), true, t)
             .on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
                 ws.tab_menu = None;
                 ws.close_all_tabs(window, cx);
             }));
 
-        let close_left = row("Close to the Left", has_left, t)
+        let close_left = row("close-left", rust_i18n::t!("tab_menu.close_left").to_string(), has_left, t)
             .when(has_left, |el| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
                 ws.tab_menu = None;
                 ws.close_tabs_to_left(tab_id, window, cx);
             })));
 
-        let close_right = row("Close to the Right", has_right, t)
+        let close_right = row("close-right", rust_i18n::t!("tab_menu.close_right").to_string(), has_right, t)
             .when(has_right, |el| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| {
                 ws.tab_menu = None;
                 ws.close_tabs_to_right(tab_id, window, cx);
             })));
 
         // ── copy group ───────────────────────────────────────────────────────
-        let copy_path = row("Copy Path", has_path, t)
+        let copy_path = row("copy-path", rust_i18n::t!("tab_menu.copy_path").to_string(), has_path, t)
             .when(has_path, {
                 let p = path.clone().unwrap();
                 |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
@@ -757,7 +767,7 @@ impl Workspace {
                 }))
             });
 
-        let copy_rel = row("Copy Relative Path", has_path, t)
+        let copy_rel = row("copy-rel", rust_i18n::t!("tab_menu.copy_relative_path").to_string(), has_path, t)
             .when(has_path, {
                 let rel = match (&root, &path) {
                     (Some(r), Some(p)) => p.strip_prefix(r).ok()
@@ -774,7 +784,7 @@ impl Workspace {
             });
 
         // ── reveal group ─────────────────────────────────────────────────────
-        let reveal_finder = row("Reveal in Finder", has_path, t)
+        let reveal_finder = row("reveal-finder", rust_i18n::t!("tab_menu.reveal_in_finder").to_string(), has_path, t)
             .when(has_path, {
                 let p = path.clone().unwrap();
                 |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
@@ -784,7 +794,7 @@ impl Workspace {
                 }))
             });
 
-        let reveal_explorer = row("Reveal in File Explorer", has_path, t)
+        let reveal_explorer = row("reveal-explorer", rust_i18n::t!("tab_menu.reveal_in_explorer").to_string(), has_path, t)
             .when(has_path, {
                 let p = path.clone().unwrap();
                 |el: Stateful<Div>| el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, _, cx| {
@@ -953,7 +963,7 @@ impl Workspace {
                     .text_size(px(t.font_size_caption))
                     .text_color(t.text_muted)
                     .font_family(t.ui_family.clone())
-                    .child("Panel"),
+                    .child(rust_i18n::t!("panel.panel").to_string()),
             )
             .child(
                 v_flex()
@@ -963,7 +973,7 @@ impl Workspace {
                     .text_size(px(t.font_size_caption))
                     .text_color(t.text_muted)
                     .font_family(t.ui_family.clone())
-                    .child("Coming soon"),
+                    .child(rust_i18n::t!("panel.coming_soon").to_string()),
             )
     }
 
@@ -985,7 +995,7 @@ impl Workspace {
                     .text_size(px(t.font_size_caption))
                     .text_color(t.text_muted)
                     .font_family(t.ui_family.clone())
-                    .child("Terminal"),
+                    .child(rust_i18n::t!("panel.terminal").to_string()),
             )
             .child(
                 v_flex()
@@ -995,7 +1005,7 @@ impl Workspace {
                     .text_size(px(t.font_size_caption))
                     .text_color(t.text_muted)
                     .font_family(t.ui_family.clone())
-                    .child("Coming soon"),
+                    .child(rust_i18n::t!("panel.coming_soon").to_string()),
             )
     }
 }

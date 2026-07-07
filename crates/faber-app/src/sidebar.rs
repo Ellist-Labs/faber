@@ -100,11 +100,11 @@ impl Workspace {
         t: &RuntimeTheme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let title = self
-            .sidebar_items
-            .iter()
-            .find(|i| i.kind == self.sidebar.active)
-            .map_or("", |i| i.title);
+        let title = match self.sidebar.active {
+            SidebarItemKind::Explorer => rust_i18n::t!("sidebar.explorer").to_string(),
+            SidebarItemKind::Search => rust_i18n::t!("sidebar.search").to_string(),
+            SidebarItemKind::Outline => rust_i18n::t!("sidebar.outline").to_string(),
+        };
 
         let header = h_flex()
             .px_3()
@@ -141,8 +141,8 @@ impl Workspace {
                 .font_family(t.ui_family.clone())
                 .text_size(px(t.font_size_caption))
                 .text_color(t.text_muted)
-                .child("No folder open")
-                .child("Use File › Open Folder…")
+                .child(rust_i18n::t!("sidebar.no_folder").to_string())
+                .child(rust_i18n::t!("sidebar.open_folder_hint").to_string())
                 .into_any_element();
         }
 
@@ -293,7 +293,7 @@ impl Workspace {
                 .font_family(t.ui_family.clone())
                 .text_size(px(t.font_size_caption))
                 .text_color(t.text_muted)
-                .child("No headings")
+                .child(rust_i18n::t!("sidebar.no_headings").to_string())
                 .into_any_element();
         }
 
@@ -362,7 +362,7 @@ impl Workspace {
             .font_family(t.ui_family.clone())
             .text_size(px(t.font_size_caption))
             .text_color(t.text_muted)
-            .child("Project search coming soon")
+            .child(rust_i18n::t!("sidebar.search_coming_soon").to_string())
             .into_any_element()
     }
 

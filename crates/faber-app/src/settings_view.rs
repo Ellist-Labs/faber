@@ -1,8 +1,9 @@
-use faber_settings::{AutoSave, Settings};
+use faber_settings::{AutoSave, Language, Settings};
 use gpui::{
     AnyElement, App, Context, Div, FocusHandle, Focusable, Global, IntoElement, MouseButton,
     Render, Window, div, prelude::*, px,
 };
+use rust_i18n::t;
 
 use crate::theme::{ActiveTheme, RuntimeTheme, apply_settings};
 use crate::ui::{Divider, Icon, IconName, h_flex, v_flex};
@@ -15,10 +16,11 @@ impl Global for SettingsStore {}
 
 // ── setting registry ───────────────────────────────────────────────────────────
 // Adding a setting = one field on `Settings` + one entry below.
+// Labels are built from t!() at sections() call time so they reflect the active locale.
 
 enum SettingControl {
     Select {
-        options: &'static [(&'static str, &'static str)], // (value, label)
+        options: Vec<(&'static str, String)>, // (value_key, display_label)
         get: fn(&Settings) -> &'static str,
         set: fn(&mut Settings, &str),
     },
@@ -37,25 +39,50 @@ enum SettingControl {
 }
 
 struct SettingEntry {
-    title: &'static str,
-    description: &'static str,
+    title: String,
+    description: String,
     enabled: fn(&Settings) -> bool,
     control: SettingControl,
 }
 
 struct SettingsSectionDef {
-    title: &'static str,
+    title: String,
     entries: Vec<SettingEntry>,
 }
 
 fn sections() -> Vec<SettingsSectionDef> {
+    // Build language options: "system" first, then one per supported locale.
+    let mut lang_options: Vec<(&'static str, String)> =
+        vec![("system", t!("settings.language.system").to_string())];
+    for &lang in Language::SUPPORTED {
+        lang_options.push((lang.key(), lang.autonym().to_string()));
+    }
+
     vec![
         SettingsSectionDef {
-            title: "Editor",
+            title: t!("settings.section.general").to_string(),
+            entries: vec![SettingEntry {
+                title: t!("settings.language.title").to_string(),
+                description: t!("settings.language.desc").to_string(),
+                enabled: |_| true,
+                control: SettingControl::Select {
+                    options: lang_options,
+                    get: |s| s.language.key(),
+                    set: |s, v| {
+                        s.language = match v {
+                            "en" => Language::En,
+                            _ => Language::System,
+                        }
+                    },
+                },
+            }],
+        },
+        SettingsSectionDef {
+            title: t!("settings.section.editor").to_string(),
             entries: vec![
                 SettingEntry {
-                    title: "Line Numbers",
-                    description: "Show line numbers in the gutter.",
+                    title: t!("settings.line_numbers.title").to_string(),
+                    description: t!("settings.line_numbers.desc").to_string(),
                     enabled: |_| true,
                     control: SettingControl::Toggle {
                         get: |s| s.line_numbers,
@@ -63,15 +90,15 @@ fn sections() -> Vec<SettingsSectionDef> {
                     },
                 },
                 SettingEntry {
-                    title: "Auto Save",
-                    description: "Controls when dirty files are saved automatically.",
+                    title: t!("settings.auto_save.title").to_string(),
+                    description: t!("settings.auto_save.desc").to_string(),
                     enabled: |_| true,
                     control: SettingControl::Select {
-                        options: &[
-                            ("off", "Off"),
-                            ("afterDelay", "After Delay"),
-                            ("onFocusChange", "On Focus Change"),
-                            ("onWindowChange", "On Window Change"),
+                        options: vec![
+                            ("off", t!("settings.auto_save_options.off").to_string()),
+                            ("afterDelay", t!("settings.auto_save_options.after_delay").to_string()),
+                            ("onFocusChange", t!("settings.auto_save_options.on_focus_change").to_string()),
+                            ("onWindowChange", t!("settings.auto_save_options.on_window_change").to_string()),
                         ],
                         get: |s| match s.auto_save {
                             AutoSave::Off => "off",
@@ -90,8 +117,8 @@ fn sections() -> Vec<SettingsSectionDef> {
                     },
                 },
                 SettingEntry {
-                    title: "Auto Save Delay",
-                    description: "Idle time before a dirty file is saved (After Delay only).",
+                    title: t!("settings.auto_save_delay.title").to_string(),
+                    description: t!("settings.auto_save_delay.desc").to_string(),
                     enabled: |s| s.auto_save == AutoSave::AfterDelay,
                     control: SettingControl::Stepper {
                         min: 250.0,
@@ -105,11 +132,11 @@ fn sections() -> Vec<SettingsSectionDef> {
             ],
         },
         SettingsSectionDef {
-            title: "Appearance",
+            title: t!("settings.section.appearance").to_string(),
             entries: vec![
                 SettingEntry {
-                    title: "Font Size",
-                    description: "Base font size in pixels; the entire application scales from it.",
+                    title: t!("settings.font_size.title").to_string(),
+                    description: t!("settings.font_size.desc").to_string(),
                     enabled: |_| true,
                     control: SettingControl::Stepper {
                         min: 10.0,
@@ -121,8 +148,8 @@ fn sections() -> Vec<SettingsSectionDef> {
                     },
                 },
                 SettingEntry {
-                    title: "Scrollbar",
-                    description: "Show an interactive scrollbar on scrollable views.",
+                    title: t!("settings.scrollbar.title").to_string(),
+                    description: t!("settings.scrollbar.desc").to_string(),
                     enabled: |_| true,
                     control: SettingControl::Toggle {
                         get: |s| s.show_scrollbar,
@@ -152,6 +179,7 @@ impl SettingsView {
             eprintln!("faber: can't write settings: {err}");
         }
         cx.set_global(SettingsStore(s));
+        crate::i18n::apply(cx);
         apply_settings(cx);
         cx.notify();
     }
@@ -166,13 +194,14 @@ impl SettingsView {
     ) -> AnyElement {
         let enabled = (entry.enabled)(settings);
         match entry.control {
-            SettingControl::Select { options, get, set } => {
+            SettingControl::Select { ref options, get, set } => {
                 let current = get(settings);
                 h_flex()
                     .rounded(px(t.radius_md))
                     .border_1()
                     .border_color(t.border)
-                    .children(options.iter().map(|&(value, label)| {
+                    .children(options.iter().map(|(value, label)| {
+                        let value: &'static str = value;
                         let is_current = value == current;
                         div()
                             .id((value, entry_ix))
@@ -194,7 +223,7 @@ impl SettingsView {
                                     }),
                                 )
                             })
-                            .child(label)
+                            .child(label.clone())
                     }))
                     .into_any_element()
             }
@@ -238,14 +267,20 @@ impl SettingsView {
             }
             SettingControl::Toggle { get, set } => {
                 let on = get(settings);
+                let toggle_opts = [
+                    ("on", t!("common.on").to_string(), true),
+                    ("off", t!("common.off").to_string(), false),
+                ];
                 h_flex()
                     .rounded(px(t.radius_md))
                     .border_1()
                     .border_color(t.border)
-                    .children([("On", true), ("Off", false)].iter().map(|&(label, value)| {
+                    .children(toggle_opts.iter().map(|(id, label, value)| {
+                        let id: &'static str = id;
+                        let value = *value;
                         let is_current = on == value;
                         div()
-                            .id((label, entry_ix))
+                            .id((id, entry_ix))
                             .px_3()
                             .py_1()
                             .text_size(px(t.font_size_caption))
@@ -264,7 +299,7 @@ impl SettingsView {
                                     }),
                                 )
                             })
-                            .child(label)
+                            .child(label.clone())
                     }))
                     .into_any_element()
             }
@@ -295,13 +330,13 @@ impl SettingsView {
                         div()
                             .text_size(px(t.font_size_body))
                             .text_color(t.text)
-                            .child(entry.title),
+                            .child(entry.title.clone()),
                     )
                     .child(
                         div()
                             .text_size(px(t.font_size_caption))
                             .text_color(t.text_muted)
-                            .child(entry.description),
+                            .child(entry.description.clone()),
                     ),
             )
             .child(
@@ -333,7 +368,7 @@ impl Render for SettingsView {
                         div()
                             .text_size(px(t.font_size_heading))
                             .text_color(t.text)
-                            .child(section.title),
+                            .child(section.title.clone()),
                     )
                     .child(Divider::horizontal())
                     .children(section.entries.iter().map(|entry| {
@@ -362,7 +397,7 @@ impl Render for SettingsView {
                         div()
                             .text_size(px(t.font_size_heading * 1.3))
                             .text_color(t.text)
-                            .child("Settings"),
+                            .child(t!("settings.title").to_string()),
                     )
                     .children(sections),
             )
