@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-07-07",
+  "benches": {
+    "edit_insert_mid":27540000,
+    "edit_delete_mid":12650000,
+    "changeset_insert_mid":10430,
+    "changeset_compose":165,
+    "search_scan":549500,
+    "parse_medium":702700000,
+    "reparse_small_edit":1479000,
+    "rope_insert_middle":333,
+    "rope_remove_chunk":137,
+    "highlight_open_medium":34210000,
+    "highlight_incremental_insert":74180000
+  }
+}
