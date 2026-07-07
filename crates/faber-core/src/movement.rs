@@ -2,6 +2,14 @@ use ropey::Rope;
 
 use crate::selection::Selection;
 
+/// Classifies a character as part of a "word" for word-boundary movement.
+/// Can be overridden per language in future; default = alphanumeric or `_`.
+pub type WordClassifier = fn(char) -> bool;
+
+pub fn default_word_classifier(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Column (0-indexed char offset within the line) of `char_idx`.
@@ -146,12 +154,12 @@ pub fn move_page_down(rope: &Rope, sel: Selection, extend: bool, page_lines: usi
 // ── word movement ─────────────────────────────────────────────────────────────
 
 pub fn move_word_left(rope: &Rope, sel: Selection, extend: bool) -> Selection {
-    let pos = word_boundary_left(rope, sel.head);
+    let pos = word_boundary_left(rope, sel.head, default_word_classifier);
     apply(sel, pos, rope, extend)
 }
 
 pub fn move_word_right(rope: &Rope, sel: Selection, extend: bool) -> Selection {
-    let pos = word_boundary_right(rope, sel.head);
+    let pos = word_boundary_right(rope, sel.head, default_word_classifier);
     apply(sel, pos, rope, extend)
 }
 
@@ -160,11 +168,10 @@ pub fn select_all(rope: &Rope) -> Selection {
     Selection { anchor: 0, head: pos, goal_col: col_of(rope, pos) }
 }
 
-fn word_boundary_left(rope: &Rope, mut pos: usize) -> usize {
+fn word_boundary_left(rope: &Rope, mut pos: usize, is_word: WordClassifier) -> usize {
     if pos == 0 {
         return 0;
     }
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
     pos -= 1;
     while pos > 0 && rope.char(pos).is_whitespace() {
         pos -= 1;
@@ -179,12 +186,11 @@ fn word_boundary_left(rope: &Rope, mut pos: usize) -> usize {
     pos
 }
 
-fn word_boundary_right(rope: &Rope, mut pos: usize) -> usize {
+fn word_boundary_right(rope: &Rope, mut pos: usize, is_word: WordClassifier) -> usize {
     let len = rope.len_chars();
     if pos >= len {
         return len;
     }
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let start_class = is_word(rope.char(pos));
     while pos < len && is_word(rope.char(pos)) == start_class {
         pos += 1;
