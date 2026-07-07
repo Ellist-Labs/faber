@@ -1,4 +1,3 @@
-#![allow(dead_code)] // removed when Wave 2 adopts ui::Label
 use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px};
 
 use crate::theme::ActiveTheme;
@@ -9,16 +8,22 @@ pub enum LabelSize {
     Heading,
 }
 
+enum LabelColor {
+    Default,
+    Muted,
+    Subtle,
+}
+
 #[derive(IntoElement)]
 pub struct Label {
     text: SharedString,
     size: LabelSize,
-    muted: bool,
+    color: LabelColor,
 }
 
 impl Label {
     pub fn new(text: impl Into<SharedString>) -> Self {
-        Self { text: text.into(), size: LabelSize::Body, muted: false }
+        Self { text: text.into(), size: LabelSize::Body, color: LabelColor::Default }
     }
 
     pub fn caption(mut self) -> Self {
@@ -32,7 +37,13 @@ impl Label {
     }
 
     pub fn muted(mut self) -> Self {
-        self.muted = true;
+        self.color = LabelColor::Muted;
+        self
+    }
+
+    /// Dimmest text tone (theme `text_subtle`) — section labels, taglines.
+    pub fn subtle(mut self) -> Self {
+        self.color = LabelColor::Subtle;
         self
     }
 }
@@ -40,7 +51,11 @@ impl Label {
 impl RenderOnce for Label {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let color = if self.muted { theme.text_muted } else { theme.text };
+        let color = match self.color {
+            LabelColor::Default => theme.text,
+            LabelColor::Muted => theme.text_muted,
+            LabelColor::Subtle => theme.text_subtle,
+        };
         let size = match self.size {
             LabelSize::Caption => theme.font_size_caption,
             LabelSize::Body => theme.font_size_body,

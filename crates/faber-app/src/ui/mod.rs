@@ -7,9 +7,11 @@ pub mod label;
 pub mod scrollbar;
 pub mod surface;
 
+pub use button::Button;
 pub use divider::Divider;
 pub use icon::{Icon, IconName};
 pub use key_hint::KeyHint;
+pub use label::Label;
 pub use scrollbar::{ScrollbarDrag, render_scrollbar};
 
 use gpui::{Div, Styled as _, div};

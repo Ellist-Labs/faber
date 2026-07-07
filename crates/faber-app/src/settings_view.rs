@@ -1,12 +1,12 @@
 use faber_settings::{AutoSave, Language, Settings};
 use gpui::{
-    AnyElement, App, Context, Div, FocusHandle, Focusable, Global, IntoElement, MouseButton,
-    Render, Window, div, prelude::*, px,
+    AnyElement, App, Context, Div, FocusHandle, Focusable, Global, IntoElement, Render, Window,
+    div, prelude::*, px,
 };
 use rust_i18n::t;
 
 use crate::theme::{ActiveTheme, RuntimeTheme, apply_settings};
-use crate::ui::{Divider, Icon, IconName, h_flex, v_flex};
+use crate::ui::{Button, Divider, Icon, IconName, Label, h_flex, v_flex};
 
 /// App-wide settings global. The Settings tab is the sole writer; every
 /// change persists to disk immediately.
@@ -212,27 +212,17 @@ impl SettingsView {
                     .children(options.iter().map(|(value, label)| {
                         let value: &'static str = value;
                         let is_current = value == current;
-                        div()
-                            .id((value, entry_ix))
-                            .px_3()
-                            .py_1()
-                            .text_size(px(t.font_size_caption))
-                            .when(is_current, |el| el.bg(t.accent).text_color(t.text_on_accent))
-                            .when(!is_current && enabled, |el| {
-                                el.text_color(t.text_muted)
-                                    .cursor_pointer()
-                                    .hover(|el| el.bg(t.line_highlight).text_color(t.text))
+                        let clickable = enabled && !is_current;
+                        Button::new((value, entry_ix), label.clone())
+                            .list()
+                            .caption()
+                            .selected(is_current)
+                            .when(!clickable, Button::disabled)
+                            .when(clickable, |btn| {
+                                btn.on_click(cx.listener(move |view, _, _, cx| {
+                                    view.apply_change(|s| set(s, value), cx)
+                                }))
                             })
-                            .when(!enabled, |el| el.text_color(t.text_disabled))
-                            .when(enabled && !is_current, |el| {
-                                el.on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |view, _, _, cx| {
-                                        view.apply_change(|s| set(s, value), cx)
-                                    }),
-                                )
-                            })
-                            .child(label.clone())
                     }))
                     .into_any_element()
             }
@@ -240,34 +230,28 @@ impl SettingsView {
                 let value = get(settings);
                 let color = if enabled { t.text } else { t.text_disabled };
                 let stepper_button = |id: &'static str, icon: IconName, delta: f32| {
-                    div()
-                        .id((id, entry_ix))
-                        .px_2()
-                        .py_1()
-                        .when(enabled, |el| {
-                            el.cursor_pointer().hover(|el| el.bg(t.line_highlight)).on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |view, _, _, cx| {
-                                    view.apply_change(
-                                        |s| set(s, (get(s) + delta).clamp(min, max)),
-                                        cx,
-                                    )
-                                }),
-                            )
+                    Button::new((id, entry_ix), "")
+                        .list()
+                        .caption()
+                        .content(Icon::new(icon).size(px(14.)).color(color))
+                        .when(!enabled, Button::disabled)
+                        .when(enabled, |btn| {
+                            btn.on_click(cx.listener(move |view, _, _, cx| {
+                                view.apply_change(|s| set(s, (get(s) + delta).clamp(min, max)), cx)
+                            }))
                         })
-                        .child(Icon::new(icon).size(px(14.)).color(color))
                 };
                 h_flex()
                     .rounded(px(t.radius_md))
                     .border_1()
                     .border_color(t.border)
-                    .text_size(px(t.font_size_caption))
                     .child(stepper_button("dec", IconName::Remove, -step))
                     .child(
                         div()
                             .px_2()
                             .min_w(px(64.0))
                             .text_center()
+                            .text_size(px(t.font_size_caption))
                             .text_color(color)
                             .child(format!("{} {unit}", value as i64)),
                     )
@@ -288,27 +272,17 @@ impl SettingsView {
                         let id: &'static str = id;
                         let value = *value;
                         let is_current = on == value;
-                        div()
-                            .id((id, entry_ix))
-                            .px_3()
-                            .py_1()
-                            .text_size(px(t.font_size_caption))
-                            .when(is_current, |el| el.bg(t.accent).text_color(t.text_on_accent))
-                            .when(!is_current && enabled, |el| {
-                                el.text_color(t.text_muted)
-                                    .cursor_pointer()
-                                    .hover(|el| el.bg(t.line_highlight).text_color(t.text))
+                        let clickable = enabled && !is_current;
+                        Button::new((id, entry_ix), label.clone())
+                            .list()
+                            .caption()
+                            .selected(is_current)
+                            .when(!clickable, Button::disabled)
+                            .when(clickable, |btn| {
+                                btn.on_click(cx.listener(move |view, _, _, cx| {
+                                    view.apply_change(|s| set(s, value), cx)
+                                }))
                             })
-                            .when(!enabled, |el| el.text_color(t.text_disabled))
-                            .when(enabled && !is_current, |el| {
-                                el.on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |view, _, _, cx| {
-                                        view.apply_change(|s| set(s, value), cx)
-                                    }),
-                                )
-                            })
-                            .child(label.clone())
                     }))
                     .into_any_element()
             }
@@ -335,18 +309,8 @@ impl SettingsView {
                     .gap_1()
                     .flex_1()
                     .min_w(px(200.0))
-                    .child(
-                        div()
-                            .text_size(px(t.font_size_body))
-                            .text_color(t.text)
-                            .child(entry.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(t.font_size_caption))
-                            .text_color(t.text_muted)
-                            .child(entry.description.clone()),
-                    ),
+                    .child(Label::new(entry.title.clone()))
+                    .child(Label::new(entry.description.clone()).caption().muted()),
             )
             .child(
                 div()
@@ -373,12 +337,7 @@ impl Render for SettingsView {
             .map(|section| {
                 v_flex()
                     .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(t.font_size_heading))
-                            .text_color(t.text)
-                            .child(section.title.clone()),
-                    )
+                    .child(Label::new(section.title.clone()).heading())
                     .child(Divider::horizontal())
                     .children(section.entries.iter().map(|entry| {
                         entry_ix += 1;

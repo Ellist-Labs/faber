@@ -1,44 +1,36 @@
-use gpui::{App, IntoElement, StyleRefinement, Window, div, prelude::*, px};
+use gpui::{App, IntoElement, Window, div, prelude::*, px};
 use rust_i18n::t;
 
 use crate::theme::RuntimeTheme;
-use crate::ui::{Icon, IconName, KeyHint, h_flex, v_flex};
+use crate::ui::{Button, Icon, IconName, KeyHint, Label, h_flex, v_flex};
 use crate::{NewFile, OpenFile, OpenFolder, OpenSettings};
 
 pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
-    let bg = t.bg;
-    let hover_bg = t.bg_overlay;
-    let text = t.text;
-    let text_muted = t.text_muted;
-    let text_subtle = t.text_subtle;
     let separator = t.separator;
-    let font_size_body = t.font_size_body;
-    let font_size_caption = t.font_size_caption;
-    let font_size_heading = t.font_size_heading;
-    let ui_family = t.ui_family.clone();
-    let radius_sm = t.radius_sm;
 
-    let ui_fam = ui_family.clone();
     let section_label = move |label: String| {
         h_flex()
             .w_full()
             .gap_2()
             .items_center()
-            .child(
-                div()
-                    .text_color(text_subtle)
-                    .text_size(px(font_size_caption))
-                    .font_family(ui_fam.clone())
-                    .child(label),
-            )
+            .child(Label::new(label).caption().subtle())
             .child(div().flex_1().h(px(1.0)).bg(separator))
+    };
+
+    let row = |id: &'static str, icon: IconName, label: String| {
+        h_flex()
+            .gap_2()
+            .w_full()
+            .child(Icon::new(icon).size(px(16.)).color(t.text_muted))
+            .child(div().flex_1().child(Label::new(label)))
+            .child(KeyHint::new(id))
     };
 
     v_flex()
         .flex_1()
         .items_center()
         .justify_center()
-        .bg(bg)
+        .bg(t.bg)
         // ── Header ───────────────────────────────────────────────────────────
         .child(
             v_flex()
@@ -46,18 +38,12 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                 .gap_1()
                 .child(
                     div()
-                        .text_color(text)
-                        .text_size(px(font_size_heading * 2.0))
-                        .font_family(ui_family.clone())
+                        .text_color(t.text)
+                        .text_size(px(t.font_size_heading * 2.0))
+                        .font_family(t.ui_family.clone())
                         .child("Faber"),
                 )
-                .child(
-                    div()
-                        .text_color(text_subtle)
-                        .text_size(px(font_size_body))
-                        .font_family(ui_family.clone())
-                        .child(t!("welcome.tagline").to_string()),
-                ),
+                .child(Label::new(t!("welcome.tagline").to_string()).subtle()),
         )
         // ── Action panel ─────────────────────────────────────────────────────
         .child(
@@ -71,87 +57,43 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                         .gap_px()
                         .child(section_label(t!("welcome.get_started").to_string()))
                         .child(
-                            div()
-                                .id("welcome-new-file")
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .w_full()
-                                .px_2()
-                                .py_1()
-                                .rounded(px(radius_sm))
-                                .cursor_pointer()
-                                .hover(move |s: StyleRefinement| s.bg(hover_bg))
+                            Button::new("welcome-new-file", "")
+                                .list()
+                                .full_width()
+                                .content(row(
+                                    "⌘N",
+                                    IconName::Add,
+                                    t!("welcome.new_file").to_string(),
+                                ))
                                 .on_click(|_, window: &mut Window, cx: &mut App| {
                                     window.dispatch_action(Box::new(NewFile), cx)
-                                })
-                                .child(Icon::new(IconName::Add).size(px(16.)).color(text_muted))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_color(text)
-                                        .text_size(px(font_size_body))
-                                        .font_family(ui_family.clone())
-                                        .child(t!("welcome.new_file").to_string()),
-                                )
-                                .child(KeyHint::new("⌘N")),
+                                }),
                         )
                         .child(
-                            div()
-                                .id("welcome-open-file")
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .w_full()
-                                .px_2()
-                                .py_1()
-                                .rounded(px(radius_sm))
-                                .cursor_pointer()
-                                .hover(move |s: StyleRefinement| s.bg(hover_bg))
+                            Button::new("welcome-open-file", "")
+                                .list()
+                                .full_width()
+                                .content(row(
+                                    "⌘O",
+                                    IconName::FileCopy,
+                                    t!("welcome.open_file").to_string(),
+                                ))
                                 .on_click(|_, window: &mut Window, cx: &mut App| {
                                     window.dispatch_action(Box::new(OpenFile), cx)
-                                })
-                                .child(
-                                    Icon::new(IconName::FileCopy).size(px(16.)).color(text_muted),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_color(text)
-                                        .text_size(px(font_size_body))
-                                        .font_family(ui_family.clone())
-                                        .child(t!("welcome.open_file").to_string()),
-                                )
-                                .child(KeyHint::new("⌘O")),
+                                }),
                         )
                         .child(
-                            div()
-                                .id("welcome-open-folder")
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .w_full()
-                                .px_2()
-                                .py_1()
-                                .rounded(px(radius_sm))
-                                .cursor_pointer()
-                                .hover(move |s: StyleRefinement| s.bg(hover_bg))
+                            Button::new("welcome-open-folder", "")
+                                .list()
+                                .full_width()
+                                .content(row(
+                                    "⇧⌘O",
+                                    IconName::Toc,
+                                    t!("welcome.open_folder").to_string(),
+                                ))
                                 .on_click(|_, window: &mut Window, cx: &mut App| {
                                     window.dispatch_action(Box::new(OpenFolder), cx)
-                                })
-                                .child(Icon::new(IconName::Toc).size(px(16.)).color(text_muted))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_color(text)
-                                        .text_size(px(font_size_body))
-                                        .font_family(ui_family.clone())
-                                        .child(t!("welcome.open_folder").to_string()),
-                                )
-                                .child(KeyHint::new("⇧⌘O")),
+                                }),
                         ),
                 )
                 // CONFIGURE section
@@ -160,31 +102,17 @@ pub fn render_welcome(t: &RuntimeTheme) -> impl IntoElement {
                         .gap_px()
                         .child(section_label(t!("welcome.configure").to_string()))
                         .child(
-                            div()
-                                .id("welcome-settings")
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .w_full()
-                                .px_2()
-                                .py_1()
-                                .rounded(px(radius_sm))
-                                .cursor_pointer()
-                                .hover(move |s: StyleRefinement| s.bg(hover_bg))
+                            Button::new("welcome-settings", "")
+                                .list()
+                                .full_width()
+                                .content(row(
+                                    "⌘,",
+                                    IconName::Settings,
+                                    t!("welcome.open_settings").to_string(),
+                                ))
                                 .on_click(|_, window: &mut Window, cx: &mut App| {
                                     window.dispatch_action(Box::new(OpenSettings), cx)
-                                })
-                                .child(Icon::new(IconName::Settings).size(px(16.)).color(text_muted))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_color(text)
-                                        .text_size(px(font_size_body))
-                                        .font_family(ui_family.clone())
-                                        .child(t!("welcome.open_settings").to_string()),
-                                )
-                                .child(KeyHint::new("⌘,")),
+                                }),
                         ),
                 ),
         )
