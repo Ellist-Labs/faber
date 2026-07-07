@@ -232,7 +232,7 @@ impl Workspace {
     ) -> Stateful<Div> {
         let row = &self.visible_rows[ix];
         let depth = row.depth;
-        let is_active = active_path.map_or(false, |ap| ap == row.path);
+        let is_active = active_path.is_some_and(|ap| ap == row.path);
         let path = row.path.clone();
         let is_dir = row.is_dir;
         let entity = entity.clone();

@@ -206,13 +206,11 @@ impl Workspace {
             return;
         }
         // Leaving a tab counts as a focus change for auto-save purposes.
-        if cx.global::<SettingsStore>().0.auto_save == AutoSave::OnFocusChange {
-            if let Some(prev) = self.active.filter(|&prev| prev != ix) {
-                if let Some(editor) = self.tabs.get(prev).and_then(|t| t.editor()).cloned() {
+        if cx.global::<SettingsStore>().0.auto_save == AutoSave::OnFocusChange
+            && let Some(prev) = self.active.filter(|&prev| prev != ix)
+                && let Some(editor) = self.tabs.get(prev).and_then(|t| t.editor()).cloned() {
                     Self::save_doc_now(&editor, cx);
                 }
-            }
-        }
         self.active = Some(ix);
         self.focus_active(window, cx);
         cx.notify();
@@ -339,7 +337,7 @@ impl Workspace {
                 let Ok(Ok(Some(path))) = rx.await else { return false };
                 editor
                     .update(cx, |ed, cx| {
-                        ed.doc.assign_path(path);
+                        ed.doc.assign_path(path, &ed.registry);
                         let ok = save(&ed.doc.rope, &ed.doc.path).is_ok();
                         if ok {
                             ed.doc.mark_saved();
@@ -414,7 +412,9 @@ impl Workspace {
     // ── action handlers ────────────────────────────────────────────────────────
 
     fn on_new_file(&mut self, _: &NewFile, window: &mut Window, cx: &mut Context<Self>) {
-        let editor = cx.new(|cx| EditorView::from_doc(Document::empty_untitled(), cx));
+        let registry = cx.global::<crate::Registry>().0.clone();
+        let editor =
+            cx.new(|cx| EditorView::from_doc(Document::empty_untitled(), registry, cx));
         self.push_editor_tab(editor, cx);
         self.activate_tab(self.tabs.len() - 1, window, cx);
     }

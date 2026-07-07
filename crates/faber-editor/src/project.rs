@@ -147,10 +147,8 @@ fn collect_visible(nodes: &[FileNode], depth: usize, rows: &mut Vec<VisibleRow>)
             is_dir: n.is_dir,
             expanded: n.expanded,
         });
-        if n.expanded {
-            if let Some(children) = &n.children {
-                collect_visible(children, depth + 1, rows);
-            }
+        if n.expanded && let Some(children) = &n.children {
+            collect_visible(children, depth + 1, rows);
         }
     }
 }

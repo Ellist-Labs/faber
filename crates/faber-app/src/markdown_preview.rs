@@ -70,7 +70,7 @@ impl MarkdownPreviewView {
     pub fn render_block(
         md: &Arc<MarkdownDoc>,
         ix: usize,
-        base_dir: &PathBuf,
+        base_dir: &std::path::Path,
         t: &RuntimeTheme,
         cx: &mut App,
     ) -> AnyElement {
@@ -176,9 +176,9 @@ fn render_heading(
     level: u8,
     inlines: &[InlineRun],
     block_ix: usize,
-    base_dir: &PathBuf,
+    base_dir: &std::path::Path,
     t: &RuntimeTheme,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> AnyElement {
     let size = match level {
         1 => t.font_size_heading * 1.6,
@@ -215,7 +215,7 @@ fn render_heading(
     }
 }
 
-fn render_paragraph(inlines: &[InlineRun], base_dir: &PathBuf, t: &RuntimeTheme, _cx: &mut App) -> AnyElement {
+fn render_paragraph(inlines: &[InlineRun], base_dir: &std::path::Path, t: &RuntimeTheme, _cx: &mut App) -> AnyElement {
     div()
         .font_family(t.ui_family.clone())
         .text_size(px(t.font_size_body))
@@ -226,7 +226,7 @@ fn render_paragraph(inlines: &[InlineRun], base_dir: &PathBuf, t: &RuntimeTheme,
 }
 
 /// Render inlines, handling hard breaks (split into stacked lines) and images.
-fn render_inlines(inlines: &[InlineRun], t: &RuntimeTheme, base_dir: &PathBuf) -> AnyElement {
+fn render_inlines(inlines: &[InlineRun], t: &RuntimeTheme, base_dir: &std::path::Path) -> AnyElement {
     // Split at HardBreak boundaries → stacked lines.
     let has_hard_break = inlines.iter().any(|i| matches!(i, InlineRun::HardBreak));
     if has_hard_break {
@@ -250,7 +250,7 @@ fn split_at_hard_breaks(inlines: &[InlineRun]) -> Vec<Vec<InlineRun>> {
 }
 
 /// Render a single line of inlines (no HardBreaks), splitting on Image nodes.
-fn render_inline_line(inlines: &[InlineRun], t: &RuntimeTheme, base_dir: &PathBuf) -> AnyElement {
+fn render_inline_line(inlines: &[InlineRun], t: &RuntimeTheme, base_dir: &std::path::Path) -> AnyElement {
     let has_image = inlines.iter().any(|i| matches!(i, InlineRun::Image { .. }));
     if !has_image {
         return render_text_runs(inlines, t);
@@ -503,7 +503,7 @@ fn token_color(token: SyntaxToken, t: &RuntimeTheme) -> Hsla {
 
 fn render_blockquote(
     children: &[Block],
-    base_dir: &PathBuf,
+    base_dir: &std::path::Path,
     t: &RuntimeTheme,
     cx: &mut App,
 ) -> AnyElement {
@@ -532,7 +532,7 @@ fn render_list(
     ordered: bool,
     start: u64,
     items: &[ListItem],
-    base_dir: &PathBuf,
+    base_dir: &std::path::Path,
     t: &RuntimeTheme,
     cx: &mut App,
 ) -> AnyElement {
@@ -606,7 +606,7 @@ fn render_list(
 fn render_table(
     head: &[Vec<InlineRun>],
     rows: &[Vec<Vec<InlineRun>>],
-    base_dir: &PathBuf,
+    base_dir: &std::path::Path,
     t: &RuntimeTheme,
     _cx: &mut App,
 ) -> AnyElement {

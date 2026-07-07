@@ -17,10 +17,18 @@ use gpui::{
     App, Application, Bounds, Global, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
     WindowOptions, actions, point, prelude::*, px, size,
 };
-use std::{env, path::PathBuf, time::Instant};
+use std::{env, path::PathBuf, sync::Arc, time::Instant};
+
+use faber_editor::LanguageRegistry;
 
 pub struct ProjectRoot(pub Option<PathBuf>);
 impl Global for ProjectRoot {}
+
+/// Shared, process-wide language registry built once at startup and injected
+/// everywhere via the GPUI global store.
+#[derive(Clone)]
+pub struct Registry(pub Arc<LanguageRegistry>);
+impl Global for Registry {}
 
 use workspace::Workspace;
 
@@ -85,6 +93,7 @@ fn main() {
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         cx.set_global(settings_view::SettingsStore(faber_settings::load()));
         cx.set_global(ProjectRoot(None));
+        cx.set_global(Registry(Arc::new(LanguageRegistry::with_defaults())));
         i18n::apply(cx);
         theme::apply_settings(cx);
         register_keybindings(cx);

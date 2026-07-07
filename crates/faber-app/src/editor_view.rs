@@ -1,7 +1,7 @@
 use std::{ops::Range, sync::Arc, time::Duration};
 
 use faber_editor::{
-    LanguageRegistry, SyntaxToken,
+    ChangeSet, LanguageRegistry, SyntaxToken, Transaction,
     buffer::Document,
     cursor,
     edit_history::History,
@@ -59,6 +59,7 @@ pub struct EditorView {
     pub doc: Document,
     pub sel: Selection,
     pub history: History,
+    pub registry: Arc<LanguageRegistry>,
     pub focus_handle: FocusHandle,
 
     // Line display cache — rebuilt after every document mutation.
@@ -113,20 +114,26 @@ pub struct EditorView {
 
 impl EditorView {
     pub fn new(path: &str, cx: &mut Context<EditorView>) -> Self {
-        let doc = Document::open(path).unwrap_or_else(|_| {
-            let mut d = Document::open("/dev/null").expect("can't open /dev/null");
+        let registry = cx.global::<crate::Registry>().0.clone();
+        let doc = Document::open_with_registry(path, &registry).unwrap_or_else(|_| {
+            let mut d = Document::open_with_registry("/dev/null", &registry)
+                .expect("can't open /dev/null");
             d.path = std::path::PathBuf::from(path);
             d
         });
-        let view = Self::from_doc(doc, cx);
-        view
+        Self::from_doc(doc, registry, cx)
     }
 
-    pub fn from_doc(doc: Document, cx: &mut Context<EditorView>) -> Self {
+    pub fn from_doc(
+        doc: Document,
+        registry: Arc<LanguageRegistry>,
+        cx: &mut Context<EditorView>,
+    ) -> Self {
         let mut view = Self {
             doc,
             sel: Selection::default(),
             history: History::new(),
+            registry: registry.clone(),
             focus_handle: cx.focus_handle(),
             line_cache: Vec::new(),
             line_starts: Vec::new(),
@@ -166,7 +173,6 @@ impl EditorView {
         view.rebuild_line_cache();
         if view.is_markdown() {
             let source = view.doc.rope.to_string();
-            let registry = LanguageRegistry::with_defaults();
             let md = parse_markdown(&source, &view.doc.rope, &registry);
             view.outline = Arc::new(md.outline);
         }
@@ -232,7 +238,7 @@ impl EditorView {
     fn breadcrumb_stack(outline: &[OutlineEntry], top_line: usize) -> Vec<String> {
         let mut stack: Vec<(u8, String)> = Vec::new();
         for e in outline.iter().take_while(|e| e.source_line <= top_line) {
-            while stack.last().map_or(false, |(lvl, _)| *lvl >= e.level) {
+            while stack.last().is_some_and(|(lvl, _)| *lvl >= e.level) {
                 stack.pop();
             }
             stack.push((e.level, e.text.clone()));
@@ -256,22 +262,21 @@ impl EditorView {
         self.outline_gen += 1;
         let current_gen = self.outline_gen;
         let rope = self.doc.rope.clone();
+        let registry = self.registry.clone();
         let update_preview = self.show_preview && self.preview.is_some();
         cx.spawn(async move |view, cx| {
             cx.background_executor().timer(Duration::from_millis(75)).await;
             let source = rope.to_string();
-            let registry = LanguageRegistry::with_defaults();
             let md = Arc::new(parse_markdown(&source, &rope, &registry));
             let outline = Arc::new(md.outline.clone());
             let _ = view.update(cx, |this, cx| {
                 if this.outline_gen != current_gen { return; }
                 this.outline = outline;
-                if update_preview {
-                    if let Some(ref preview) = this.preview {
+                if update_preview
+                    && let Some(ref preview) = this.preview {
                         let md2 = Arc::clone(&md);
                         preview.update(cx, |pv, _cx| pv.apply_md(md2));
                     }
-                }
                 cx.notify();
             });
         }).detach();
@@ -280,15 +285,15 @@ impl EditorView {
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.history.commit();
         if !self.sel.is_empty() {
-            let edit = self.doc.delete(self.sel.range());
-            self.history.push_other(edit);
+            let inverse = self.doc.delete(self.sel.range());
+            self.history.push_change(inverse);
             let pos = self.sel.start();
             self.sel = Selection::collapsed(pos, &self.doc.rope);
         }
         let pos = self.sel.head;
-        let edit = self.doc.insert(pos, text);
+        let inverse = self.doc.insert(pos, text);
         let end = pos + text.chars().count();
-        self.history.push_insert(edit, end);
+        self.history.push_insert(inverse);
         self.sel = Selection::collapsed(end, &self.doc.rope);
         self.after_edit(cx);
     }
@@ -297,13 +302,13 @@ impl EditorView {
         self.history.commit();
         if !self.sel.is_empty() {
             let edit = self.doc.delete(self.sel.range());
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             let pos = self.sel.start();
             self.sel = Selection::collapsed(pos, &self.doc.rope);
         } else if self.sel.head > 0 {
             let pos = self.sel.head - 1;
             let edit = self.doc.delete(pos..self.sel.head);
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             self.sel = Selection::collapsed(pos, &self.doc.rope);
         }
         self.after_edit(cx);
@@ -313,12 +318,12 @@ impl EditorView {
         self.history.commit();
         if !self.sel.is_empty() {
             let edit = self.doc.delete(self.sel.range());
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             let pos = self.sel.start();
             self.sel = Selection::collapsed(pos, &self.doc.rope);
         } else if self.sel.head < self.doc.len_chars() {
             let edit = self.doc.delete(self.sel.head..self.sel.head + 1);
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             self.sel = Selection::collapsed(self.sel.head, &self.doc.rope);
         }
         self.after_edit(cx);
@@ -328,14 +333,14 @@ impl EditorView {
         self.history.commit();
         if !self.sel.is_empty() {
             let edit = self.doc.delete(self.sel.range());
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             let pos = self.sel.start();
             self.sel = Selection::collapsed(pos, &self.doc.rope);
         } else {
             let word_start = cursor::move_word_left(&self.doc.rope, self.sel, false).head;
             if word_start < self.sel.head {
                 let edit = self.doc.delete(word_start..self.sel.head);
-                self.history.push_other(edit);
+                self.history.push_change(edit);
                 self.sel = Selection::collapsed(word_start, &self.doc.rope);
             }
         }
@@ -346,14 +351,14 @@ impl EditorView {
         self.history.commit();
         if !self.sel.is_empty() {
             let edit = self.doc.delete(self.sel.range());
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             let pos = self.sel.start();
             self.sel = Selection::collapsed(pos, &self.doc.rope);
         } else {
             let word_end = cursor::move_word_right(&self.doc.rope, self.sel, false).head;
             if word_end > self.sel.head {
                 let edit = self.doc.delete(self.sel.head..word_end);
-                self.history.push_other(edit);
+                self.history.push_change(edit);
                 self.sel = Selection::collapsed(self.sel.head, &self.doc.rope);
             }
         }
@@ -367,12 +372,12 @@ impl EditorView {
         let line_start = self.doc.rope.line_to_char(line_idx);
         if !self.sel.is_empty() {
             let edit = self.doc.delete(self.sel.range());
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             let pos = self.sel.start();
             self.sel = Selection::collapsed(pos, &self.doc.rope);
         } else if line_start < head {
             let edit = self.doc.delete(line_start..head);
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             self.sel = Selection::collapsed(line_start, &self.doc.rope);
         }
         self.after_edit(cx);
@@ -382,7 +387,7 @@ impl EditorView {
         self.history.commit();
         if !self.sel.is_empty() {
             let edit = self.doc.delete(self.sel.range());
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             let pos = self.sel.start();
             self.sel = Selection::collapsed(pos, &self.doc.rope);
         } else {
@@ -395,7 +400,7 @@ impl EditorView {
             let line_end = line_start + content_chars;
             if head < line_end {
                 let edit = self.doc.delete(head..line_end);
-                self.history.push_other(edit);
+                self.history.push_change(edit);
                 self.sel = Selection::collapsed(head, &self.doc.rope);
             }
         }
@@ -420,7 +425,7 @@ impl EditorView {
         };
         if del_start < del_end {
             let edit = self.doc.delete(del_start..del_end);
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             let clamped = new_pos.min(self.doc.len_chars());
             self.sel = Selection::collapsed(clamped, &self.doc.rope);
             self.after_edit(cx);
@@ -618,25 +623,29 @@ impl EditorView {
         }
         let m = self.matches[self.match_idx].clone();
         let replacement = self.replace_query.clone();
-        let edit = self.doc.delete(m.clone());
-        self.history.push_other(edit);
-        let edit2 = self.doc.insert(m.start, &replacement);
-        self.history.push_other(edit2);
+        self.history.commit();
+        let tx = Transaction::replace(&self.doc.rope, m.clone(), replacement.clone());
+        let inverse = self.doc.apply(tx);
+        self.history.push_change(inverse);
         let new_pos = m.start + replacement.chars().count();
         self.sel = Selection::collapsed(new_pos, &self.doc.rope);
         self.after_edit(cx);
     }
 
     fn do_replace_all(&mut self, cx: &mut Context<Self>) {
-        let replacement = self.replace_query.clone();
-        let matches: Vec<_> = self.matches.clone();
-        self.history.commit();
-        for m in matches.iter().rev() {
-            let edit = self.doc.delete(m.clone());
-            self.history.push_other(edit);
-            let edit2 = self.doc.insert(m.start, &replacement);
-            self.history.push_other(edit2);
+        if self.matches.is_empty() {
+            return;
         }
+        self.history.commit();
+        let doc_len = self.doc.rope.len_chars();
+        let changeset = ChangeSet::from_changes(
+            doc_len,
+            self.matches.iter().map(|r| (r.start, r.end, self.replace_query.clone())),
+        );
+        let tx = Transaction::from_changeset(changeset);
+        let inverse = self.doc.apply(tx);
+        self.history.push_change(inverse);
+        self.matches.clear();
         self.after_edit(cx);
     }
 
@@ -851,11 +860,11 @@ impl EditorView {
                     let char_end   = line_char_start + line_str[..delete_cols.end].chars().count();
                     self.history.commit();
                     let edit = self.doc.delete(char_start..char_end);
-                    self.history.push_other(edit);
+                    self.history.push_change(edit);
                     self.sel = Selection::collapsed(char_start, &self.doc.rope);
                     let edit = self.doc.insert(char_start, "\n");
                     let end = char_start + 1;
-                    self.history.push_insert(edit, end);
+                    self.history.push_insert(edit);
                     self.sel = Selection::collapsed(end, &self.doc.rope);
                     self.after_edit(cx);
                     self.history.commit();
@@ -881,15 +890,15 @@ impl EditorView {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             self.history.commit();
             let edit = self.doc.delete(self.sel.range());
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             let pos = self.sel.start();
             self.sel = Selection::collapsed(pos, &self.doc.rope);
             self.after_edit(cx);
         }
     }
     fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item) = cx.read_from_clipboard() {
-            if let Some(text) = item.text() {
+        if let Some(item) = cx.read_from_clipboard()
+            && let Some(text) = item.text() {
                 if self.is_markdown() && !self.sel.is_empty() && looks_like_url(&text) {
                     let sel_text: String = self.doc.rope.slice(self.sel.range()).to_string();
                     let linked = format!("[{sel_text}]({text})");
@@ -900,7 +909,6 @@ impl EditorView {
                 self.history.commit();
                 self.insert_text(&text.clone(), cx);
             }
-        }
     }
 
     fn on_bold_selection(&mut self, _: &BoldSelection, _: &mut Window, cx: &mut Context<Self>) {
@@ -931,9 +939,9 @@ impl EditorView {
             let char_end   = line_char_start + line_str[..byte_range.end].chars().count();
             self.history.commit();
             let edit = self.doc.delete(char_start..char_end);
-            self.history.push_other(edit);
+            self.history.push_change(edit);
             let edit = self.doc.insert(char_start, replacement);
-            self.history.push_insert(edit, char_start + replacement.chars().count());
+            self.history.push_insert(edit);
             self.sel = Selection::collapsed(self.sel.head, &self.doc.rope);
             self.after_edit(cx);
             self.history.commit();
@@ -1269,16 +1277,10 @@ impl EditorView {
             .iter()
             .any(|m| m.start < next_line_start && m.end > line_char_start);
 
-        let raw_spans: &[HighlightSpan] = self
-            .doc
-            .highlight_cache
-            .lines
-            .get(line_idx)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
+        let raw_spans: &[HighlightSpan] = self.doc.highlight_spans(line_idx);
         let has_spans = !raw_spans.is_empty();
 
-        let hl_this_line = outline_hl.map_or(false, |(s, e)| line_idx >= s && line_idx < e);
+        let hl_this_line = outline_hl.is_some_and(|(s, e)| line_idx >= s && line_idx < e);
 
         // ── Fast path: no decoration at all ───────────────────────────────────
         if !cursor_on_line && !has_sel && !has_match && !has_spans {
@@ -1331,7 +1333,7 @@ impl EditorView {
         let sel_start = self.sel.start();
         let sel_end = self.sel.end();
         let line_sel_start =
-            if sel_start > line_char_start { sel_start - line_char_start } else { 0 };
+            sel_start.saturating_sub(line_char_start);
         let line_sel_end =
             if sel_end < line_char_end { sel_end - line_char_start } else { line_char_count };
 
@@ -1341,7 +1343,7 @@ impl EditorView {
             .enumerate()
             .filter(|(_, m)| m.start <= line_char_end && m.end >= line_char_start)
             .map(|(i, m)| {
-                let s = if m.start > line_char_start { m.start - line_char_start } else { 0 };
+                let s = m.start.saturating_sub(line_char_start);
                 let e =
                     if m.end < line_char_end { m.end - line_char_start } else { line_char_count };
                 (s, e, i == self.match_idx)
@@ -1394,9 +1396,7 @@ impl EditorView {
 
             // Syntax color: find the innermost span covering this segment.
             let fg_color = hl_spans
-                .iter()
-                .filter(|(s, e, _)| seg_start >= *s && seg_end <= *e)
-                .last()
+                .iter().rfind(|(s, e, _)| seg_start >= *s && seg_end <= *e)
                 .map(|(_, _, tok)| Self::token_color(*tok, t))
                 .unwrap_or(t.text);
 
@@ -1784,7 +1784,7 @@ impl EditorView {
     // ── markdown preview ───────────────────────────────────────────────────────
 
     pub fn is_markdown(&self) -> bool {
-        self.doc.language.as_ref().map_or(false, |l| l.id.0 == "markdown")
+        self.doc.language.as_ref().is_some_and(|l| l.id.0 == "markdown")
     }
 
     fn on_toggle_preview(&mut self, _: &TogglePreview, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1796,7 +1796,7 @@ impl EditorView {
             let source_line = self.doc.rope.char_to_line(
                 self.sel.head.min(self.doc.len_chars().saturating_sub(1))
             );
-            let registry = Arc::new(LanguageRegistry::with_defaults());
+            let registry = self.registry.clone();
             if self.preview.is_none() {
                 let rope = self.doc.rope.clone();
                 let path = self.doc.path.clone();
@@ -1901,7 +1901,7 @@ impl Render for EditorView {
         };
 
         let can_open_outline = is_md && !self.outline.is_empty();
-        let crumb_color = if can_open_outline { t.text_subtle } else { t.text_subtle };
+        let crumb_color = if can_open_outline { t.text } else { t.text_subtle };
         let crumb_hover_bg = t.line_highlight;
         let outline_active = self.outline_open;
 
@@ -2077,7 +2077,7 @@ impl Render for EditorView {
             .with_width_from_item(Some(widest))
             .track_scroll(self.scroll_handle.clone())
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down_editor))
-            .on_scroll_wheel(cx.listener(|view, _ev: &ScrollWheelEvent, _, cx| {
+            .on_scroll_wheel(cx.listener(|_view, _ev: &ScrollWheelEvent, _, cx| {
                 // Trigger re-render so the breadcrumb heading stack refreshes.
                 cx.notify();
             }));
@@ -2092,8 +2092,8 @@ impl Render for EditorView {
         };
 
         // In preview mode: side-by-side split (editor left, preview right).
-        if show_preview {
-            if let Some(ref preview_entity) = self.preview {
+        if show_preview
+            && let Some(ref preview_entity) = self.preview {
                 let preview = preview_entity.clone();
                 let split = div()
                     .flex()
@@ -2199,7 +2199,6 @@ impl Render for EditorView {
                 } else { root };
                 return root.into_any();
             }
-        }
 
         let key_ctx = if self.outline_open { "OutlineOverlay" } else if is_md { "Editor markdown" } else { "Editor" };
 
@@ -2395,7 +2394,7 @@ impl EditorView {
             let entries: Vec<AnyElement> = filtered
                 .iter()
                 .enumerate()
-                .map(|(list_idx, (orig_idx, entry))| {
+                .map(|(list_idx, (_orig_idx, entry))| {
                     let level = entry.level;
                     let source_line = entry.source_line;
                     let is_hovered = hover_idx == Some(list_idx);
