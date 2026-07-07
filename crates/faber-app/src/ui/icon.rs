@@ -6,6 +6,7 @@ use crate::theme::ActiveTheme;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
     Add,
+    ChevronLeft,
     ChevronRight,
     Close,
     Code,
@@ -25,6 +26,7 @@ impl IconName {
     pub fn path(self) -> &'static str {
         match self {
             IconName::Add => "icons/ui/add.svg",
+            IconName::ChevronLeft => "icons/ui/chevron_left.svg",
             IconName::ChevronRight => "icons/ui/chevron_right.svg",
             IconName::Close => "icons/ui/close.svg",
             IconName::Code => "icons/ui/code.svg",

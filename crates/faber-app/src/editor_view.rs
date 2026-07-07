@@ -14,7 +14,7 @@ use gpui::{
     AnyElement, App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyDownEvent, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
     Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, prelude::*, px,
-    uniform_list,
+    svg, uniform_list,
 };
 
 use crate::markdown_preview::MarkdownPreviewView;
@@ -32,13 +32,15 @@ const GUTTER_COLS: f32 = 6.0;
 
 use crate::{
     Backspace, BoldSelection, CloseSearch, Copy, Cut, Delete, DeleteLine, DeleteToLineEnd,
-    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, ItalicSelection,
-    MoveDocEnd, MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown,
-    MovePageUp, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste,
-    ProjectRoot, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne, SearchBackspace, SelectAll,
-    SelectDocEnd, SelectDocStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart,
-    SelectRight, SelectUp, SelectWordLeft, SelectWordRight, Tab, ToggleCheckbox, TogglePreview,
-    Undo,
+    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev,
+    InputMoveEnd, InputMoveLeft, InputMoveRight, InputMoveStart,
+    ItalicSelection, MoveDocEnd, MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart,
+    MovePageDown, MovePageUp, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace,
+    OpenSearch, Paste, ProjectRoot, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne,
+    SearchBackspace, SelectAll, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft,
+    SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight,
+    Tab, ToggleCheckbox, TogglePreview, ToggleReplace, ToggleSearchCase, ToggleSearchRegex,
+    ToggleSearchWholeWord, Undo,
 };
 
 // ── EditorView ─────────────────────────────────────────────────────────────────
@@ -77,8 +79,13 @@ pub struct EditorView {
     pub replace_handle: FocusHandle,
     pub search_query: String,
     pub replace_query: String,
+    pub search_cursor: usize,
+    pub replace_cursor: usize,
     pub matches: Vec<Range<usize>>,
     pub match_idx: usize,
+    pub search_case_sensitive: bool,
+    pub search_whole_word: bool,
+    pub search_regex: bool,
 
     pub scrollbar_drag: Option<ScrollbarDrag>,
 
@@ -120,8 +127,13 @@ impl EditorView {
             replace_handle: cx.focus_handle(),
             search_query: String::new(),
             replace_query: String::new(),
+            search_cursor: 0,
+            replace_cursor: 0,
             matches: Vec::new(),
             match_idx: 0,
+            search_case_sensitive: false,
+            search_whole_word: false,
+            search_regex: false,
             scrollbar_drag: None,
             cursor_blink_on: true,
             cursor_blink_epoch: 0,
@@ -444,7 +456,10 @@ impl EditorView {
 
     fn update_matches(&mut self) {
         self.rebuild_line_cache();
-        let q = Query::new(self.search_query.clone());
+        let q = Query::new(self.search_query.clone())
+            .case_sensitive(self.search_case_sensitive)
+            .whole_word(self.search_whole_word)
+            .regex(self.search_regex);
         self.matches = if self.show_search || self.show_replace {
             q.all_matches(&self.doc.rope)
         } else {
@@ -822,6 +837,10 @@ impl EditorView {
     }
 
     fn on_open_search(&mut self, _: &OpenSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_search {
+            self.on_close_search(&CloseSearch, window, cx);
+            return;
+        }
         self.show_search = true;
         self.show_replace = false;
         self.update_matches();
@@ -838,6 +857,13 @@ impl EditorView {
     fn on_close_search(&mut self, _: &CloseSearch, window: &mut Window, cx: &mut Context<Self>) {
         self.show_search = false;
         self.show_replace = false;
+        self.search_query.clear();
+        self.replace_query.clear();
+        self.search_cursor = 0;
+        self.replace_cursor = 0;
+        self.search_case_sensitive = false;
+        self.search_whole_word = false;
+        self.search_regex = false;
         self.matches.clear();
         self.match_idx = 0;
         window.focus(&self.focus_handle);
@@ -861,9 +887,12 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.search_query.pop();
-        self.update_matches();
-        cx.notify();
+        if self.search_cursor > 0 {
+            self.search_query = delete_char_before(&self.search_query, self.search_cursor);
+            self.search_cursor -= 1;
+            self.update_matches();
+            cx.notify();
+        }
     }
     fn on_replace_backspace(
         &mut self,
@@ -871,7 +900,91 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.replace_query.pop();
+        if self.replace_cursor > 0 {
+            self.replace_query = delete_char_before(&self.replace_query, self.replace_cursor);
+            self.replace_cursor -= 1;
+            cx.notify();
+        }
+    }
+    fn on_input_move_left(&mut self, _: &InputMoveLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_handle.is_focused(window) {
+            self.search_cursor = self.search_cursor.saturating_sub(1);
+        } else if self.replace_handle.is_focused(window) {
+            self.replace_cursor = self.replace_cursor.saturating_sub(1);
+        }
+        self.reset_blink(cx);
+        cx.notify();
+    }
+    fn on_input_move_right(&mut self, _: &InputMoveRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_handle.is_focused(window) {
+            self.search_cursor = (self.search_cursor + 1).min(self.search_query.chars().count());
+        } else if self.replace_handle.is_focused(window) {
+            self.replace_cursor = (self.replace_cursor + 1).min(self.replace_query.chars().count());
+        }
+        self.reset_blink(cx);
+        cx.notify();
+    }
+    fn on_input_move_start(&mut self, _: &InputMoveStart, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_handle.is_focused(window) {
+            self.search_cursor = 0;
+        } else if self.replace_handle.is_focused(window) {
+            self.replace_cursor = 0;
+        }
+        self.reset_blink(cx);
+        cx.notify();
+    }
+    fn on_input_move_end(&mut self, _: &InputMoveEnd, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_handle.is_focused(window) {
+            self.search_cursor = self.search_query.chars().count();
+        } else if self.replace_handle.is_focused(window) {
+            self.replace_cursor = self.replace_query.chars().count();
+        }
+        self.reset_blink(cx);
+        cx.notify();
+    }
+
+    fn on_toggle_search_case(
+        &mut self,
+        _: &ToggleSearchCase,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_case_sensitive = !self.search_case_sensitive;
+        self.update_matches();
+        cx.notify();
+    }
+    fn on_toggle_search_whole_word(
+        &mut self,
+        _: &ToggleSearchWholeWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_whole_word = !self.search_whole_word;
+        self.update_matches();
+        cx.notify();
+    }
+    fn on_toggle_search_regex(
+        &mut self,
+        _: &ToggleSearchRegex,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_regex = !self.search_regex;
+        self.update_matches();
+        cx.notify();
+    }
+    fn on_toggle_replace(
+        &mut self,
+        _: &ToggleReplace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_replace = !self.show_replace;
+        if self.show_replace {
+            window.focus(&self.replace_handle);
+        } else {
+            window.focus(&self.search_handle);
+        }
         cx.notify();
     }
 
@@ -880,6 +993,23 @@ impl EditorView {
         // macOS routes cmd+backspace/delete through NSTextInputClient (doCommandBySelector:)
         // before GPUI keybinding dispatch fires. Handle here to guarantee execution.
         if ks.modifiers.platform && !ks.modifiers.control && !ks.modifiers.alt {
+            if ks.key.as_str() == "backspace" && !ks.modifiers.shift {
+                if self.show_search && self.search_handle.is_focused(window) {
+                    self.search_query.clear();
+                    self.search_cursor = 0;
+                    self.update_matches();
+                    self.reset_blink(cx);
+                    cx.notify();
+                    return;
+                }
+                if self.show_replace && self.replace_handle.is_focused(window) {
+                    self.replace_query.clear();
+                    self.replace_cursor = 0;
+                    self.reset_blink(cx);
+                    cx.notify();
+                    return;
+                }
+            }
             match (ks.key.as_str(), ks.modifiers.shift) {
                 ("backspace", false) => { self.do_delete_to_line_start(cx); return; }
                 ("delete", false)    => { self.do_delete_to_line_end(cx); return; }
@@ -906,11 +1036,15 @@ impl EditorView {
             raw_text.as_str()
         };
         if self.show_replace && self.replace_handle.is_focused(window) {
-            self.replace_query.push_str(text);
+            self.replace_query = insert_at(&self.replace_query, self.replace_cursor, text);
+            self.replace_cursor += text.chars().count();
+            self.reset_blink(cx);
             cx.notify();
         } else if self.show_search && self.search_handle.is_focused(window) {
-            self.search_query.push_str(text);
+            self.search_query = insert_at(&self.search_query, self.search_cursor, text);
+            self.search_cursor += text.chars().count();
             self.update_matches();
+            self.reset_blink(cx);
             cx.notify();
         } else {
             self.insert_text(text, cx);
@@ -1120,7 +1254,15 @@ impl EditorView {
         }
     }
 
-    fn render_search_bar(&self, window: &Window, t: &RuntimeTheme) -> impl IntoElement {
+    fn render_search_bar(
+        &self,
+        window: &Window,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        // ── split query text at cursor for rendering ──
+        let (s_before, s_after) = split_at_char(&self.search_query, self.search_cursor);
+        let (r_before, r_after) = split_at_char(&self.replace_query, self.replace_cursor);
         let match_info = if !self.search_query.is_empty() && !self.matches.is_empty() {
             format!("{}/{}", self.match_idx + 1, self.matches.len())
         } else if !self.search_query.is_empty() {
@@ -1130,78 +1272,296 @@ impl EditorView {
         };
 
         let search_focused = self.search_handle.is_focused(window);
+        let replace_focused = self.replace_handle.is_focused(window);
+        let caret_visible = self.cursor_blink_on;
+        let show_replace = self.show_replace;
 
+        // Theme values captured by value for closures.
+        let hover_bg = t.line_highlight;
+        let sep_color = t.separator;
+        let radius = t.radius_sm;
+        let radius_md = t.radius_md;
+
+        // Cursor color: visible or transparent (no layout shift, same as editor cursor).
+        let search_cursor_color = if search_focused && caret_visible { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
+        let replace_cursor_color = if replace_focused && caret_visible { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
+        let cursor_h = t.font_size_code + 2.;
+
+        // ── icon button helper ─────────────────────────────────────────────────
+        let icon_btn_base = move |id: &'static str| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(24.))
+                .rounded(px(radius))
+                .cursor_pointer()
+                .flex_shrink_0()
+                .hover(move |s| s.bg(hover_bg))
+        };
+
+        // ── vertical separator ─────────────────────────────────────────────────
+        let vsep = move || div().w(px(1.)).h(px(14.)).bg(sep_color).flex_shrink_0();
+
+        // ── toggle chip helper ─────────────────────────────────────────────────
+        let chip = move |id: &'static str, label: &'static str, active: bool, t: &RuntimeTheme| {
+            div()
+                .id(id)
+                .px_2()
+                .rounded(px(radius))
+                .cursor_pointer()
+                .flex_shrink_0()
+                .text_size(px(t.font_size_code - 1.))
+                .font_family(t.mono_family.clone())
+                .text_color(if active { t.text_on_accent } else { t.text_subtle })
+                .when(active, move |el| el.bg(t.accent).hover(move |s| s.bg(t.accent_hover)))
+                .when(!active, move |el| el.hover(move |s| s.bg(hover_bg)))
+                .child(label)
+        };
+
+        // ── replace-toggle (leftmost, Add = show replace, Remove = hide) ───────
+        let toggle_icon = if show_replace { IconName::Remove } else { IconName::Add };
+        let toggle_color = if show_replace { t.accent } else { t.text_subtle };
+        let replace_toggle = icon_btn_base("toggle-replace")
+            .when(show_replace, |el| el.bg(t.line_highlight))
+            .child(svg().path(toggle_icon.path()).size(px(14.)).text_color(toggle_color))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| v.on_toggle_replace(&ToggleReplace, window, cx)),
+            );
+
+        // ── navigation group: [◄ prev] [count] [► next] ───────────────────────
+        let prev_btn = icon_btn_base("search-prev")
+            .child(svg().path(IconName::ChevronLeft.path()).size(px(14.)).text_color(t.text_subtle))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| v.on_find_prev(&FindPrev, window, cx)),
+            );
+
+        let next_btn = icon_btn_base("search-next")
+            .child(svg().path(IconName::ChevronRight.path()).size(px(14.)).text_color(t.text_subtle))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| v.on_find_next(&FindNext, window, cx)),
+            );
+
+        let nav_group = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_shrink_0()
+            .child(prev_btn)
+            .child(
+                div()
+                    .min_w(px(48.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(t.gutter)
+                    .text_size(px(t.font_size_caption))
+                    .child(match_info),
+            )
+            .child(next_btn);
+
+        // ── filter chips ───────────────────────────────────────────────────────
+        let case_chip = chip("toggle-case", "Aa", self.search_case_sensitive, t)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| {
+                    v.on_toggle_search_case(&ToggleSearchCase, window, cx)
+                }),
+            );
+
+        let word_chip = chip("toggle-word", "W", self.search_whole_word, t)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| {
+                    v.on_toggle_search_whole_word(&ToggleSearchWholeWord, window, cx)
+                }),
+            );
+
+        let regex_chip = chip("toggle-regex", ".*", self.search_regex, t)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| {
+                    v.on_toggle_search_regex(&ToggleSearchRegex, window, cx)
+                }),
+            );
+
+        // ── close button (rightmost) ───────────────────────────────────────────
+        let close_btn = icon_btn_base("search-close")
+            .child(svg().path(IconName::Close.path()).size(px(13.)).text_color(t.text_subtle))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| v.on_close_search(&CloseSearch, window, cx)),
+            );
+
+        // ── shared input style ─────────────────────────────────────────────────
+        // Both inputs use the same height/padding/font so they're identical in size.
+        let input_style = move |focused: bool, t: &RuntimeTheme| {
+            div()
+                .flex_1()
+                .min_w(px(80.))
+                .h(px(24.))
+                .bg(if focused { t.line_highlight } else { t.bg_sunken })
+                .px_2()
+                .flex()
+                .items_center()
+                .rounded(px(radius))
+                .font_family(t.mono_family.clone())
+                .text_size(px(t.font_size_code))
+        };
+
+        // ── replace row buttons ────────────────────────────────────────────────
+        let replace_one_btn = div()
+            .id("replace-one")
+            .px_3()
+            .h(px(24.))
+            .flex()
+            .items_center()
+            .rounded(px(radius_md))
+            .bg(t.bg_overlay)
+            .text_color(t.text)
+            .text_size(px(t.font_size_body))
+            .font_family(t.ui_family.clone())
+            .cursor_pointer()
+            .flex_shrink_0()
+            .hover(move |s| s.bg(hover_bg))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| v.on_replace_one(&ReplaceOne, window, cx)),
+            )
+            .child("Replace");
+
+        let replace_all_btn = div()
+            .id("replace-all")
+            .px_3()
+            .h(px(24.))
+            .flex()
+            .items_center()
+            .rounded(px(radius_md))
+            .bg(t.bg_overlay)
+            .text_color(t.text)
+            .text_size(px(t.font_size_body))
+            .font_family(t.ui_family.clone())
+            .cursor_pointer()
+            .flex_shrink_0()
+            .hover(move |s| s.bg(hover_bg))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| v.on_replace_all(&ReplaceAll, window, cx)),
+            )
+            .child("Replace All");
+
+        // ── right-side wrappers (same fixed width → inputs are identical size) ──
+        // Search: [|] [◄][count][►] [|] [Aa][W][.*] [|] [✕]
+        let search_right = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w(px(240.))
+            .flex_shrink_0()
+            .child(vsep())
+            .child(nav_group)
+            .child(vsep())
+            .child(case_chip)
+            .child(word_chip)
+            .child(regex_chip)
+            .child(vsep())
+            .child(close_btn);
+
+        // Replace: [|] [spacer fills left] [Replace] [Replace All]
+        let replace_right = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w(px(240.))
+            .flex_shrink_0()
+            .child(vsep())
+            .child(div().flex_1())
+            .child(replace_one_btn)
+            .child(replace_all_btn);
+
+        // ── search row ─────────────────────────────────────────────────────────
+        // Layout: [toggle] [|] [search-input flex_1] [right-240px]
         let search_row = div()
             .flex()
             .flex_row()
-            .gap_2()
-            .px_3()
+            .items_center()
+            .gap_1()
+            .px_2()
             .py_1()
-            .child(div().text_color(t.gutter).flex_shrink_0().child("Search:"))
+            .child(replace_toggle)
+            .child(vsep())
             .child(
-                div()
-                    .flex_1()
-                    .bg(if search_focused { t.line_highlight } else { t.bg_sunken })
-                    .px_2()
-                    .text_color(t.text)
-                    .font_family(t.mono_family.clone())
-                    .text_size(px(t.font_size_code))
-                    .child(if self.search_query.is_empty() {
-                        SharedString::from("⬜")
+                input_style(search_focused, t)
+                    .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| {
+                        window.focus(&v.search_handle);
+                        v.search_cursor = v.search_query.chars().count();
+                        v.reset_blink(cx);
+                    }))
+                    .child(if !search_focused && self.search_query.is_empty() {
+                        div().text_color(t.text_subtle).child("Search…").into_any()
                     } else {
-                        SharedString::from(format!("{}▏", self.search_query))
+                        div().flex().flex_row().items_center()
+                            .child(div().text_color(t.text).child(SharedString::from(s_before)))
+                            .child(div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0().bg(search_cursor_color))
+                            .child(div().text_color(t.text).child(SharedString::from(s_after)))
+                            .into_any()
                     }),
             )
-            .child(div().text_color(t.gutter).flex_shrink_0().child(match_info));
+            .child(search_right);
 
-        if !self.show_replace {
-            return div()
-                .border_t_1()
-                .border_color(t.separator)
-                .bg(t.bg)
-                .key_context("SearchBar")
-                .track_focus(&self.search_handle)
-                .child(search_row);
-        }
-
-        let replace_focused = self.replace_handle.is_focused(window);
-
+        // ── replace row (left spacer matches toggle width → inputs left-aligned) ─
         let replace_row = div()
             .flex()
             .flex_row()
-            .gap_2()
-            .px_3()
+            .items_center()
+            .gap_1()
+            .px_2()
             .py_1()
-            .child(div().text_color(t.gutter).flex_shrink_0().child("Replace:"))
+            .border_t_1()
+            .border_color(t.separator)
+            .child(div().w(px(24.)).flex_shrink_0())
+            .child(vsep())
             .child(
-                div()
-                    .flex_1()
-                    .bg(if replace_focused { t.line_highlight } else { t.bg_sunken })
-                    .px_2()
-                    .text_color(t.text)
-                    .font_family(t.mono_family.clone())
-                    .text_size(px(t.font_size_code))
-                    .child(if self.replace_query.is_empty() {
-                        SharedString::from("⬜")
+                input_style(replace_focused, t)
+                    .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| {
+                        window.focus(&v.replace_handle);
+                        v.replace_cursor = v.replace_query.chars().count();
+                        v.reset_blink(cx);
+                    }))
+                    .child(if !replace_focused && self.replace_query.is_empty() {
+                        div().text_color(t.text_subtle).child("Replace with…").into_any()
                     } else {
-                        SharedString::from(format!("{}▏", self.replace_query))
+                        div().flex().flex_row().items_center()
+                            .child(div().text_color(t.text).child(SharedString::from(r_before)))
+                            .child(div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0().bg(replace_cursor_color))
+                            .child(div().text_color(t.text).child(SharedString::from(r_after)))
+                            .into_any()
                     }),
             )
-            .child(div().text_color(t.gutter).flex_shrink_0().child("⏎ Replace · ⌘⏎ All"));
+            .child(replace_right);
 
         div()
-            .border_t_1()
+            .border_b_1()
             .border_color(t.separator)
             .bg(t.bg)
             .key_context("SearchBar")
             .track_focus(&self.search_handle)
             .child(search_row)
-            .child(
-                div()
-                    .key_context("ReplaceBar")
-                    .track_focus(&self.replace_handle)
-                    .child(replace_row),
-            )
+            .when(show_replace, |el| {
+                el.child(
+                    div()
+                        .key_context("ReplaceBar")
+                        .track_focus(&self.replace_handle)
+                        .child(replace_row),
+                )
+            })
     }
 
     // ── markdown preview ───────────────────────────────────────────────────────
@@ -1308,6 +1668,22 @@ impl Render for EditorView {
             }
         };
 
+        let search_icon_color = if self.show_search { t.accent } else { t.text_subtle };
+        let search_btn = div()
+            .id("header-search")
+            .flex()
+            .items_center()
+            .px_2()
+            .py_1()
+            .rounded(px(t.radius_sm))
+            .cursor_pointer()
+            .hover(|s| s.bg(t.line_highlight))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| v.on_open_search(&OpenSearch, window, cx)),
+            )
+            .child(svg().path(IconName::Search.path()).size(px(14.)).text_color(search_icon_color));
+
         let header = div()
             .flex()
             .flex_row()
@@ -1325,7 +1701,15 @@ impl Render for EditorView {
                     .text_color(t.text_subtle)
                     .child(path_label),
             )
-            .child(toggle_btn);
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(search_btn)
+                    .child(toggle_btn),
+            );
 
         let line_count = self.doc.len_lines();
         let cursor_line = self.doc.rope.char_to_line(self.sel.head.min(self.doc.len_chars().saturating_sub(1)));
@@ -1449,6 +1833,14 @@ impl Render for EditorView {
                     .on_action(cx.listener(Self::on_replace_all))
                     .on_action(cx.listener(Self::on_search_backspace))
                     .on_action(cx.listener(Self::on_replace_backspace))
+                    .on_action(cx.listener(Self::on_input_move_left))
+                    .on_action(cx.listener(Self::on_input_move_right))
+                    .on_action(cx.listener(Self::on_input_move_start))
+                    .on_action(cx.listener(Self::on_input_move_end))
+                    .on_action(cx.listener(Self::on_toggle_search_case))
+                    .on_action(cx.listener(Self::on_toggle_search_whole_word))
+                    .on_action(cx.listener(Self::on_toggle_search_regex))
+                    .on_action(cx.listener(Self::on_toggle_replace))
                     .on_action(cx.listener(Self::on_toggle_preview))
                     .on_action(cx.listener(Self::on_bold_selection))
                     .on_action(cx.listener(Self::on_italic_selection))
@@ -1466,9 +1858,11 @@ impl Render for EditorView {
                             cx.notify();
                         }))
                     })
-                    .child(header)
-                    .child(split);
-                return root.into_any();
+                    .child(header);
+                let root = if self.show_search {
+                    root.child(self.render_search_bar(window, &t, cx))
+                } else { root };
+                return root.child(split).into_any();
             }
         }
 
@@ -1528,6 +1922,14 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_replace_all))
             .on_action(cx.listener(Self::on_search_backspace))
             .on_action(cx.listener(Self::on_replace_backspace))
+            .on_action(cx.listener(Self::on_input_move_left))
+            .on_action(cx.listener(Self::on_input_move_right))
+            .on_action(cx.listener(Self::on_input_move_start))
+            .on_action(cx.listener(Self::on_input_move_end))
+            .on_action(cx.listener(Self::on_toggle_search_case))
+            .on_action(cx.listener(Self::on_toggle_search_whole_word))
+            .on_action(cx.listener(Self::on_toggle_search_regex))
+            .on_action(cx.listener(Self::on_toggle_replace))
             .on_action(cx.listener(Self::on_toggle_preview))
             .on_action(cx.listener(Self::on_bold_selection))
             .on_action(cx.listener(Self::on_italic_selection))
@@ -1545,13 +1947,35 @@ impl Render for EditorView {
                     cx.notify();
                 }))
             })
-            .child(header)
-            .child(editor_pane);
+            .child(header);
 
-        if self.show_search {
-            root.child(self.render_search_bar(window, &t)).into_any()
-        } else {
-            root.into_any()
-        }
+        let root = if self.show_search {
+            root.child(self.render_search_bar(window, &t, cx))
+        } else { root };
+        root.child(editor_pane).into_any()
     }
+}
+
+// ── string helpers for search/replace cursor ───────────────────────────────────
+
+fn insert_at(s: &str, char_idx: usize, text: &str) -> String {
+    let mut chars: Vec<char> = s.chars().collect();
+    let idx = char_idx.min(chars.len());
+    for (i, c) in text.chars().enumerate() {
+        chars.insert(idx + i, c);
+    }
+    chars.into_iter().collect()
+}
+
+fn delete_char_before(s: &str, char_idx: usize) -> String {
+    if char_idx == 0 { return s.to_string(); }
+    let chars: Vec<char> = s.chars().collect();
+    let idx = char_idx.saturating_sub(1).min(chars.len().saturating_sub(1));
+    chars[..idx].iter().chain(chars[char_idx..].iter()).copied().collect()
+}
+
+fn split_at_char(s: &str, char_idx: usize) -> (String, String) {
+    let chars: Vec<char> = s.chars().collect();
+    let idx = char_idx.min(chars.len());
+    (chars[..idx].iter().collect(), chars[idx..].iter().collect())
 }

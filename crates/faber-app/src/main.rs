@@ -56,6 +56,8 @@ actions!(
         FindNext, FindPrev,
         ReplaceOne, ReplaceAll,
         SearchBackspace, ReplaceBackspace,
+        ToggleSearchCase, ToggleSearchWholeWord, ToggleSearchRegex, ToggleReplace,
+        InputMoveLeft, InputMoveRight, InputMoveStart, InputMoveEnd,
     ]
 );
 
@@ -189,11 +191,27 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("enter", FindNext, Some("SearchBar")),
         KeyBinding::new("shift-enter", FindPrev, Some("SearchBar")),
         KeyBinding::new("backspace", SearchBackspace, Some("SearchBar")),
+        KeyBinding::new("left", InputMoveLeft, Some("SearchBar")),
+        KeyBinding::new("right", InputMoveRight, Some("SearchBar")),
+        KeyBinding::new("cmd-left", InputMoveStart, Some("SearchBar")),
+        KeyBinding::new("cmd-right", InputMoveEnd, Some("SearchBar")),
+        KeyBinding::new("home", InputMoveStart, Some("SearchBar")),
+        KeyBinding::new("end", InputMoveEnd, Some("SearchBar")),
+        KeyBinding::new("cmd-alt-c", ToggleSearchCase, Some("SearchBar")),
+        KeyBinding::new("cmd-alt-w", ToggleSearchWholeWord, Some("SearchBar")),
+        KeyBinding::new("cmd-alt-x", ToggleSearchRegex, Some("SearchBar")),
+        KeyBinding::new("cmd-alt-f", ToggleReplace, Some("SearchBar")),
         // Replace bar
         KeyBinding::new("escape", CloseSearch, Some("ReplaceBar")),
         KeyBinding::new("enter", ReplaceOne, Some("ReplaceBar")),
         KeyBinding::new("cmd-enter", ReplaceAll, Some("ReplaceBar")),
         KeyBinding::new("backspace", ReplaceBackspace, Some("ReplaceBar")),
+        KeyBinding::new("left", InputMoveLeft, Some("ReplaceBar")),
+        KeyBinding::new("right", InputMoveRight, Some("ReplaceBar")),
+        KeyBinding::new("cmd-left", InputMoveStart, Some("ReplaceBar")),
+        KeyBinding::new("cmd-right", InputMoveEnd, Some("ReplaceBar")),
+        KeyBinding::new("home", InputMoveStart, Some("ReplaceBar")),
+        KeyBinding::new("end", InputMoveEnd, Some("ReplaceBar")),
     ]);
 }
 
