@@ -15,8 +15,6 @@ pub use faber_core::transaction::{ChangeSet, Transaction};
 // Re-export faber-lang so consumers can set up the registry.
 pub use faber_lang::{Language, LanguageId, LanguageRegistry, SyntaxToken};
 
-use ropey::Rope;
-use std::{fs, io};
 use tree_sitter::{InputEdit, Parser, Tree};
 
 /// Build a tree-sitter parser for Rust (convenience wrapper used by benches/tests
@@ -49,10 +47,3 @@ pub fn node_count(tree: &Tree) -> usize {
     tree.root_node().descendant_count()
 }
 
-// Dead legacy helper; kept temporarily so the bench include_str! seed
-// continues to compile until its removal in a later step.
-pub fn load_rope(path: &str) -> io::Result<(String, Rope)> {
-    let source = fs::read_to_string(path)?;
-    let rope = Rope::from_str(&source);
-    Ok((source, rope))
-}
