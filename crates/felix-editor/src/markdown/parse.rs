@@ -179,6 +179,33 @@ fn collect_blocks(
                 i += 1;
             }
 
+            // Bare inline events (tight-list items: pulldown-cmark suppresses
+            // the wrapping Paragraph for tight lists, emitting raw inlines).
+            // Collect a maximal inline run and synthesize an implicit Paragraph.
+            Event::Text(_)
+            | Event::Code(_)
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::Start(
+                Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Link { .. }
+                | Tag::Image { .. },
+            )
+            | Event::TaskListMarker(_) => {
+                let source_lines = ctx.source_lines(range);
+                let (inlines, skip) = collect_inlines(&events[i..], is_block_boundary);
+                if !inlines.is_empty() {
+                    blocks.push(Block {
+                        kind: BlockKind::Paragraph { inlines },
+                        source_lines,
+                    });
+                    ctx.block_ix_counter += 1;
+                }
+                i += skip.max(1);
+            }
+
             // Skip End tags and anything else at block level.
             _ => { i += 1; }
         }
@@ -198,10 +225,12 @@ fn heading_level_u8(level: HeadingLevel) -> u8 {
     }
 }
 
-/// Walk inline events until we hit a matching TagEnd; return inlines + skip count.
-fn collect_inlines_until(
+/// Walk inline events until `stop` returns true; return inlines + skip count.
+/// `stop` is called on each event *before* it is processed; returning true
+/// terminates WITHOUT consuming that event (it stays at index `i`).
+fn collect_inlines(
     events: &[(Event<'_>, std::ops::Range<usize>)],
-    end: TagEnd,
+    stop: impl Fn(&Event<'_>) -> bool,
 ) -> (Vec<InlineRun>, usize) {
     let mut inlines = Vec::new();
     let mut style_stack: Vec<InlineStyle> = vec![InlineStyle::default()];
@@ -210,9 +239,10 @@ fn collect_inlines_until(
 
     while i < events.len() {
         let (event, _) = &events[i];
+        if stop(event) {
+            return (inlines, i);
+        }
         match event {
-            Event::End(t) if *t == end => return (inlines, i),
-
             Event::Start(Tag::Strong) => {
                 let mut s = style_stack.last().cloned().unwrap_or_default();
                 s.bold = true;
@@ -240,7 +270,6 @@ fn collect_inlines_until(
             Event::End(TagEnd::Link) => { link_stack.pop(); }
 
             Event::Start(Tag::Image { dest_url, .. }) => {
-                // Collect alt text from Text events until End::Image.
                 let mut alt = String::new();
                 i += 1;
                 while i < events.len() {
@@ -281,6 +310,50 @@ fn collect_inlines_until(
     (inlines, i)
 }
 
+/// Walk inline events until we hit a matching TagEnd; return inlines + skip count.
+/// The TagEnd itself is consumed (returned skip points past it).
+fn collect_inlines_until(
+    events: &[(Event<'_>, std::ops::Range<usize>)],
+    end: TagEnd,
+) -> (Vec<InlineRun>, usize) {
+    let (inlines, stop_ix) = collect_inlines(events, |e| matches!(e, Event::End(t) if *t == end));
+    (inlines, stop_ix)
+}
+
+/// Returns true for events that mark a block-level boundary.
+/// Used as the `stop` predicate when harvesting bare inlines from tight-list items.
+fn is_block_boundary(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::Start(
+            Tag::Heading { .. }
+            | Tag::Paragraph
+            | Tag::CodeBlock(_)
+            | Tag::BlockQuote(_)
+            | Tag::List(_)
+            | Tag::Item
+            | Tag::Table(_)
+            | Tag::TableHead
+            | Tag::TableRow
+            | Tag::TableCell
+            | Tag::FootnoteDefinition(_)
+        ) | Event::End(
+            TagEnd::Heading(_)
+            | TagEnd::Paragraph
+            | TagEnd::CodeBlock
+            | TagEnd::BlockQuote(_)
+            | TagEnd::List(_)
+            | TagEnd::Item
+            | TagEnd::Table
+            | TagEnd::TableHead
+            | TagEnd::TableRow
+            | TagEnd::TableCell
+            | TagEnd::FootnoteDefinition
+        ) | Event::Rule
+          | Event::Html(_)
+    )
+}
+
 /// Collect Text content up to End::CodeBlock.
 fn collect_code_text(events: &[(Event<'_>, std::ops::Range<usize>)]) -> (String, usize) {
     let mut text = String::new();
@@ -299,16 +372,15 @@ fn extract_nested<'e, 'a>(
     events: &'e [(Event<'a>, std::ops::Range<usize>)],
     end: TagEnd,
 ) -> (&'e [(Event<'a>, std::ops::Range<usize>)], usize) {
-    let mut depth = 0usize;
+    let mut depth = 0i32;
     for (i, (event, _)) in events.iter().enumerate() {
         match event {
+            // At depth 0, hitting the target end means we found our boundary.
+            Event::End(t) if depth == 0 && *t == end => return (&events[..i], i),
+            // All other starts increment; all other ends decrement — keeping the
+            // counter balanced so non-target ends don't inflate depth.
             Event::Start(_) => depth += 1,
-            Event::End(t) if *t == end => {
-                if depth == 0 {
-                    return (&events[..i], i);
-                }
-                depth -= 1;
-            }
+            Event::End(_) => depth -= 1,
             _ => {}
         }
     }
@@ -445,4 +517,84 @@ fn inline_text(inlines: &[InlineRun]) -> String {
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use felix_lang::LanguageRegistry;
+    use ropey::Rope;
+
+    fn parse(src: &str) -> MarkdownDoc {
+        let rope = Rope::from_str(src);
+        let registry = LanguageRegistry::default();
+        parse_markdown(src, &rope, &registry)
+    }
+
+    fn item_text(item: &ListItem) -> String {
+        item.blocks.iter().flat_map(|b| match &b.kind {
+            BlockKind::Paragraph { inlines } => inlines.iter().collect::<Vec<_>>(),
+            _ => vec![],
+        }).filter_map(|r| match r {
+            InlineRun::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn list_does_not_swallow_following_heading() {
+        let doc = parse("- a\n\n# H");
+        assert_eq!(doc.blocks.len(), 2, "expected List + Heading, got {:?} blocks", doc.blocks.len());
+        assert!(matches!(doc.blocks[0].kind, BlockKind::List { .. }));
+        assert!(matches!(doc.blocks[1].kind, BlockKind::Heading { level: 1, .. }));
+    }
+
+    #[test]
+    fn tight_list_items_contain_text() {
+        let doc = parse("- foo\n- bar");
+        assert_eq!(doc.blocks.len(), 1);
+        let BlockKind::List { items, .. } = &doc.blocks[0].kind else { panic!("expected List") };
+        assert_eq!(items.len(), 2);
+        assert_eq!(item_text(&items[0]), "foo");
+        assert_eq!(item_text(&items[1]), "bar");
+    }
+
+    #[test]
+    fn ordered_list_items_contain_text() {
+        let doc = parse("1. first\n2. second");
+        let BlockKind::List { ordered, items, .. } = &doc.blocks[0].kind else { panic!() };
+        assert!(ordered);
+        assert_eq!(items.len(), 2);
+        assert_eq!(item_text(&items[0]), "first");
+        assert_eq!(item_text(&items[1]), "second");
+    }
+
+    #[test]
+    fn nested_list_structure() {
+        let doc = parse("- a\n  - b");
+        let BlockKind::List { items, .. } = &doc.blocks[0].kind else { panic!() };
+        assert_eq!(items.len(), 1);
+        // item 0 should have a nested list
+        let has_nested = items[0].blocks.iter().any(|b| matches!(b.kind, BlockKind::List { .. }));
+        assert!(has_nested, "expected nested list inside item 0");
+    }
+
+    #[test]
+    fn blockquote_does_not_swallow_following_heading() {
+        let doc = parse("> q\n\n# H");
+        assert_eq!(doc.blocks.len(), 2);
+        assert!(matches!(doc.blocks[0].kind, BlockKind::Blockquote { .. }));
+        assert!(matches!(doc.blocks[1].kind, BlockKind::Heading { level: 1, .. }));
+    }
+
+    #[test]
+    fn task_list_items_contain_text() {
+        let doc = parse("- [ ] todo\n- [x] done");
+        let BlockKind::List { items, .. } = &doc.blocks[0].kind else { panic!() };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].task, Some(false));
+        assert_eq!(items[1].task, Some(true));
+        assert_eq!(item_text(&items[0]), "todo");
+        assert_eq!(item_text(&items[1]), "done");
+    }
 }
