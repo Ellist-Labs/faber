@@ -1,3 +1,4 @@
+#![allow(dead_code)] // removed when Wave 2 adopts ui::Label
 use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px};
 
 use crate::theme::ActiveTheme;

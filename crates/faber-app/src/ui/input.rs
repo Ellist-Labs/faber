@@ -1,4 +1,5 @@
 //! Presentational input — styles existing text + caret. Not a text-input engine.
+#![allow(dead_code)] // removed when Wave 2 adopts ui::Input
 use gpui::{
     App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px,
 };

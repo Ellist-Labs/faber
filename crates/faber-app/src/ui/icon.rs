@@ -1,4 +1,4 @@
-use gpui::{Hsla, IntoElement, RenderOnce, Styled, Svg, px, svg};
+use gpui::{Hsla, IntoElement, Pixels, RenderOnce, Styled, Svg, px, svg};
 
 use crate::theme::ActiveTheme;
 
@@ -47,16 +47,16 @@ impl IconName {
 #[derive(IntoElement)]
 pub struct Icon {
     name: IconName,
-    size: f32,
+    size: Pixels,
     color: Option<Hsla>,
 }
 
 impl Icon {
     pub fn new(name: IconName) -> Self {
-        Self { name, size: 16.0, color: None }
+        Self { name, size: px(16.), color: None }
     }
 
-    pub fn size(mut self, size: f32) -> Self {
+    pub fn size(mut self, size: Pixels) -> Self {
         self.size = size;
         self
     }
@@ -72,7 +72,7 @@ impl RenderOnce for Icon {
         let color = self.color.unwrap_or(cx.theme().text);
         let el: Svg = svg()
             .path(self.name.path())
-            .size(px(self.size))
+            .size(self.size)
             .flex_shrink_0();
         el.text_color(color)
     }

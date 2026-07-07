@@ -3,6 +3,7 @@ use gpui::{App, Global, Hsla, rgb};
 
 /// GPU-ready runtime theme — all fields are `Copy` `Hsla`.
 /// Cloned once per frame at the top of `render()`, then passed by ref to helpers.
+#[allow(dead_code)] // some tokens unused until Wave 2 view adoption
 #[derive(Clone)]
 pub struct RuntimeTheme {
     // Surface
@@ -78,6 +79,17 @@ pub struct RuntimeTheme {
     pub radius_sm: f32,
     pub radius_md: f32,
     pub radius_lg: f32,
+    // Scrim / overlay opacity
+    pub scrim: f32, // default 0.35
+    // Layout sizes (px) — named for theming, avoids magic literals in views
+    pub tab_h: f32,          // 30.0
+    pub titlebar_h: f32,     // 36.0
+    pub activity_bar_w: f32, // 44.0
+    pub sidebar_w: f32,      // 240.0
+    pub tree_row_h: f32,     // 24.0
+    pub bottom_panel_h: f32, // 180.0
+    pub right_panel_w: f32,  // 240.0
+    pub panel_header_h: f32, // 30.0
 }
 
 impl Global for RuntimeTheme {}
@@ -166,6 +178,15 @@ impl RuntimeTheme {
             radius_sm: r.sm,
             radius_md: r.md,
             radius_lg: r.lg,
+            scrim: 0.35,
+            tab_h: 30.0,
+            titlebar_h: 36.0,
+            activity_bar_w: 44.0,
+            sidebar_w: 240.0,
+            tree_row_h: 24.0,
+            bottom_panel_h: 180.0,
+            right_panel_w: 240.0,
+            panel_header_h: 30.0,
         }
     }
 }
@@ -190,6 +211,12 @@ pub trait ActiveTheme {
 }
 
 impl ActiveTheme for App {
+    fn theme(&self) -> &RuntimeTheme {
+        self.global::<RuntimeTheme>()
+    }
+}
+
+impl<T: 'static> ActiveTheme for gpui::Context<'_, T> {
     fn theme(&self) -> &RuntimeTheme {
         self.global::<RuntimeTheme>()
     }

@@ -1,3 +1,4 @@
+#![allow(dead_code)] // removed when Wave 2 adopts ui::Button
 use gpui::{
     App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
     SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _,

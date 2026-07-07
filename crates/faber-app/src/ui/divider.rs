@@ -1,3 +1,4 @@
+#![allow(dead_code)] // removed when Wave 2 adopts ui::Divider
 use gpui::{App, IntoElement, RenderOnce, Styled, Window, div, px};
 
 use crate::theme::ActiveTheme;
