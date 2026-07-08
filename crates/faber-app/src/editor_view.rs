@@ -1,20 +1,21 @@
-use std::{ops::Range, sync::Arc, time::Duration};
+use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
 use faber_editor::{
     ChangeSet, LanguageRegistry, SyntaxToken, Transaction,
     buffer::Document,
     cursor,
     edit_history::History,
-    highlight::{HighlightSpan, byte_col_to_char_col},
+    highlight::{HighlightSpan, char_col_to_byte_col},
     markdown::{OutlineEntry, parse_markdown, edit::{EnterAction, enter_action, smart_wrap, looks_like_url, toggle_checkbox}},
     search::Query,
     Selection,
 };
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Render, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, UniformListScrollHandle,
-    Window, deferred, div, prelude::*, px, svg, uniform_list,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle,
+    Focusable, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollStrategy,
+    ScrollWheelEvent, SharedString, TextRun, UniformListScrollHandle, Window, canvas, deferred,
+    div, fill, font, point, prelude::*, px, size, svg, uniform_list,
 };
 
 use crate::markdown_preview::MarkdownPreviewView;
@@ -28,9 +29,6 @@ use rust_i18n::t;
 // Line height and char width live on RuntimeTheme (settings-scaled).
 
 const GUTTER_COLS: f32 = 6.0;
-/// Max lines in a markdown file before switching back to the horizontal-scroll
-/// virtualized path. Above this cap wrapping is too expensive without a display map.
-const WRAP_LINE_CAP: usize = 5_000;
 
 // ── actions ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +53,13 @@ pub enum EditorEvent {
     Edited,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectMode {
+    Character,
+    Word,
+    Line,
+}
+
 pub struct EditorView {
     pub doc: Document,
     pub sel: Selection,
@@ -70,6 +75,12 @@ pub struct EditorView {
     pub scroll_handle: UniformListScrollHandle,
     last_scroll_line: usize,
     mouse_selecting: bool,
+    // Paint-time anchor: (line_idx, origin_x, origin_y) of the last rendered line.
+    // Hit-testing derives both X column and row line from this instead of
+    // reconstructing from scroll-handle math, so clicks always agree with glyphs.
+    text_origin: Rc<Cell<Option<(usize, f32, f32)>>>,
+    select_mode: SelectMode,
+    select_anchor: std::ops::Range<usize>,
 
     // Markdown preview
     pub preview: Option<gpui::Entity<MarkdownPreviewView>>,
@@ -93,11 +104,6 @@ pub struct EditorView {
     pub search_regex: bool,
 
     pub scrollbar_drag: Option<ScrollbarDrag>,
-
-    // Non-virtualized markdown wrap scroll handle (used when is_wrap_mode())
-    pub md_scroll: ScrollHandle,
-    // Cached top visible line — used to avoid redundant cx.notify() on scroll
-    last_top_line: usize,
 
     // Outline overlay (heading navigator for markdown files)
     pub outline_open: bool,
@@ -144,6 +150,9 @@ impl EditorView {
             scroll_handle: UniformListScrollHandle::new(),
             last_scroll_line: 0,
             mouse_selecting: false,
+            text_origin: Rc::new(Cell::new(None)),
+            select_mode: SelectMode::Character,
+            select_anchor: 0..0,
             preview: None,
             show_preview: false,
             outline: Arc::new(vec![]),
@@ -162,8 +171,6 @@ impl EditorView {
             search_whole_word: false,
             search_regex: false,
             scrollbar_drag: None,
-            md_scroll: ScrollHandle::new(),
-            last_top_line: 0,
             outline_open: false,
             outline_query: String::new(),
             outline_cursor: 0,
@@ -210,30 +217,17 @@ impl EditorView {
         self.sel.anchor = self.sel.anchor.min(len);
     }
 
-    /// True when this is a markdown file small enough for non-virtualized word-wrap.
-    fn is_wrap_mode(&self) -> bool {
-        self.is_markdown() && self.doc.len_lines() <= WRAP_LINE_CAP
-    }
-
-    /// Scroll to `line` on whichever scroll handle is active.
+    /// Scroll to `line`.
     fn scroll_to_line(&self, line: usize) {
-        if self.is_wrap_mode() {
-            self.md_scroll.scroll_to_item(line);
-        } else {
-            self.scroll_handle.scroll_to_item(line, ScrollStrategy::Center);
-        }
+        self.scroll_handle.scroll_to_item(line, ScrollStrategy::Center);
     }
 
-    /// Top visible logical line, read from whichever scroll handle is active.
+    /// Top visible logical line.
     fn top_visible_line(&self, t: &RuntimeTheme) -> usize {
-        if self.is_wrap_mode() {
-            self.md_scroll.top_item()
-        } else {
-            let off = self.scroll_handle.0.borrow().base_handle.offset();
-            let y = f32::from(off.y);
-            // offset.y is ≤ 0 when scrolled down; negate to get pixels scrolled
-            (-y / t.line_height_code).floor().max(0.0) as usize
-        }
+        let off = self.scroll_handle.0.borrow().base_handle.offset();
+        let y = f32::from(off.y);
+        // offset.y is ≤ 0 when scrolled down; negate to get pixels scrolled
+        (-y / t.line_height_code).floor().max(0.0) as usize
     }
 
     /// Build a breadcrumb heading stack from the outline and the current top line.
@@ -467,6 +461,7 @@ impl EditorView {
         p: gpui::Point<gpui::Pixels>,
         t: &RuntimeTheme,
         show_line_numbers: bool,
+        window: &mut Window,
     ) -> Option<usize> {
         let st = self.scroll_handle.0.borrow();
         let vb = st.base_handle.bounds();
@@ -475,78 +470,34 @@ impl EditorView {
         if vb.size.width == gpui::Pixels::ZERO {
             return None;
         }
-        let gutter_px = if show_line_numbers {
-            (GUTTER_COLS + 2.0) * t.char_w_code
-        } else {
-            0.0
-        };
         let px_y = f32::from(p.y);
         let px_x = f32::from(p.x);
-        let vb_y = f32::from(vb.origin.y);
-        let vb_x = f32::from(vb.origin.x);
-        let off_y = f32::from(off.y);
-        let off_x = f32::from(off.x);
-        // offset().y is ≤ 0 when scrolled down; subtracting it raises the coordinate.
-        let rel_y = (px_y - vb_y) - off_y;
-        let line = (rel_y / t.line_height_code).floor().max(0.0) as usize;
-        let line = line.min(self.line_starts.len().saturating_sub(1));
-        let rel_x = (px_x - vb_x) - 8.0 - gutter_px - off_x;
-        // floor: clicking anywhere on a character selects it, not the next one
-        let col_f = (rel_x / t.char_w_code).max(0.0).floor();
-        let raw = self.doc.rope.line(line).to_string();
-        let content_chars = raw.trim_end_matches(['\n', '\r']).chars().count();
-        let col = (col_f as usize).min(content_chars);
-        Some(self.line_starts[line] + col)
-    }
-
-    /// Char-offset from a click in the non-virtualized wrap path.
-    /// Mirrors ScrollHandle::top_item logic: offset.y ≤ 0 when scrolled, so
-    /// lookup_y = mouse_y - offset_y maps screen coords back to layout space.
-    fn offset_at_wrap(
-        &self,
-        p: gpui::Point<gpui::Pixels>,
-        t: &RuntimeTheme,
-        show_line_numbers: bool,
-    ) -> Option<usize> {
-        let vb = self.md_scroll.bounds();
-        if vb.size.width == gpui::Pixels::ZERO {
-            return None;
-        }
-        let line_count = self.doc.len_lines();
-        if line_count == 0 {
-            return None;
-        }
-
-        // offset.y ≤ 0 when scrolled down.
-        // lookup_y maps the mouse screen-y back to the original layout-space y,
-        // matching how ScrollHandle::top_item computes: `top = bounds.top() - offset.y`.
-        let offset_y = f32::from(self.md_scroll.offset().y);
-        let lookup_y = f32::from(p.y) - offset_y;
-
-        // Binary search over line bounds (bounds_for_item returns original layout coords).
-        let mut lo = 0usize;
-        let mut hi = line_count;
-        let line = loop {
-            if lo >= hi { break lo.min(line_count.saturating_sub(1)); }
-            let mid = lo + (hi - lo) / 2;
-            match self.md_scroll.bounds_for_item(mid) {
-                None => break 0,
-                Some(b) if lookup_y < f32::from(b.top()) => {
-                    if mid == 0 { break 0; }
-                    hi = mid;
-                }
-                Some(b) if lookup_y >= f32::from(b.bottom()) => lo = mid + 1,
-                _ => break mid,
-            }
+        let (line, rel_x) = if let Some((anchor_line, origin_x, origin_y)) = self.text_origin.get() {
+            // Measured at paint time — identical geometry to glyphs for both axes.
+            let line_delta = ((px_y - origin_y) / t.line_height_code).floor();
+            let line = (anchor_line as f32 + line_delta).max(0.0) as usize;
+            (line, px_x - origin_x)
+        } else {
+            // Pre-first-paint fallback (nothing visible yet, click is inert).
+            let gutter_px = if show_line_numbers {
+                (GUTTER_COLS + 2.0) * t.char_w_code
+            } else {
+                0.0
+            };
+            let vb_y = f32::from(vb.origin.y);
+            let vb_x = f32::from(vb.origin.x);
+            let off_y = f32::from(off.y);
+            let off_x = f32::from(off.x);
+            let rel_y = (px_y - vb_y) - off_y;
+            let line = (rel_y / t.line_height_code).floor().max(0.0) as usize;
+            (line, (px_x - vb_x) - 8.0 - gutter_px - off_x)
         };
-
-        let gutter_px = if show_line_numbers { (GUTTER_COLS + 2.0) * t.char_w_code } else { 0.0 };
-        // 8.0 = px_2() left padding applied to each line row in wrap mode
-        let rel_x = (f32::from(p.x) - f32::from(vb.origin.x) - 8.0 - gutter_px).max(0.0);
-        let raw = self.doc.rope.line(line).to_string();
-        let content_chars = raw.trim_end_matches(['\n', '\r']).chars().count();
-        let col = ((rel_x / t.char_w_code).floor() as usize).min(content_chars);
-        Some(self.line_starts[line] + col)
+        let line = line.min(self.line_starts.len().saturating_sub(1));
+        let shaped = self.shape_editor_line(line, t, window);
+        let byte_off = shaped.closest_index_for_x(px(rel_x.max(0.0)));
+        let line_str: &str = &self.line_cache[line];
+        let char_col = faber_editor::highlight::byte_col_to_char_col(line_str, byte_off as u32);
+        Some(self.line_starts[line] + char_col)
     }
 
     fn on_mouse_down_editor(
@@ -558,28 +509,107 @@ impl EditorView {
         window.focus(&self.focus_handle);
         let t = cx.global::<RuntimeTheme>().clone();
         let show_line_numbers = cx.global::<SettingsStore>().0.line_numbers;
-        let Some(offset) = (if self.is_wrap_mode() {
-            self.offset_at_wrap(ev.position, &t, show_line_numbers)
-        } else {
-            self.offset_at(ev.position, &t, show_line_numbers)
-        }) else { return };
-        if ev.modifiers.shift {
-            let goal_col = cursor::col_of(&self.doc.rope, offset);
-            self.sel = Selection {
-                anchor: self.sel.anchor,
-                head: offset,
-                goal_col,
-            };
-        } else {
-            self.sel = Selection::collapsed(offset, &self.doc.rope);
+        let Some(offset) = self.offset_at(ev.position, &t, show_line_numbers, window) else { return };
+
+        match ev.click_count {
+            2 => {
+                let sel = cursor::word_at(&self.doc.rope, offset);
+                self.select_anchor = sel.anchor..sel.head;
+                self.select_mode = SelectMode::Word;
+                self.sel = sel;
+            }
+            count if count >= 3 => {
+                let sel = cursor::line_selection(&self.doc.rope, offset);
+                self.select_anchor = sel.anchor..sel.head;
+                self.select_mode = SelectMode::Line;
+                self.sel = sel;
+            }
+            _ => {
+                if ev.modifiers.shift {
+                    let goal_col = cursor::col_of(&self.doc.rope, offset);
+                    self.sel = Selection { anchor: self.sel.anchor, head: offset, goal_col };
+                } else {
+                    self.sel = Selection::collapsed(offset, &self.doc.rope);
+                    self.select_anchor = offset..offset;
+                }
+                self.select_mode = SelectMode::Character;
+            }
         }
         self.mouse_selecting = true;
         self.reset_blink(cx);
-        // Suppress auto-recenter so clicking doesn't jump the view.
         self.last_scroll_line = self.doc.rope.char_to_line(
             offset.min(self.doc.len_chars().saturating_sub(1))
         );
         cx.notify();
+    }
+
+    fn on_mouse_move_editor(
+        &mut self,
+        ev: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !ev.dragging() || !self.mouse_selecting {
+            return;
+        }
+        let t = cx.global::<RuntimeTheme>().clone();
+        let show_line_numbers = cx.global::<SettingsStore>().0.line_numbers;
+        let Some(offset) = self.offset_at(ev.position, &t, show_line_numbers, window) else { return };
+
+        let new_sel = match self.select_mode {
+            SelectMode::Character => {
+                let goal_col = cursor::col_of(&self.doc.rope, offset);
+                Selection { anchor: self.sel.anchor, head: offset, goal_col }
+            }
+            SelectMode::Word => {
+                let word = cursor::word_at(&self.doc.rope, offset);
+                let anchor_range = &self.select_anchor;
+                if offset <= anchor_range.start {
+                    Selection {
+                        anchor: anchor_range.end,
+                        head: word.anchor,
+                        goal_col: cursor::col_of(&self.doc.rope, word.anchor),
+                    }
+                } else {
+                    Selection {
+                        anchor: anchor_range.start,
+                        head: word.head,
+                        goal_col: cursor::col_of(&self.doc.rope, word.head),
+                    }
+                }
+            }
+            SelectMode::Line => {
+                let line_sel = cursor::line_selection(&self.doc.rope, offset);
+                let anchor_range = &self.select_anchor;
+                if offset <= anchor_range.start {
+                    Selection {
+                        anchor: anchor_range.end,
+                        head: line_sel.anchor,
+                        goal_col: cursor::col_of(&self.doc.rope, line_sel.anchor),
+                    }
+                } else {
+                    Selection {
+                        anchor: anchor_range.start,
+                        head: line_sel.head,
+                        goal_col: cursor::col_of(&self.doc.rope, line_sel.head),
+                    }
+                }
+            }
+        };
+        self.sel = new_sel;
+        cx.notify();
+    }
+
+    fn on_mouse_up_editor(
+        &mut self,
+        _ev: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mouse_selecting {
+            self.mouse_selecting = false;
+            cx.notify();
+        }
     }
 
     fn update_matches(&mut self) {
@@ -1289,17 +1319,17 @@ impl EditorView {
 
     /// Render one line.
     /// - `cursor_visible`: whether the cursor beam is painted.
-    /// - `wrap`: use flex-wrap and min-h instead of fixed row height (for markdown wrap mode).
     /// - `outline_hl`: if this line falls within the range, apply a subtle section highlight.
+    #[allow(clippy::too_many_arguments)]
     fn render_line(
         &self,
         line_idx: usize,
         t: &RuntimeTheme,
         show_line_numbers: bool,
         cursor_visible: bool,
-        wrap: bool,
         outline_hl: Option<(usize, usize)>,
         flash_line: Option<usize>,
+        window: &mut Window,
     ) -> AnyElement {
         let line_char_start = self.line_starts[line_idx];
         let next_line_start = self
@@ -1313,29 +1343,114 @@ impl EditorView {
         let has_sel = !self.sel.is_empty()
             && self.sel.start() < next_line_start
             && self.sel.end() > line_char_start;
-        let has_match = self
-            .matches
-            .iter()
-            .any(|m| m.start < next_line_start && m.end > line_char_start);
-
-        let raw_spans: &[HighlightSpan] = self.doc.highlight_spans(line_idx);
-        let has_spans = !raw_spans.is_empty();
 
         let hl_this_line = outline_hl.is_some_and(|(s, e)| line_idx >= s && line_idx < e);
         let is_flash = flash_line == Some(line_idx);
 
-        // ── Fast path: no decoration at all ───────────────────────────────────
-        if !cursor_on_line && !has_sel && !has_match && !has_spans && !is_flash {
-            let row = div()
+        // Single render path: every line is shaped identically whether or not it
+        // carries a caret/selection, so placing the caret never re-flows glyphs.
+        let line_text = self.line_cache[line_idx].clone();
+        let line_str: &str = &line_text;
+        let line_char_count = line_str.chars().count();
+        let line_char_end = line_char_start + line_char_count;
+
+        let cursor_col = if cursor_on_line { head - line_char_start } else { 0 };
+
+        let sel_start = self.sel.start();
+        let sel_end = self.sel.end();
+        let line_sel_start = sel_start.saturating_sub(line_char_start);
+        let line_sel_end =
+            if sel_end < line_char_end { sel_end.saturating_sub(line_char_start) } else { line_char_count };
+
+        let match_ranges_on_line: Vec<(usize, usize, bool)> = self
+            .matches
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.start <= line_char_end && m.end >= line_char_start)
+            .map(|(i, m)| {
+                let s = m.start.saturating_sub(line_char_start);
+                let e = if m.end < line_char_end { m.end - line_char_start } else { line_char_count };
+                (s, e, i == self.match_idx)
+            })
+            .collect();
+
+        let make_row = |hl_this_line: bool, is_flash: bool, t: &RuntimeTheme| {
+            div()
                 .flex()
                 .flex_row()
-                .when(!wrap, |r| r.h(px(t.line_height_code)))
-                .when(wrap, |r| r.w_full().px_2().min_h(px(t.line_height_code)).flex_wrap())
+                .h(px(t.line_height_code))
                 .when(hl_this_line, |r| r.bg(t.line_highlight))
                 .when(is_flash, |r| r.bg(t.match_bg))
                 .font_family(t.mono_family.clone())
                 .text_size(px(t.font_size_code))
-                .text_color(t.text);
+        };
+
+        // ── Non-wrap: shaped line + overlay quads (highlights under text, caret on top) ──
+            let shaped = self.shape_editor_line(line_idx, t, window);
+
+            let mut hl_rects: Vec<(usize, usize, gpui::Hsla)> = Vec::new();
+            if has_sel && line_sel_start < line_sel_end {
+                let s_byte = char_col_to_byte_col(line_str, line_sel_start);
+                let e_byte = char_col_to_byte_col(line_str, line_sel_end);
+                if s_byte < e_byte { hl_rects.push((s_byte, e_byte, t.selection)); }
+            }
+            for (s, e, active) in &match_ranges_on_line {
+                let s_byte = char_col_to_byte_col(line_str, *s);
+                let e_byte = char_col_to_byte_col(line_str, *e);
+                if s_byte < e_byte {
+                    hl_rects.push((s_byte, e_byte, if *active { t.match_active } else { t.match_bg }));
+                }
+            }
+            // Selection continuing past EOL owns the newline: paint a stub so
+            // multi-line selections have no gaps on short/empty lines.
+            let sel_stub = has_sel && sel_start <= line_char_end && sel_end > line_char_end;
+
+            let caret_byte: Option<usize> = (cursor_on_line && cursor_visible)
+                .then(|| char_col_to_byte_col(line_str, cursor_col));
+
+            let line_h = px(t.line_height_code);
+            let cursor_color = t.cursor;
+            let sel_color = t.selection;
+            let stub_w = px(t.char_w_code * 0.5);
+            let content_w = shaped.width;
+            let anchor_cell = self.text_origin.clone();
+
+            let content = canvas(
+                move |_bounds, _window, _cx| shaped,
+                move |bounds, shaped, window, cx| {
+                    let origin = bounds.origin;
+                    anchor_cell.set(Some((line_idx, f32::from(origin.x), f32::from(origin.y))));
+                    for (s_byte, e_byte, color) in &hl_rects {
+                        let x1 = origin.x + shaped.x_for_index(*s_byte);
+                        let x2 = origin.x + shaped.x_for_index(*e_byte);
+                        if x2 > x1 {
+                            window.paint_quad(fill(
+                                Bounds::new(point(x1, origin.y), size(x2 - x1, line_h)),
+                                *color,
+                            ));
+                        }
+                    }
+                    if sel_stub {
+                        window.paint_quad(fill(
+                            Bounds::new(point(origin.x + shaped.width, origin.y), size(stub_w, line_h)),
+                            sel_color,
+                        ));
+                    }
+                    let _ = shaped.paint(origin, line_h, window, cx);
+                    if let Some(caret_byte) = caret_byte {
+                        let x = origin.x + shaped.x_for_index(caret_byte);
+                        window.paint_quad(fill(
+                            Bounds::new(point(x, origin.y), size(px(2.0), line_h)),
+                            cursor_color,
+                        ));
+                    }
+                },
+            )
+            .w(content_w)
+            .h(line_h)
+            .flex_shrink_0();
+
+            let row = make_row(hl_this_line, is_flash, t);
             let row = if show_line_numbers {
                 row.child(
                     div()
@@ -1346,153 +1461,74 @@ impl EditorView {
                         .child(format!("{:>4}", line_idx + 1)),
                 )
                 .child(div().flex_shrink_0().w(px(2.0 * t.char_w_code)))
-            } else {
-                row
-            };
-            return row.child(self.line_cache[line_idx].clone()).into_any_element();
+            } else { row };
+        row.child(content).into_any_element()
+    }
+
+    fn build_text_runs(line_str: &str, raw_spans: &[HighlightSpan], t: &RuntimeTheme) -> Vec<TextRun> {
+        let line_bytes = line_str.len();
+        if line_bytes == 0 {
+            return Vec::new();
         }
-
-        // ── Slow path ─────────────────────────────────────────────────────────
-        let rope = &self.doc.rope;
-        let raw = rope.line(line_idx).to_string();
-        let line_str: &str = raw.trim_end_matches(['\n', '\r']);
-        let line_chars: Vec<char> = line_str.chars().collect();
-        let line_char_count = line_chars.len();
-        let line_char_end = line_char_start + line_char_count;
-
-        // Convert syntax spans from byte-col to char-col (ASCII fast path inside).
-        let hl_spans: Vec<(usize, usize, SyntaxToken)> = raw_spans
-            .iter()
-            .map(|s| {
-                let sc = byte_col_to_char_col(line_str, s.start_byte_col).min(line_char_count);
-                let ec = byte_col_to_char_col(line_str, s.end_byte_col).min(line_char_count);
-                (sc, ec, s.token)
-            })
-            .filter(|(s, e, _)| s < e)
-            .collect();
-
-        let cursor_col = if cursor_on_line { head - line_char_start } else { 0 };
-
-        let sel_start = self.sel.start();
-        let sel_end = self.sel.end();
-        let line_sel_start =
-            sel_start.saturating_sub(line_char_start);
-        let line_sel_end =
-            if sel_end < line_char_end { sel_end - line_char_start } else { line_char_count };
-
-        let match_ranges_on_line: Vec<(usize, usize, bool)> = self
-            .matches
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| m.start <= line_char_end && m.end >= line_char_start)
-            .map(|(i, m)| {
-                let s = m.start.saturating_sub(line_char_start);
-                let e =
-                    if m.end < line_char_end { m.end - line_char_start } else { line_char_count };
-                (s, e, i == self.match_idx)
-            })
-            .collect();
-
-        let mut content_children: Vec<AnyElement> = Vec::new();
-        let mut breakpoints: Vec<usize> = vec![0, line_char_count];
-        if has_sel {
-            breakpoints.push(line_sel_start);
-            breakpoints.push(line_sel_end);
+        let default_font = font(t.mono_family.clone());
+        if raw_spans.is_empty() {
+            return vec![TextRun {
+                len: line_bytes,
+                font: default_font,
+                color: t.text,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }];
         }
-        for (s, e, _) in &match_ranges_on_line {
-            breakpoints.push(*s);
-            breakpoints.push(*e);
-        }
-        if cursor_on_line {
-            breakpoints.push(cursor_col);
-        }
-        for (s, e, _) in &hl_spans {
-            breakpoints.push(*s);
-            breakpoints.push(*e);
+        let mut breakpoints: Vec<usize> = vec![0, line_bytes];
+        for s in raw_spans {
+            let sb = (s.start_byte_col as usize).min(line_bytes);
+            let eb = if s.end_byte_col == u32::MAX { line_bytes } else { (s.end_byte_col as usize).min(line_bytes) };
+            if sb < eb { breakpoints.push(sb); breakpoints.push(eb); }
         }
         breakpoints.sort_unstable();
         breakpoints.dedup();
-
+        let mut runs = Vec::new();
         for i in 0..breakpoints.len().saturating_sub(1) {
-            let seg_start = breakpoints[i];
-            let seg_end = breakpoints[i + 1];
-            if seg_start >= seg_end {
-                continue;
-            }
-            if cursor_on_line && cursor_col == seg_start {
-                let cursor_color = if cursor_visible { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
-                content_children.push(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(1.5))
-                        .h(px(t.line_height_code))
-                        .bg(cursor_color)
-                        .into_any(),
-                );
-            }
-            let in_sel = has_sel && seg_start >= line_sel_start && seg_end <= line_sel_end;
-            let match_color = match_ranges_on_line
-                .iter()
-                .find(|(s, e, _)| seg_start >= *s && seg_end <= *e)
-                .map(|(_, _, active)| if *active { t.match_active } else { t.match_bg });
-            let bg_color = match_color.or(if in_sel { Some(t.selection) } else { None });
-
-            // Syntax color: find the innermost span covering this segment.
-            let fg_color = hl_spans
-                .iter().rfind(|(s, e, _)| seg_start >= *s && seg_end <= *e)
-                .map(|(_, _, tok)| Self::token_color(*tok, t))
-                .unwrap_or(t.text);
-
-            let seg_text: String = line_chars[seg_start..seg_end].iter().collect();
-            if wrap {
-                // Split at whitespace boundaries so flex_wrap can break between words.
-                for word in split_words_for_wrap(&seg_text) {
-                    let d = div().text_color(fg_color).child(word);
-                    let d = if let Some(color) = bg_color { d.bg(color) } else { d };
-                    content_children.push(d.into_any());
-                }
-            } else {
-                let seg_div = div().flex_shrink_0().text_color(fg_color).child(seg_text);
-                let seg_div = if let Some(color) = bg_color { seg_div.bg(color) } else { seg_div };
-                content_children.push(seg_div.into_any());
-            }
+            let start = breakpoints[i];
+            let end = breakpoints[i + 1];
+            if start >= end { continue; }
+            let color = raw_spans.iter().rfind(|s| {
+                let sb = (s.start_byte_col as usize).min(line_bytes);
+                let eb = if s.end_byte_col == u32::MAX { line_bytes } else { (s.end_byte_col as usize).min(line_bytes) };
+                start >= sb && end <= eb
+            }).map(|s| Self::token_color(s.token, t)).unwrap_or(t.text);
+            runs.push(TextRun {
+                len: end - start,
+                font: default_font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
         }
-        if cursor_on_line && cursor_col == line_char_count {
-            let cursor_color = if cursor_visible { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
-            content_children.push(
-                div().flex_shrink_0().w(px(1.5)).h(px(t.line_height_code)).bg(cursor_color).into_any(),
-            );
+        if runs.is_empty() {
+            runs.push(TextRun { len: line_bytes, font: default_font, color: t.text, background_color: None, underline: None, strikethrough: None });
         }
+        runs
+    }
 
-        let content = div()
-            .flex()
-            .flex_row()
-            .when(wrap, |d| d.flex_wrap())
-            .flex_1()
-            .children(content_children);
-        let row = div()
-            .flex()
-            .flex_row()
-            .when(!wrap, |r| r.h(px(t.line_height_code)))
-            .when(wrap, |r| r.w_full().px_2().min_h(px(t.line_height_code)).flex_wrap())
-            .when(hl_this_line, |r| r.bg(t.line_highlight))
-            .when(is_flash, |r| r.bg(t.match_bg))
-            .font_family(t.mono_family.clone())
-            .text_size(px(t.font_size_code));
-        let row = if show_line_numbers {
-            row.child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(GUTTER_COLS * t.char_w_code))
-                    .text_size(px(t.font_size_gutter))
-                    .text_color(t.gutter)
-                    .child(format!("{:>4}", line_idx + 1)),
-            )
-            .child(div().flex_shrink_0().w(px(2.0 * t.char_w_code)))
-        } else {
-            row
-        };
-        row.child(content).into_any_element()
+    /// Shape one logical line with its syntax runs. Single source of truth for
+    /// painting AND mouse hit-testing — identical runs → identical glyph
+    /// geometry → clicks land exactly where glyphs are painted. GPUI's line
+    /// layout cache makes repeat shaping of unchanged lines free.
+    fn shape_editor_line(
+        &self,
+        line_idx: usize,
+        t: &RuntimeTheme,
+        window: &mut Window,
+    ) -> gpui::ShapedLine {
+        let text = self.line_cache[line_idx].clone();
+        let runs = Self::build_text_runs(&text, self.doc.highlight_spans(line_idx), t);
+        window
+            .text_system()
+            .shape_line(text, px(t.font_size_code), &runs, None)
     }
 
     fn token_color(token: SyntaxToken, t: &RuntimeTheme) -> gpui::Hsla {
@@ -1765,24 +1801,37 @@ impl EditorView {
                     .child(if !search_focused && self.search_query.is_empty() {
                         div().text_color(t.text_subtle).child(t!("search.placeholder").to_string()).into_any()
                     } else {
-                        let at_ch: String = s_after.chars().take(1).collect();
-                        let after_rest: String = s_after.chars().skip(1).collect();
                         let cur_on = search_focused && caret_visible;
-                        div().flex().flex_row().items_center()
-                            .child(div().text_color(t.text).child(SharedString::from(s_before)))
-                            .child(if at_ch.is_empty() {
-                                div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0()
-                                    .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                                    .into_any()
-                            } else {
-                                div().flex_shrink_0()
-                                    .text_color(if cur_on { t.bg } else { t.text })
-                                    .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                                    .child(SharedString::from(at_ch))
-                                    .into_any()
-                            })
-                            .child(div().text_color(t.text).child(SharedString::from(after_rest)))
-                            .into_any()
+                        let s_before_owned = s_before.clone();
+                        let s_after_owned = s_after.clone();
+                        let font_sz = px(t.font_size_code);
+                        let line_h = px(cursor_h);
+                        let ui_family = t.ui_family.clone();
+                        let text_col = t.text;
+                        let cursor_col_val = t.cursor;
+                        let cursor_color = if cur_on { cursor_col_val } else { gpui::hsla(0., 0., 0., 0.) };
+                        let full_text = format!("{}{}", s_before_owned, s_after_owned);
+                        let caret_byte = s_before_owned.len();
+                        canvas(
+                            move |_bounds, window, _cx| {
+                                let runs = if full_text.is_empty() { vec![] } else {
+                                    vec![TextRun { len: full_text.len(), font: font(ui_family.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                                };
+                                window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                            },
+                            move |bounds, shaped, window, cx| {
+                                let origin = bounds.origin;
+                                let _ = shaped.paint(origin, line_h, window, cx);
+                                let cx_x = origin.x + shaped.x_for_index(caret_byte);
+                                window.paint_quad(fill(
+                                    Bounds::new(point(cx_x, origin.y), size(px(2.0), line_h)),
+                                    cursor_color,
+                                ));
+                            },
+                        )
+                        .flex_1()
+                        .h(line_h)
+                        .into_any()
                     }),
             )
             .child(search_right);
@@ -1809,24 +1858,37 @@ impl EditorView {
                     .child(if !replace_focused && self.replace_query.is_empty() {
                         div().text_color(t.text_subtle).child(t!("search.replace_placeholder").to_string()).into_any()
                     } else {
-                        let at_ch: String = r_after.chars().take(1).collect();
-                        let after_rest: String = r_after.chars().skip(1).collect();
                         let cur_on = replace_focused && caret_visible;
-                        div().flex().flex_row().items_center()
-                            .child(div().text_color(t.text).child(SharedString::from(r_before)))
-                            .child(if at_ch.is_empty() {
-                                div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0()
-                                    .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                                    .into_any()
-                            } else {
-                                div().flex_shrink_0()
-                                    .text_color(if cur_on { t.bg } else { t.text })
-                                    .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                                    .child(SharedString::from(at_ch))
-                                    .into_any()
-                            })
-                            .child(div().text_color(t.text).child(SharedString::from(after_rest)))
-                            .into_any()
+                        let r_before_owned = r_before.clone();
+                        let r_after_owned = r_after.clone();
+                        let font_sz = px(t.font_size_code);
+                        let line_h = px(cursor_h);
+                        let ui_family2 = t.ui_family.clone();
+                        let text_col = t.text;
+                        let cursor_col_val = t.cursor;
+                        let cursor_color = if cur_on { cursor_col_val } else { gpui::hsla(0., 0., 0., 0.) };
+                        let full_text = format!("{}{}", r_before_owned, r_after_owned);
+                        let caret_byte = r_before_owned.len();
+                        canvas(
+                            move |_bounds, window, _cx| {
+                                let runs = if full_text.is_empty() { vec![] } else {
+                                    vec![TextRun { len: full_text.len(), font: font(ui_family2.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                                };
+                                window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                            },
+                            move |bounds, shaped, window, cx| {
+                                let origin = bounds.origin;
+                                let _ = shaped.paint(origin, line_h, window, cx);
+                                let cx_x = origin.x + shaped.x_for_index(caret_byte);
+                                window.paint_quad(fill(
+                                    Bounds::new(point(cx_x, origin.y), size(px(2.0), line_h)),
+                                    cursor_color,
+                                ));
+                            },
+                        )
+                        .flex_1()
+                        .h(line_h)
+                        .into_any()
                     }),
             )
             .child(replace_right);
@@ -2062,57 +2124,9 @@ impl Render for EditorView {
 
         let is_dragging = self.scrollbar_drag.is_some();
         let outline_hl = self.outline_highlight;
-        let use_wrap = self.is_wrap_mode();
 
-        let editor_pane = if use_wrap {
-            // ── Non-virtualized word-wrap path (markdown, ≤WRAP_LINE_CAP lines) ──
-            // Lines are direct children of the scroll div so top_item() maps 1:1 to logical lines.
-            let md_scroll = self.md_scroll.clone();
-            let md_scroll_ref = self.md_scroll.clone();
-            let t_wrap = t.clone();
-            let flash = self.flash_line;
-            let all_lines: Vec<AnyElement> = (0..line_count)
-                .map(|i| self.render_line(i, &t_wrap, show_line_numbers, cursor_visible, true, outline_hl, flash))
-                .collect();
-            let wrapped = div()
-                .id("md-wrap-scroll")
-                .flex_1()
-                .flex_col()
-                .min_h(px(0.))
-                .overflow_y_scroll()
-                .bg(t.bg)
-                .track_scroll(&md_scroll)
-                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down_editor))
-                .on_scroll_wheel(cx.listener(|view, _ev: &ScrollWheelEvent, _, cx| {
-                    let new_top = view.md_scroll.top_item();
-                    if new_top != view.last_top_line {
-                        view.last_top_line = new_top;
-                        cx.notify();
-                    }
-                }))
-                .children(all_lines);
-            let md_scrollbar = render_scrollbar(
-                "md-scrollbar",
-                "md-scrollbar-thumb",
-                &md_scroll_ref,
-                show_scrollbar,
-                is_dragging,
-                cx.listener(|view, ev: &MouseDownEvent, _, cx| {
-                    view.scrollbar_drag = Some(start_drag(ev, &view.md_scroll.clone()));
-                    cx.notify();
-                }),
-                &t,
-            );
-            div()
-                .flex()
-                .flex_row()
-                .flex_1()
-                .min_w(px(0.))
-                .min_h(px(0.))
-                .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(wrapped))
-                .child(md_scrollbar)
-        } else {
-            // ── Virtualized horizontal-scroll path (all other files + large .md) ──
+        let editor_pane = {
+            // ── Virtualized horizontal-scroll path ──
             let editor_base_handle = self.scroll_handle.0.borrow().base_handle.clone();
             let editor_scrollbar = render_scrollbar(
                 "editor-scrollbar",
@@ -2134,9 +2148,9 @@ impl Render for EditorView {
             let content = uniform_list(
                 "editor-lines",
                 line_count,
-                move |range: std::ops::Range<usize>, _window, cx| {
+                move |range: std::ops::Range<usize>, window, cx| {
                     let view = entity.read(cx);
-                    range.map(|i| view.render_line(i, &t2, show_line_numbers, cursor_visible, false, outline_hl, flash)).collect::<Vec<AnyElement>>()
+                    range.map(|i| view.render_line(i, &t2, show_line_numbers, cursor_visible, outline_hl, flash, window)).collect::<Vec<AnyElement>>()
                 },
             )
             .flex_1()
@@ -2156,7 +2170,7 @@ impl Render for EditorView {
                 .flex_1()
                 .min_w(px(0.))
                 .min_h(px(0.))
-                .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(content))
+                .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).cursor(CursorStyle::IBeam).child(content))
                 .child(editor_scrollbar)
         };
 
@@ -2238,21 +2252,19 @@ impl Render for EditorView {
                     .on_action(cx.listener(Self::on_bold_selection))
                     .on_action(cx.listener(Self::on_italic_selection))
                     .on_action(cx.listener(Self::on_toggle_checkbox))
-                    .when(is_dragging, |el| {
-                        el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _, cx| {
+                    .when(is_dragging || self.mouse_selecting, |el| {
+                        el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, window, cx| {
                             if let Some(ref drag) = view.scrollbar_drag {
-                                if view.is_wrap_mode() {
-                                    let handle = view.md_scroll.clone();
-                                    update_drag(drag, ev, &handle);
-                                } else {
-                                    let handle = view.scroll_handle.0.borrow().base_handle.clone();
-                                    update_drag(drag, ev, &handle);
-                                }
+                                let handle = view.scroll_handle.0.borrow().base_handle.clone();
+                                update_drag(drag, ev, &handle);
                                 cx.notify();
+                            } else if view.mouse_selecting {
+                                view.on_mouse_move_editor(ev, window, cx);
                             }
                         }))
-                        .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, cx| {
+                        .on_mouse_up(MouseButton::Left, cx.listener(|view, ev: &MouseUpEvent, window, cx| {
                             view.scrollbar_drag = None;
+                            view.on_mouse_up_editor(ev, window, cx);
                             cx.notify();
                         }))
                     })
@@ -2338,21 +2350,19 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_bold_selection))
             .on_action(cx.listener(Self::on_italic_selection))
             .on_action(cx.listener(Self::on_toggle_checkbox))
-            .when(is_dragging, |el| {
-                el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _, cx| {
+            .when(is_dragging || self.mouse_selecting, |el| {
+                el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, window, cx| {
                     if let Some(ref drag) = view.scrollbar_drag {
-                        if view.is_wrap_mode() {
-                            let handle = view.md_scroll.clone();
-                            update_drag(drag, ev, &handle);
-                        } else {
-                            let handle = view.scroll_handle.0.borrow().base_handle.clone();
-                            update_drag(drag, ev, &handle);
-                        }
+                        let handle = view.scroll_handle.0.borrow().base_handle.clone();
+                        update_drag(drag, ev, &handle);
                         cx.notify();
+                    } else if view.mouse_selecting {
+                        view.on_mouse_move_editor(ev, window, cx);
                     }
                 }))
-                .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, cx| {
+                .on_mouse_up(MouseButton::Left, cx.listener(|view, ev: &MouseUpEvent, window, cx| {
                     view.scrollbar_drag = None;
+                    view.on_mouse_up_editor(ev, window, cx);
                     cx.notify();
                 }))
             })
@@ -2418,24 +2428,40 @@ impl EditorView {
                 .child(div().text_color(t.text_muted).child(t!("outline_overlay.placeholder").to_string()))
                 .into_any()
         } else {
-            let at_ch: String = q_after.chars().take(1).collect();
-            let after_rest: String = q_after.chars().skip(1).collect();
             let cur_on = outline_focused && caret_visible;
-            search_input_base
-                .child(div().flex_shrink_0().child(q_before))
-                .child(if at_ch.is_empty() {
-                    div().flex_shrink_0().w(px(1.5)).h(px(caret_h))
-                        .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                        .into_any()
-                } else {
-                    div().flex_shrink_0()
-                        .text_color(if cur_on { t.bg } else { t.text })
-                        .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                        .child(SharedString::from(at_ch))
-                        .into_any()
-                })
-                .child(div().flex_shrink_0().child(after_rest))
-                .into_any()
+            {
+                let q_before_owned = q_before.clone();
+                let q_after_owned = q_after.clone();
+                let font_sz = px(t.font_size_code);
+                let caret_h_px = px(caret_h);
+                let mono_family = t.mono_family.clone();
+                let text_col = t.text;
+                let cursor_col_val = t.cursor;
+                let cursor_color = if cur_on { cursor_col_val } else { gpui::hsla(0., 0., 0., 0.) };
+                let full_text = format!("{}{}", q_before_owned, q_after_owned);
+                let caret_byte = q_before_owned.len();
+                search_input_base
+                    .child(canvas(
+                        move |_bounds, window, _cx| {
+                            let runs = if full_text.is_empty() { vec![] } else {
+                                vec![TextRun { len: full_text.len(), font: font(mono_family.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                            };
+                            window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                        },
+                        move |bounds, shaped, window, cx| {
+                            let origin = bounds.origin;
+                            let _ = shaped.paint(origin, caret_h_px, window, cx);
+                            let cx_x = origin.x + shaped.x_for_index(caret_byte);
+                            window.paint_quad(fill(
+                                Bounds::new(point(cx_x, origin.y), size(px(2.0), caret_h_px)),
+                                cursor_color,
+                            ));
+                        },
+                    )
+                    .flex_1()
+                    .h(caret_h_px))
+                    .into_any()
+            }
         };
 
         // ── heading list ──────────────────────────────────────────────────────
@@ -2593,27 +2619,6 @@ impl EditorView {
 }
 
 // ── string helpers for search/replace cursor ───────────────────────────────────
-
-/// Split a text string into word-and-space tokens so that `flex_wrap` can break
-/// between words. Each returned piece is either a run of non-space chars or a
-/// run of space chars, preserving the original content exactly.
-fn split_words_for_wrap(text: &str) -> Vec<String> {
-    let mut parts: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut in_space = false;
-    for c in text.chars() {
-        let is_space = c == ' ' || c == '\t';
-        if is_space != in_space && !current.is_empty() {
-            parts.push(std::mem::take(&mut current));
-        }
-        in_space = is_space;
-        current.push(c);
-    }
-    if !current.is_empty() {
-        parts.push(current);
-    }
-    parts
-}
 
 fn insert_at(s: &str, char_idx: usize, text: &str) -> String {
     let mut chars: Vec<char> = s.chars().collect();
