@@ -59,6 +59,7 @@ pub struct SemanticColors {
     // Editor
     pub cursor: HexColor,
     pub selection: HexColor,
+    pub word_highlight: HexColor,
     pub line_highlight: HexColor,
     pub gutter: HexColor,
     pub gutter_active: HexColor,

@@ -28,6 +28,7 @@ pub struct RuntimeTheme {
     // Editor
     pub cursor: Hsla,
     pub selection: Hsla,
+    pub word_highlight: Hsla,
     pub line_highlight: Hsla,
     pub gutter: Hsla,
     pub gutter_active: Hsla,
@@ -131,6 +132,7 @@ impl RuntimeTheme {
             accent_muted: h(c.accent_muted),
             cursor: h(c.cursor),
             selection: h(c.selection),
+            word_highlight: h(c.word_highlight),
             line_highlight: h(c.line_highlight),
             gutter: h(c.gutter),
             gutter_active: h(c.gutter_active),

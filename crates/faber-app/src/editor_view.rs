@@ -106,6 +106,10 @@ pub struct EditorView {
     pub matches: Vec<Range<usize>>,
     pub match_idx: usize,
     pub search_case_sensitive: bool,
+    // Word-occurrence cache: all whole-word matches for the identifier under the caret.
+    // Rebuilt only when the word changes or the document is edited; not per-frame.
+    pub word_occ: Vec<Range<usize>>,
+    word_occ_key: Option<String>,
     pub search_whole_word: bool,
     pub search_regex: bool,
 
@@ -174,6 +178,8 @@ impl EditorView {
             matches: Vec::new(),
             match_idx: 0,
             search_case_sensitive: false,
+            word_occ: Vec::new(),
+            word_occ_key: None,
             search_whole_word: false,
             search_regex: false,
             scrollbar_drag: None,
@@ -263,8 +269,14 @@ impl EditorView {
         })
     }
 
+    fn clear_word_occ(&mut self) {
+        self.word_occ.clear();
+        self.word_occ_key = None;
+    }
+
     /// Post-mutation bookkeeping — every document edit funnels through here.
     fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.clear_word_occ();
         self.update_matches();
         if self.is_markdown() {
             self.schedule_markdown_update(cx);
@@ -1352,6 +1364,7 @@ impl EditorView {
         cursor_visible: bool,
         outline_hl: Option<(usize, usize)>,
         flash_line: Option<usize>,
+        bracket_hl: Option<(usize, usize)>,
         window: &mut Window,
     ) -> AnyElement {
         let line_char_start = self.line_starts[line_idx];
@@ -1397,15 +1410,34 @@ impl EditorView {
             })
             .collect();
 
-        let make_row = |hl_this_line: bool, is_flash: bool, t: &RuntimeTheme| {
-            div()
+        let make_row = |hl_this_line: bool, is_flash: bool, cursor_on_line: bool, t: &RuntimeTheme| {
+            let line_h = t.line_height_code;
+            let hl_color = t.line_highlight;
+            let flash_color = t.match_bg;
+            let base = div()
                 .flex()
                 .flex_row()
-                .h(px(t.line_height_code))
-                .when(hl_this_line, |r| r.bg(t.line_highlight))
-                .when(is_flash, |r| r.bg(t.match_bg))
+                .relative()
+                .h(px(line_h))
+                .when(hl_this_line, |r| r.bg(hl_color))
+                .when(is_flash, |r| r.bg(flash_color))
                 .font_family(t.mono_family.clone())
-                .text_size(px(t.font_size_code))
+                .text_size(px(t.font_size_code));
+            // Full-width current-line band: absolute div extends far left/right so the
+            // highlight covers gutter + content + padding, clipped by the scroll viewport.
+            if cursor_on_line && !is_flash {
+                base.child(
+                    div()
+                        .absolute()
+                        .left(px(-9999.))
+                        .w(px(19999.))
+                        .top(px(0.))
+                        .h(px(line_h))
+                        .bg(hl_color),
+                )
+            } else {
+                base
+            }
         };
 
         // ── Non-wrap: shaped line + overlay quads (highlights under text, caret on top) ──
@@ -1416,6 +1448,31 @@ impl EditorView {
                 let s_byte = char_col_to_byte_col(line_str, line_sel_start);
                 let e_byte = char_col_to_byte_col(line_str, line_sel_end);
                 if s_byte < e_byte { hl_rects.push((s_byte, e_byte, t.selection)); }
+            } else {
+                // All occurrences of the word under the caret (no active selection).
+                for occ in &self.word_occ {
+                    if occ.start <= line_char_end && occ.end > line_char_start {
+                        let local_s = occ.start.saturating_sub(line_char_start).min(line_char_count);
+                        let local_e = occ.end.saturating_sub(line_char_start).min(line_char_count);
+                        if local_s < local_e {
+                            let s_byte = char_col_to_byte_col(line_str, local_s);
+                            let e_byte = char_col_to_byte_col(line_str, local_e);
+                            if s_byte < e_byte { hl_rects.push((s_byte, e_byte, t.word_highlight)); }
+                        }
+                    }
+                }
+                // Innermost enclosing bracket pair — one highlight per bracket char.
+                if let Some((open_off, close_off)) = bracket_hl {
+                    for bracket_char in [open_off, close_off] {
+                        if bracket_char >= line_char_start && bracket_char < line_char_end {
+                            let local = bracket_char - line_char_start;
+                            let s_byte = char_col_to_byte_col(line_str, local);
+                            // bracket chars may be multi-byte; advance to next char boundary
+                            let e_byte = char_col_to_byte_col(line_str, local + 1);
+                            if s_byte < e_byte { hl_rects.push((s_byte, e_byte, t.word_highlight)); }
+                        }
+                    }
+                }
             }
             for (s, e, active) in &match_ranges_on_line {
                 let s_byte = char_col_to_byte_col(line_str, *s);
@@ -1473,14 +1530,14 @@ impl EditorView {
             .h(line_h)
             .flex_shrink_0();
 
-            let row = make_row(hl_this_line, is_flash, t);
+            let row = make_row(hl_this_line, is_flash, cursor_on_line, t);
             let row = if show_line_numbers {
                 row.child(
                     div()
                         .flex_shrink_0()
                         .w(px(GUTTER_COLS * t.char_w_code))
                         .text_size(px(t.font_size_gutter))
-                        .text_color(t.gutter)
+                        .text_color(if cursor_on_line { t.gutter_active } else { t.gutter })
                         .child(format!("{:>4}", line_idx + 1)),
                 )
                 .child(div().flex_shrink_0().w(px(2.0 * t.char_w_code)))
@@ -2159,6 +2216,66 @@ impl Render for EditorView {
         let is_dragging = self.scrollbar_drag.is_some();
         let outline_hl = self.outline_highlight;
 
+        // Update word-occurrence cache when the identifier under the caret changes.
+        // `Query::all_matches` is O(document); the key guard ensures it only runs on word change.
+        // Update word-occurrence cache when the identifier under the caret changes.
+        // `Query::all_matches` is O(document); the key guard ensures it only runs on word change.
+        let active_word: Option<(usize, usize)> = if self.sel.is_empty() {
+            let w = cursor::word_at(&self.doc.rope, self.sel.head);
+            if !w.is_empty()
+                && cursor::default_word_classifier(
+                    self.doc.rope.char(self.sel.head.min(self.doc.len_chars().saturating_sub(1)))
+                )
+            {
+                let head_char_col = self.sel.head
+                    .saturating_sub(self.doc.rope.line_to_char(cursor_line));
+                let line_str = self.line_cache.get(cursor_line).map(|s| s.as_ref()).unwrap_or("");
+                let head_byte_col = char_col_to_byte_col(line_str, head_char_col);
+                let in_comment = self.doc.highlight_spans(cursor_line).iter().any(|s| {
+                    if s.token != SyntaxToken::Comment { return false; }
+                    let start = s.start_byte_col as usize;
+                    let end = if s.end_byte_col == u32::MAX { line_str.len() } else { s.end_byte_col as usize };
+                    head_byte_col >= start && head_byte_col < end
+                });
+                if in_comment { None } else { Some((w.start(), w.end())) }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        match active_word {
+            Some((ws, we)) => {
+                // Compare rope chars against cached key before allocating a String.
+                let same = self.word_occ_key.as_deref()
+                    .map_or(false, |k| self.doc.rope.slice(ws..we).chars().eq(k.chars()));
+                if !same {
+                    let word_text = self.doc.rope.slice(ws..we).to_string();
+                    self.word_occ = Query::new(word_text.clone())
+                        .case_sensitive(true)
+                        .whole_word(true)
+                        .all_matches(&self.doc.rope);
+                    self.word_occ_key = Some(word_text);
+                }
+            }
+            None => self.clear_word_occ(),
+        }
+
+        // Innermost enclosing bracket pair (O(tree depth), safe per frame).
+        let bracket_hl: Option<(usize, usize)> = if self.sel.is_empty() {
+            self.doc.enclosing_brackets(self.sel.head)
+        } else {
+            None
+        };
+
+        // Caret position as a [0,1] fraction of the document for the scrollbar marker.
+        let caret_pos_frac: Option<f32> = if line_count > 1 {
+            Some(cursor_line as f32 / (line_count - 1) as f32)
+        } else {
+            Some(0.0)
+        };
+
         let editor_pane = {
             // ── Virtualized horizontal-scroll path ──
             let editor_base_handle = self.scroll_handle.0.borrow().base_handle.clone();
@@ -2174,17 +2291,25 @@ impl Render for EditorView {
                     cx.notify();
                 }),
                 &t,
+                caret_pos_frac,
             );
             let entity = cx.entity();
             let t2 = t.clone();
             let widest = self.widest_line;
             let flash = self.flash_line;
+            const TRAILING_BLANK_LINES: usize = 6;
             let content = uniform_list(
                 "editor-lines",
-                line_count,
+                line_count + TRAILING_BLANK_LINES,
                 move |range: std::ops::Range<usize>, window, cx| {
                     let view = entity.read(cx);
-                    range.map(|i| view.render_line(i, &t2, show_line_numbers, cursor_visible, outline_hl, flash, window)).collect::<Vec<AnyElement>>()
+                    range.map(|i| {
+                        if i < line_count {
+                            view.render_line(i, &t2, show_line_numbers, cursor_visible, outline_hl, flash, bracket_hl, window)
+                        } else {
+                            div().h(px(t2.line_height_code)).into_any_element()
+                        }
+                    }).collect::<Vec<AnyElement>>()
                 },
             )
             .flex_1()

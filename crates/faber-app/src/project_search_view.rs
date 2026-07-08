@@ -825,6 +825,7 @@ impl Render for ProjectSearchView {
                         cx.notify();
                     }),
                     &t,
+                    None,
                 );
                 let body: AnyElement = if rows_empty {
                     self.render_empty_state(&t, cx)

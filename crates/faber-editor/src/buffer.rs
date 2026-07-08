@@ -172,6 +172,55 @@ impl Document {
         self.highlight_cache.lines.get(line_idx).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// Find the innermost enclosing bracket pair `() [] {}` around `caret_char`.
+    /// Returns `(open_char_offset, close_char_offset)` when found, `None` for plain text
+    /// or when the caret is not inside any bracket pair.
+    /// Uses the live tree-sitter tree (O(tree depth × children), safe to call per frame).
+    pub fn enclosing_brackets(&self, caret_char: usize) -> Option<(usize, usize)> {
+        let syn = self.syntax.as_ref()?;
+        let root = syn.tree.root_node();
+        let caret_byte = self.rope.char_to_byte(caret_char.min(self.rope.len_chars()));
+        let mut node = root.descendant_for_byte_range(caret_byte, caret_byte)?;
+        loop {
+            let count = node.child_count();
+            // Scan all children for an open bracket that precedes the caret and has a
+            // matching close bracket after it — handles index_expression where `[` is not
+            // the first child, as well as arguments/block/array where it is.
+            'outer: for i in 0..count {
+                let open_node = match node.child(i as u32) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let close_kind = match open_node.kind() {
+                    "(" => ")",
+                    "[" => "]",
+                    "{" => "}",
+                    _ => continue,
+                };
+                let open_byte = open_node.start_byte();
+                if open_byte > caret_byte {
+                    break; // open is past caret; remaining children are even further
+                }
+                for j in (i + 1)..count {
+                    let close_node = match node.child(j as u32) {
+                        Some(n) => n,
+                        None => continue 'outer,
+                    };
+                    if close_node.kind() == close_kind {
+                        let close_byte = close_node.start_byte();
+                        if close_byte >= caret_byte {
+                            let open_char = self.rope.byte_to_char(open_byte);
+                            let close_char = self.rope.byte_to_char(close_byte);
+                            return Some((open_char, close_char));
+                        }
+                        break; // this close is before caret; try next open
+                    }
+                }
+            }
+            node = node.parent()?;
+        }
+    }
+
     pub fn len_chars(&self) -> usize {
         self.rope.len_chars()
     }
@@ -269,5 +318,26 @@ mod tests {
         doc.insert(11, " let x = 1;");
         let after = doc.syntax.as_ref().map(|s| node_count(&s.tree)).unwrap_or(0);
         assert!(after >= before, "tree should grow after insert");
+    }
+
+    #[test]
+    fn enclosing_brackets_finds_innermost() {
+        let reg = test_registry();
+        let lang = reg.language_for_path(Path::new("foo.rs")).unwrap();
+        // Source: `foo(bar[baz])` — caret on 'b' of "baz" (char offset 8)
+        // Innermost enclosing pair should be `[` (offset 7) and `]` (offset 11).
+        let doc = Document::from_str("foo(bar[baz])", Some(&lang));
+        let result = doc.enclosing_brackets(8);
+        assert!(result.is_some(), "should find enclosing brackets");
+        let (open, close) = result.unwrap();
+        let rope = &doc.rope;
+        assert_eq!(rope.char(open), '[', "open bracket");
+        assert_eq!(rope.char(close), ']', "close bracket");
+    }
+
+    #[test]
+    fn enclosing_brackets_none_for_plain_text() {
+        let doc = Document::from_str("hello world", None);
+        assert_eq!(doc.enclosing_brackets(3), None, "no grammar → no result");
     }
 }

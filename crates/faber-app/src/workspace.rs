@@ -943,7 +943,9 @@ impl Workspace {
         let tab_id = tab.id;
         h_flex()
             .id(tab.id)
+            .group("tab")
             .flex_shrink_0()
+            .max_w(px(170.))
             .gap_2()
             .px_3()
             .h_full()
@@ -966,8 +968,19 @@ impl Workspace {
                     cx.notify();
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |ws, _, window, cx| ws.request_close_tab(ix, window, cx)),
+            )
             .child(icon)
-            .child(title)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(title),
+            )
             .when(dirty, |el| {
                 el.child(
                     div()
@@ -980,9 +993,10 @@ impl Workspace {
             .child(
                 svg()
                     .path(IconName::Close.path())
-                    .size(px(13.0))
+                    .size(px(16.0))
                     .flex_shrink_0()
-                    .text_color(t.text_subtle)
+                    .text_color(gpui::transparent_black())
+                    .group_hover("tab", |s| s.text_color(t.text_subtle))
                     .hover(|s| s.text_color(t.text))
                     .on_mouse_down(
                         MouseButton::Left,

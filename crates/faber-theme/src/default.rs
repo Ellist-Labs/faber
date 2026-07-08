@@ -72,6 +72,7 @@ fn semantic() -> SemanticColors {
         // Editor
         cursor: 0xcdd6f4,          // text (bar cursor)
         selection: 0x45475a,       // surface1
+        word_highlight: 0x3d3f58,  // between surface0 and selection — more prominent than line highlight
         line_highlight: 0x313244,  // surface0
         gutter: 0x6c7086,          // overlay0
         gutter_active: 0xcdd6f4,   // text

@@ -119,6 +119,7 @@ impl Render for MarkdownPreviewView {
                 cx.notify();
             }),
             &t,
+            None,
         );
 
         let content = div()

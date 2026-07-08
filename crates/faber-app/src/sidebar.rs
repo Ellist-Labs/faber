@@ -185,6 +185,7 @@ impl Workspace {
                 cx.notify();
             }),
             t,
+            None,
         );
 
         let tree_list = uniform_list(

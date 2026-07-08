@@ -29,6 +29,8 @@ pub fn render_scrollbar(
     drag: bool,
     on_thumb_down: impl Fn(&MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
     t: &RuntimeTheme,
+    // Fraction [0,1] for where to draw a thin caret-position indicator on the track.
+    position_frac: Option<f32>,
 ) -> gpui::AnyElement {
     if !show {
         return div().w(px(0.)).into_any_element();
@@ -38,7 +40,7 @@ pub fn render_scrollbar(
     let max_scroll = f32::from(max_offset.height);
 
     if max_scroll <= 0.5 {
-        return div().w(px(6.)).flex_shrink_0().into_any_element();
+        return div().w(px(10.)).flex_shrink_0().into_any_element();
     }
 
     let offset = handle.offset();
@@ -54,13 +56,15 @@ pub fn render_scrollbar(
     let track_bg = t.bg_sunken;
     let thumb_color = if drag { t.text_muted } else { t.text_subtle };
     let thumb_hover = t.text_muted;
+    let marker_color = t.gutter_active;
 
     div()
         .id(track_id)
-        .w(px(6.))
+        .w(px(10.))
         .flex_shrink_0()
         .h_full()
         .bg(track_bg)
+        .relative()
         .flex()
         .flex_col()
         .child(div().h(px(thumb_top)).flex_shrink_0())
@@ -79,6 +83,19 @@ pub fn render_scrollbar(
                 }),
         )
         .child(div().flex_1())
+        .when(position_frac.is_some(), |el| {
+            let frac = position_frac.unwrap_or(0.0);
+            let pos_y = (frac * viewport_h).clamp(0.0, (viewport_h - 2.0).max(0.0));
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(pos_y))
+                    .left(px(0.))
+                    .w_full()
+                    .h(px(2.))
+                    .bg(marker_color),
+            )
+        })
         .into_any_element()
 }
 
