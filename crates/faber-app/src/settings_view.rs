@@ -1,4 +1,4 @@
-use faber_settings::{AutoSave, Language, Settings};
+use faber_settings::{AutoSave, Language, PreviewPosition, Settings};
 use gpui::{
     AnyElement, App, Context, Div, FocusHandle, Focusable, Global, IntoElement, Render, Window,
     div, prelude::*, px,
@@ -112,6 +112,26 @@ fn sections() -> Vec<SettingsSectionDef> {
                                 "onFocusChange" => AutoSave::OnFocusChange,
                                 "onWindowChange" => AutoSave::OnWindowChange,
                                 _ => AutoSave::Off,
+                            }
+                        },
+                    },
+                },
+                SettingEntry {
+                    title: t!("settings.finder_preview.title").to_string(),
+                    description: t!("settings.finder_preview.desc").to_string(),
+                    enabled: |_| true,
+                    control: SettingControl::Select {
+                        options: vec![
+                            ("right", t!("settings.finder_preview_options.right").to_string()),
+                            ("left", t!("settings.finder_preview_options.left").to_string()),
+                            ("bottom", t!("settings.finder_preview_options.bottom").to_string()),
+                        ],
+                        get: |s| s.file_finder_preview_position.key(),
+                        set: |s, v| {
+                            s.file_finder_preview_position = match v {
+                                "left" => PreviewPosition::Left,
+                                "bottom" => PreviewPosition::Bottom,
+                                _ => PreviewPosition::Right,
                             }
                         },
                     },

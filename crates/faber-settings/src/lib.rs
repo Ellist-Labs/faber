@@ -3,7 +3,33 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub mod state;
+
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+
+/// Where the file-finder preview pane sits relative to the result list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewPosition {
+    #[default]
+    Right,
+    Left,
+    Bottom,
+}
+
+impl PreviewPosition {
+    pub const ALL: &'static [PreviewPosition] =
+        &[PreviewPosition::Right, PreviewPosition::Left, PreviewPosition::Bottom];
+
+    /// Serde key used to round-trip through settings.toml.
+    pub fn key(self) -> &'static str {
+        match self {
+            PreviewPosition::Right => "right",
+            PreviewPosition::Left => "left",
+            PreviewPosition::Bottom => "bottom",
+        }
+    }
+}
 
 /// UI display language. `System` auto-detects from the OS locale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -97,6 +123,8 @@ pub struct Settings {
     pub indent_guides: bool,
     /// Display language. Defaults to `System` (auto-detect from OS locale).
     pub language: Language,
+    /// File-finder preview pane position.
+    pub file_finder_preview_position: PreviewPosition,
 }
 
 impl Default for Settings {
@@ -109,6 +137,7 @@ impl Default for Settings {
             show_scrollbar: true,
             indent_guides: true,
             language: Language::default(),
+            file_finder_preview_position: PreviewPosition::default(),
         }
     }
 }
@@ -168,6 +197,7 @@ mod tests {
             show_scrollbar: false,
             indent_guides: true,
             language: Language::En,
+            file_finder_preview_position: PreviewPosition::Bottom,
         };
         save_to(&s, &path).unwrap();
         assert_eq!(load_from(&path), s);

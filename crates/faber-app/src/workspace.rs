@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use faber_settings::AutoSave;
 
 use faber_editor::{
     buffer::Document,
+    file_index::{self, FileIndexSnapshot},
     project::{FileTree, VisibleRow},
     save::save,
 };
@@ -16,6 +18,7 @@ use gpui::{
 };
 
 use crate::editor_view::{EditorEvent, EditorView};
+use crate::file_finder::FileFinderView;
 use crate::project_search_view::ProjectSearchView;
 use crate::settings_view::{SettingsStore, SettingsView};
 use crate::sidebar::{SidebarItem, SidebarItemKind, SidebarState, default_items};
@@ -24,10 +27,24 @@ use crate::ui::{IconName, ScrollbarDrag, h_flex, v_flex};
 use crate::ui::scrollbar::update_drag;
 use crate::welcome_view::render_welcome;
 use crate::{
-    CloseFile, CloseFolder, CloseTab, NewFile, NextTab, OpenFile, OpenFolder, OpenProjectSearch,
-    OpenSettings, PrevTab, ProjectRoot, Quit, SaveFile, ToggleBottomPanel, ToggleRightPanel,
-    ToggleSidebar,
+    CloseFile, CloseFolder, CloseTab, NewFile, NextTab, OpenFile, OpenFileFinder,
+    OpenFileFinderPreview, OpenFolder, OpenProjectSearch, OpenSettings, PrevTab, ProjectRoot,
+    Quit, SaveFile, ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
 };
+
+/// Rescan the file index when the cached snapshot is older than this.
+const INDEX_STALE_AFTER: Duration = Duration::from_secs(5);
+
+/// Background-scanned project file index, shared with the file finder.
+#[derive(Default)]
+pub(crate) struct FileIndexState {
+    normal: Option<Arc<FileIndexSnapshot>>,
+    full: Option<Arc<FileIndexSnapshot>>,
+    normal_scanned_at: Option<Instant>,
+    full_scanned_at: Option<Instant>,
+    scanning_normal: bool,
+    scanning_full: bool,
+}
 
 pub enum TabContent {
     Editor(Entity<EditorView>),
@@ -126,6 +143,8 @@ pub struct Workspace {
     /// Bumped on every edit; a debounced auto-save fires only if no newer
     /// edit arrived while its timer slept.
     autosave_generation: u64,
+    file_index: FileIndexState,
+    file_finder: Option<Entity<FileFinderView>>,
 }
 
 impl Workspace {
@@ -147,6 +166,8 @@ impl Workspace {
             right_open: false,
             tab_menu: None,
             autosave_generation: 0,
+            file_index: FileIndexState::default(),
+            file_finder: None,
         };
         for path in paths {
             let editor = cx.new(|cx| EditorView::new(path, cx));
@@ -337,10 +358,129 @@ impl Workspace {
                 self.sidebar.open = true;
                 self.sidebar.active = SidebarItemKind::Explorer;
                 cx.set_global(ProjectRoot(Some(folder)));
+                self.file_index = FileIndexState::default();
+                self.kick_index_scan(false, cx);
             }
             Err(err) => eprintln!("faber: can't open folder {}: {err}", folder.display()),
         }
         cx.notify();
+    }
+
+    // ── file index / finder ────────────────────────────────────────────────────
+
+    pub(crate) fn root_folder(&self) -> Option<&PathBuf> {
+        self.root_folder.as_ref()
+    }
+
+    /// Best snapshot for the requested mode. Falls back to the normal snapshot
+    /// while the full scan is still running (stale-while-revalidate).
+    pub(crate) fn index_snapshot(&self, include_ignored: bool) -> Option<Arc<FileIndexSnapshot>> {
+        if include_ignored {
+            self.file_index.full.clone().or_else(|| self.file_index.normal.clone())
+        } else {
+            self.file_index.normal.clone()
+        }
+    }
+
+    /// Lazily scan the gitignored-included index the first time it's needed.
+    pub(crate) fn ensure_full_index(&mut self, cx: &mut Context<Self>) {
+        if self.file_index.full.is_none() {
+            self.kick_index_scan(true, cx);
+        }
+    }
+
+    fn kick_index_scan(&mut self, include_ignored: bool, cx: &mut Context<Self>) {
+        let Some(root) = self.root_folder.clone() else { return };
+        let scanning = if include_ignored {
+            &mut self.file_index.scanning_full
+        } else {
+            &mut self.file_index.scanning_normal
+        };
+        if *scanning {
+            return;
+        }
+        *scanning = true;
+        cx.spawn(async move |ws, cx| {
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { Arc::new(file_index::scan(&root, include_ignored)) })
+                .await;
+            ws.update(cx, |ws, cx| {
+                if include_ignored {
+                    ws.file_index.full = Some(snapshot);
+                    ws.file_index.scanning_full = false;
+                    ws.file_index.full_scanned_at = Some(Instant::now());
+                } else {
+                    ws.file_index.normal = Some(snapshot);
+                    ws.file_index.scanning_normal = false;
+                    ws.file_index.normal_scanned_at = Some(Instant::now());
+                }
+                if let Some(finder) = &ws.file_finder {
+                    finder.update(cx, |f, cx| f.on_index_updated(cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Rescan if the cached index is stale; the finder shows the cached list
+    /// instantly and re-filters when the fresh scan lands.
+    fn revalidate_index(&mut self, cx: &mut Context<Self>) {
+        let normal_stale = self
+            .file_index
+            .normal_scanned_at
+            .is_none_or(|at| at.elapsed() > INDEX_STALE_AFTER);
+        let full_stale = self
+            .file_index
+            .full_scanned_at
+            .is_none_or(|at| at.elapsed() > INDEX_STALE_AFTER);
+        if normal_stale {
+            self.kick_index_scan(false, cx);
+        }
+        if full_stale && self.file_index.full.is_some() {
+            self.kick_index_scan(true, cx);
+        }
+    }
+
+    fn open_file_finder(&mut self, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(finder) = &self.file_finder {
+            // Already open: cmd-p again dismisses (Zed behaviour); the
+            // preview variant just enables the preview pane.
+            if preview {
+                finder.update(cx, |f, cx| f.enable_preview(cx));
+                window.focus(&finder.read(cx).focus_handle);
+            } else {
+                self.close_file_finder(window, cx);
+            }
+            return;
+        }
+        self.revalidate_index(cx);
+        let ws = cx.entity().downgrade();
+        let finder = cx.new(|cx| FileFinderView::new(ws, preview, cx));
+        window.focus(&finder.read(cx).focus_handle);
+        self.file_finder = Some(finder);
+        cx.notify();
+    }
+
+    pub(crate) fn close_file_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_finder.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn on_open_file_finder(&mut self, _: &OpenFileFinder, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_file_finder(false, window, cx);
+    }
+
+    fn on_open_file_finder_preview(
+        &mut self,
+        _: &OpenFileFinderPreview,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_file_finder(true, window, cx);
     }
 
     pub(crate) fn toggle_tree_node(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -625,6 +765,10 @@ impl Workspace {
         if let Some(tree) = &mut self.tree {
             let _ = tree.refresh();
             self.visible_rows = tree.visible();
+        }
+        self.kick_index_scan(false, cx);
+        if self.file_index.full.is_some() {
+            self.kick_index_scan(true, cx);
         }
         cx.notify();
     }
@@ -1227,6 +1371,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_open_project_search))
+            .on_action(cx.listener(Self::on_open_file_finder))
+            .on_action(cx.listener(Self::on_open_file_finder_preview))
             .on_action(cx.listener(Self::on_quit))
             .when(self.sidebar_resizing, |el| {
                 el.on_mouse_move(cx.listener(|ws, event: &MouseMoveEvent, _, cx| {
@@ -1259,7 +1405,13 @@ impl Render for Workspace {
 
         // Empty state: show welcome screen only when no folder and no tabs are open.
         if content.is_none() && self.root_folder.is_none() {
-            return base.flex().items_center().justify_center().child(render_welcome(&t)).into_any();
+            return base
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(render_welcome(&t))
+                .when_some(self.file_finder.clone(), |el, finder| el.relative().child(finder))
+                .into_any();
         }
 
         let main = v_flex()
@@ -1289,12 +1441,14 @@ impl Render for Workspace {
         let root = base
             .flex()
             .flex_col()
+            .relative()
             .child(self.render_titlebar(&t, cx))
             .child(body)
             .map(|el| match self.render_context_menu(&t, cx) {
                 Some(menu) => el.child(menu),
                 None => el,
-            });
+            })
+            .when_some(self.file_finder.clone(), |el, finder| el.child(finder));
 
         root.into_any()
     }

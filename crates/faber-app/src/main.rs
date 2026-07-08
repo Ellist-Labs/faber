@@ -1,8 +1,11 @@
 mod assets;
 mod editor_view;
+mod file_finder;
 mod file_icon_data;
+mod file_preview;
 mod file_icons;
 mod i18n;
+mod input_helpers;
 mod markdown_preview;
 mod project_search_view;
 mod settings_view;
@@ -81,7 +84,20 @@ actions!(
         SaveFile, CloseFile, CloseFolder,
         ToggleSidebar, ToggleBottomPanel, ToggleRightPanel,
         OpenSettings, OpenProjectSearch,
+        OpenFileFinder, OpenFileFinderPreview,
         Quit,
+    ]
+);
+
+actions!(
+    file_finder,
+    [
+        FfDismiss, FfConfirm,
+        FfSelectNext, FfSelectPrev,
+        FfBackspace,
+        FfMoveLeft, FfMoveRight, FfMoveStart, FfMoveEnd,
+        FfToggleCase, FfToggleWholeWord, FfToggleRegex,
+        FfToggleIgnored, FfTogglePreview,
     ]
 );
 
@@ -204,6 +220,27 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-shift-x", ToggleCheckbox, Some("Editor && markdown")),
         // Project search
         KeyBinding::new("cmd-shift-f", OpenProjectSearch, Some("Workspace")),
+        // File finder
+        KeyBinding::new("cmd-p", OpenFileFinder, Some("Workspace")),
+        KeyBinding::new("cmd-alt-p", OpenFileFinderPreview, Some("Workspace")),
+        KeyBinding::new("escape", FfDismiss, Some("FileFinder")),
+        KeyBinding::new("enter", FfConfirm, Some("FileFinder")),
+        KeyBinding::new("down", FfSelectNext, Some("FileFinder")),
+        KeyBinding::new("up", FfSelectPrev, Some("FileFinder")),
+        KeyBinding::new("ctrl-n", FfSelectNext, Some("FileFinder")),
+        KeyBinding::new("ctrl-p", FfSelectPrev, Some("FileFinder")),
+        KeyBinding::new("backspace", FfBackspace, Some("FileFinder")),
+        KeyBinding::new("left", FfMoveLeft, Some("FileFinder")),
+        KeyBinding::new("right", FfMoveRight, Some("FileFinder")),
+        KeyBinding::new("cmd-left", FfMoveStart, Some("FileFinder")),
+        KeyBinding::new("cmd-right", FfMoveEnd, Some("FileFinder")),
+        KeyBinding::new("home", FfMoveStart, Some("FileFinder")),
+        KeyBinding::new("end", FfMoveEnd, Some("FileFinder")),
+        KeyBinding::new("cmd-alt-c", FfToggleCase, Some("FileFinder")),
+        KeyBinding::new("cmd-alt-w", FfToggleWholeWord, Some("FileFinder")),
+        KeyBinding::new("cmd-alt-x", FfToggleRegex, Some("FileFinder")),
+        KeyBinding::new("cmd-alt-i", FfToggleIgnored, Some("FileFinder")),
+        KeyBinding::new("cmd-alt-p", FfTogglePreview, Some("FileFinder")),
         // Search
         KeyBinding::new("cmd-f", OpenSearch, Some("Editor")),
         KeyBinding::new("cmd-alt-f", OpenReplace, Some("Editor")),

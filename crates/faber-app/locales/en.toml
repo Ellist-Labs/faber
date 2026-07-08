@@ -54,6 +54,15 @@ after_delay = "After Delay"
 on_focus_change = "On Focus Change"
 on_window_change = "On Window Change"
 
+[settings.finder_preview]
+title = "File Finder Preview"
+desc = "Where the file finder preview pane appears (⌥⌘P)."
+
+[settings.finder_preview_options]
+right = "Right"
+left = "Left"
+bottom = "Bottom"
+
 [common]
 on = "On"
 off = "Off"
@@ -115,6 +124,23 @@ untitled = "Untitled"
 placeholder = "Go to heading…"
 no_headings = "No headings in this file"
 no_matches = "No matching headings"
+
+[file_finder]
+placeholder = "Search files by name…"
+no_matches = "No files matched"
+no_history = "Files you open will show up here"
+open_folder_hint = "Open a folder to search files"
+indexing = "Indexing project files…"
+mask_all = "All"
+hint_navigate = "Navigate"
+hint_open = "Open"
+hint_preview = "Preview"
+hint_dismiss = "Dismiss"
+preview_empty = "Select a file to preview"
+preview_loading = "Loading…"
+preview_too_large = "File is too large to preview"
+preview_binary = "Binary file"
+preview_unreadable = "Can't read file"
 
 [search]
 placeholder = "Search…"

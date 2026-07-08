@@ -33,6 +33,10 @@ harness = false
 name = "project_search"
 harness = false
 
+[[bench]]
+name = "file_index"
+harness = false
+
 [dependencies]
 faber-core = { path = "../faber-core" }
 faber-lang = { path = "../faber-lang" }
@@ -42,6 +46,8 @@ tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 ignore = "0.4"
 globset = "0.4"
+nucleo-matcher = "0.3.1"
+regex = "1.12.4"
 
 [dev-dependencies]
 divan = "0.1"

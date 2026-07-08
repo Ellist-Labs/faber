@@ -19,6 +19,9 @@ use gpui::{
     div, fill, font, point, prelude::*, px, size, svg, uniform_list,
 };
 
+use crate::input_helpers::{
+    delete_char_before, delete_char_range, insert_at, split_at_char, word_start_before,
+};
 use crate::markdown_preview::MarkdownPreviewView;
 use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
@@ -1485,7 +1488,7 @@ impl EditorView {
         row.child(content).into_any_element()
     }
 
-    fn build_text_runs(line_str: &str, raw_spans: &[HighlightSpan], t: &RuntimeTheme) -> Vec<TextRun> {
+    pub(crate) fn build_text_runs(line_str: &str, raw_spans: &[HighlightSpan], t: &RuntimeTheme) -> Vec<TextRun> {
         let line_bytes = line_str.len();
         if line_bytes == 0 {
             return Vec::new();
@@ -2670,41 +2673,3 @@ impl EditorView {
     }
 }
 
-// ── string helpers for search/replace cursor ───────────────────────────────────
-
-fn insert_at(s: &str, char_idx: usize, text: &str) -> String {
-    let mut chars: Vec<char> = s.chars().collect();
-    let idx = char_idx.min(chars.len());
-    for (i, c) in text.chars().enumerate() {
-        chars.insert(idx + i, c);
-    }
-    chars.into_iter().collect()
-}
-
-fn delete_char_before(s: &str, char_idx: usize) -> String {
-    if char_idx == 0 { return s.to_string(); }
-    let chars: Vec<char> = s.chars().collect();
-    let idx = char_idx.saturating_sub(1).min(chars.len().saturating_sub(1));
-    chars[..idx].iter().chain(chars[char_idx..].iter()).copied().collect()
-}
-
-fn split_at_char(s: &str, char_idx: usize) -> (String, String) {
-    let chars: Vec<char> = s.chars().collect();
-    let idx = char_idx.min(chars.len());
-    (chars[..idx].iter().collect(), chars[idx..].iter().collect())
-}
-
-fn word_start_before(s: &str, cursor: usize) -> usize {
-    let chars: Vec<char> = s.chars().collect();
-    let mut pos = cursor.min(chars.len());
-    while pos > 0 && chars[pos - 1].is_whitespace() { pos -= 1; }
-    while pos > 0 && !chars[pos - 1].is_whitespace() { pos -= 1; }
-    pos
-}
-
-fn delete_char_range(s: &str, start: usize, end: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let start = start.min(chars.len());
-    let end = end.min(chars.len());
-    chars[..start].iter().chain(chars[end..].iter()).collect()
-}

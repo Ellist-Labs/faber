@@ -1,5 +1,6 @@
 pub mod buffer;
 pub mod edit_history;
+pub mod file_index;
 pub mod highlight;
 pub mod markdown;
 pub mod outline;
