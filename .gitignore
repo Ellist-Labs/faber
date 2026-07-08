@@ -1,9 +1,1 @@
 /target
-
-# generated perf fixtures (reproduce with perf/fixtures/gen.sh)
-perf/fixtures/small.rs
-perf/fixtures/medium.rs
-perf/fixtures/large.rs
-
-# comparison reports (ephemeral; only baseline.json is committed)
-perf/report/

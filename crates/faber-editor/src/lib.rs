@@ -9,10 +9,10 @@ pub mod project_search;
 pub mod save;
 
 // Re-export from faber-core so faber-app's imports keep working.
+pub use faber_core::anchor::{Anchor, Bias};
 pub use faber_core::movement as cursor;
 pub use faber_core::search;
 pub use faber_core::selection::{Selection, SelectionSet};
-pub use faber_core::anchor::{Anchor, Bias};
 pub use faber_core::transaction::{ChangeSet, Transaction};
 
 // Re-export faber-lang so consumers can set up the registry.
@@ -49,4 +49,3 @@ pub fn reparse_source(
 pub fn node_count(tree: &Tree) -> usize {
     tree.root_node().descendant_count()
 }
-

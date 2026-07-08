@@ -99,9 +99,11 @@ impl RenderOnce for Button {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme().clone();
         let (mut bg, hover_bg, text) = match (self.disabled, &self.variant) {
-            (true, ButtonVariant::List) => {
-                (gpui::transparent_black(), gpui::transparent_black(), theme.text_disabled)
-            }
+            (true, ButtonVariant::List) => (
+                gpui::transparent_black(),
+                gpui::transparent_black(),
+                theme.text_disabled,
+            ),
             (true, _) => (theme.accent_muted, theme.accent_muted, theme.text_disabled),
             (false, ButtonVariant::Primary) => {
                 (theme.accent, theme.accent_hover, theme.text_on_accent)
@@ -116,8 +118,11 @@ impl RenderOnce for Button {
         }
         let interactive = !self.disabled;
         let has_content = self.content.is_some();
-        let font_size =
-            if self.caption { theme.font_size_caption } else { theme.font_size_body };
+        let font_size = if self.caption {
+            theme.font_size_caption
+        } else {
+            theme.font_size_body
+        };
         div()
             .id(self.id)
             .flex()

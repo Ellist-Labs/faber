@@ -12,7 +12,12 @@ pub struct Query {
 
 impl Query {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), case_sensitive: false, whole_word: false, regex: false }
+        Self {
+            text: text.into(),
+            case_sensitive: false,
+            whole_word: false,
+            regex: false,
+        }
     }
 
     pub fn case_sensitive(mut self, yes: bool) -> Self {
@@ -67,7 +72,11 @@ impl Query {
         } else {
             regex::escape(&self.text)
         };
-        let pat = if self.whole_word { format!(r"\b{}\b", pat) } else { pat };
+        let pat = if self.whole_word {
+            format!(r"\b{}\b", pat)
+        } else {
+            pat
+        };
 
         let re = match RegexBuilder::new(&pat)
             .case_insensitive(!self.case_sensitive)

@@ -12,61 +12,25 @@ LSP (language intelligence), WASM/wasmtime (extensions
 
 ## Workspace structure
 
-4-crate Cargo workspace. Dependency direction is strictly downward — gpui is absent from every
+6-crate Cargo workspace. Dependency direction is strictly downward — gpui is absent from every
 crate except faber-app, enforced by the compiler.
 
 ```
-crates/faber-core/    NO gpui — rope helpers, Selection/SelectionSet, Transaction/ChangeSet,
-                      Anchor+Bias, movement, search, utf16 helpers
-crates/faber-lang/    NO gpui — Language, LanguageId, LanguageRegistry, grammar loading
-crates/faber-editor/  NO gpui — Document (text+syntax+history+per-view selections),
-                      Command + dispatch (UI-free editing engine)
-crates/faber-app/     gpui shell — EditorView, virtualized render, keybindings, Workspace
+crates/faber-core/      NO gpui — rope helpers, Selection/SelectionSet, Transaction/ChangeSet,
+                        Anchor+Bias, movement, search, utf16 helpers
+crates/faber-lang/      NO gpui — Language, LanguageId, LanguageRegistry, grammar loading
+crates/faber-editor/    NO gpui — Document (text+syntax+history), UI-free editing engine
+crates/faber-settings/  NO gpui — Settings, AppState, project history
+crates/faber-theme/     NO gpui — Theme, Palette, semantic color definitions
+crates/faber-app/       gpui shell — EditorView, virtualized render, keybindings, Workspace
 ```
 
-## Performance Guardrails
+## Testing
 
-Performance is a first-class feature. Regressions are bugs.
-
-### Before committing any runtime change
-
-1. Run `perf/fixtures/gen.sh` if fixtures don't exist yet.
-2. Run `cargo build --release && perf/macro.sh`.
-   - All four budget checks must pass (exit 0). A breach blocks the commit.
-3. For changes touching **hot paths** (rope ops, parse/reparse, GPUI render/layout):
-   run `cargo bench` and compare against the previous run.
-   Investigate any bench that regresses >5% before committing.
-4. After a clean milestone, run `perf/macro.sh --update-baseline` to commit
-   updated numbers in `perf/baseline.json`.
-
-Use the `/perf-guardrails` skill for a guided checklist.
-
-### Hot-path discipline
-
-- **No per-frame heap allocations.** Profile before assuming.
-- **Don't clone the rope buffer** unless necessary. Prefer borrows and slices.
-- **Profile first, optimize second.** Cite the before/after numbers in the commit.
-- Every new core subsystem (input handling, LSP, extension host) must ship with:
-  - At least one `benches/` entry covering its hot path.
-  - If it affects startup or RAM: a new line in `perf/budgets.toml` + `macro.sh` check.
-
-### Budget tiers
-
-Current tier = **"beat VS Code"** (Electron baseline). Numbers in `perf/budgets.toml`.
-Next tier = **"match Zed"** — tighten when the app is feature-stable.
-Budgets are comments in `perf/budgets.toml`; enforcement is in `perf/macro.sh`.
-
-### Cross-editor comparison
-
-Run `perf/compare.sh` at feature milestones (requires `brew install hyperfine`
-plus Zed and VS Code installed with CLI launchers).
-Faber must beat VS Code on startup time and idle RAM. See the `/cross-editor-benchmark` skill.
-
-### Deferred metrics (add once input handling exists)
-
-- `input_latency_ms` — keystroke → repaint round-trip.
-- `frame_time_ms` — 120fps target (8.3 ms/frame).
-Add to `perf/budgets.toml` and `perf/macro.sh` when the infrastructure is in place.
+- Logic lives in gpui-free crates (`faber-core`, `faber-editor`, `faber-settings`) and is unit/behavior-tested.
+- Pure helpers extracted from gpui views belong in `*_logic.rs` modules alongside their tests.
+- Run `cargo test --workspace` before committing. CI enforces fmt, clippy, and the full test suite.
+- New subsystems: ship at least one test covering the stable public API path.
 
 ## Architecture Rules
 
@@ -75,7 +39,6 @@ Add to `perf/budgets.toml` and `perf/macro.sh` when the infrastructure is in pla
 - All document mutations flow through a single choke-point: `Document::apply(Transaction)`.
 - New subsystems: logic in faber-core/faber-editor, UI wiring in faber-app.
 - Extension API design is a long-term contract; design the surface carefully before stabilizing it.
-- Benches live in `crates/faber-editor/benches/` (hot-path coverage, divan, harness=false).
 
 ## Internationalization
 

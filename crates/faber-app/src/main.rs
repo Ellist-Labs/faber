@@ -1,9 +1,10 @@
 mod assets;
+mod editor_logic;
 mod editor_view;
 mod file_finder;
 mod file_icon_data;
-mod file_preview;
 mod file_icons;
+mod file_preview;
 mod i18n;
 mod input_helpers;
 mod markdown_preview;
@@ -21,7 +22,7 @@ use gpui::{
     App, Application, Bounds, Global, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
     WindowOptions, actions, point, prelude::*, px, size,
 };
-use std::{env, path::PathBuf, sync::Arc, time::Instant};
+use std::{env, path::PathBuf, sync::Arc};
 
 use faber_editor::LanguageRegistry;
 
@@ -51,40 +52,82 @@ actions!(
 actions!(
     editor,
     [
-        MoveLeft, MoveRight, MoveUp, MoveDown,
-        MoveWordLeft, MoveWordRight,
-        MoveLineStart, MoveLineEnd,
-        MoveDocStart, MoveDocEnd,
-        MovePageUp, MovePageDown,
-        SelectLeft, SelectRight, SelectUp, SelectDown,
-        SelectWordLeft, SelectWordRight,
-        SelectLineStart, SelectLineEnd,
-        SelectDocStart, SelectDocEnd,
+        MoveLeft,
+        MoveRight,
+        MoveUp,
+        MoveDown,
+        MoveWordLeft,
+        MoveWordRight,
+        MoveLineStart,
+        MoveLineEnd,
+        MoveDocStart,
+        MoveDocEnd,
+        MovePageUp,
+        MovePageDown,
+        SelectLeft,
+        SelectRight,
+        SelectUp,
+        SelectDown,
+        SelectWordLeft,
+        SelectWordRight,
+        SelectLineStart,
+        SelectLineEnd,
+        SelectDocStart,
+        SelectDocEnd,
         SelectAll,
-        Backspace, Delete,
-        DeleteWordLeft, DeleteWordRight,
-        DeleteToLineStart, DeleteToLineEnd, DeleteLine,
-        Tab, Enter,
-        Copy, Cut, Paste,
-        Undo, Redo,
-        OpenSearch, OpenReplace, CloseSearch,
-        FindNext, FindPrev,
-        ReplaceOne, ReplaceAll,
-        SearchBackspace, ReplaceBackspace,
-        ToggleSearchCase, ToggleSearchWholeWord, ToggleSearchRegex, ToggleReplace,
-        InputMoveLeft, InputMoveRight, InputMoveStart, InputMoveEnd,
+        Backspace,
+        Delete,
+        DeleteWordLeft,
+        DeleteWordRight,
+        DeleteToLineStart,
+        DeleteToLineEnd,
+        DeleteLine,
+        Tab,
+        Enter,
+        Copy,
+        Cut,
+        Paste,
+        Undo,
+        Redo,
+        OpenSearch,
+        OpenReplace,
+        CloseSearch,
+        FindNext,
+        FindPrev,
+        ReplaceOne,
+        ReplaceAll,
+        SearchBackspace,
+        ReplaceBackspace,
+        ToggleSearchCase,
+        ToggleSearchWholeWord,
+        ToggleSearchRegex,
+        ToggleReplace,
+        InputMoveLeft,
+        InputMoveRight,
+        InputMoveStart,
+        InputMoveEnd,
     ]
 );
 
 actions!(
     workspace,
     [
-        CloseTab, NextTab, PrevTab,
-        NewFile, OpenFile, OpenFolder,
-        SaveFile, CloseFile, CloseFolder,
-        ToggleSidebar, ToggleBottomPanel, ToggleRightPanel,
-        OpenSettings, OpenProjectSearch,
-        OpenFileFinder, OpenFileFinderPreview,
+        CloseTab,
+        NextTab,
+        PrevTab,
+        NewFile,
+        OpenFile,
+        OpenFolder,
+        SaveFile,
+        CloseFile,
+        CloseFolder,
+        ToggleSidebar,
+        ToggleBottomPanel,
+        ToggleRightPanel,
+        OpenSettings,
+        OpenProjectSearch,
+        OpenFileFinder,
+        OpenFileFinderPreview,
         Quit,
     ]
 );
@@ -92,12 +135,20 @@ actions!(
 actions!(
     file_finder,
     [
-        FfDismiss, FfConfirm,
-        FfSelectNext, FfSelectPrev,
+        FfDismiss,
+        FfConfirm,
+        FfSelectNext,
+        FfSelectPrev,
         FfBackspace,
-        FfMoveLeft, FfMoveRight, FfMoveStart, FfMoveEnd,
-        FfToggleCase, FfToggleWholeWord, FfToggleRegex,
-        FfToggleIgnored, FfTogglePreview,
+        FfMoveLeft,
+        FfMoveRight,
+        FfMoveStart,
+        FfMoveEnd,
+        FfToggleCase,
+        FfToggleWholeWord,
+        FfToggleRegex,
+        FfToggleIgnored,
+        FfTogglePreview,
     ]
 );
 
@@ -105,50 +156,52 @@ actions!(
     project_search,
     [
         PsInputBackspace,
-        PsInputMoveLeft, PsInputMoveRight, PsInputMoveStart, PsInputMoveEnd,
+        PsInputMoveLeft,
+        PsInputMoveRight,
+        PsInputMoveStart,
+        PsInputMoveEnd,
     ]
 );
 
 // ── main ───────────────────────────────────────────────────────────────────────
 
 fn main() {
-    let start = Instant::now();
     let paths: Vec<String> = env::args().skip(1).collect();
 
-    Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
-        cx.set_global(settings_view::SettingsStore(faber_settings::load()));
-        cx.set_global(ProjectRoot(None));
-        cx.set_global(Registry(Arc::new(LanguageRegistry::with_defaults())));
-        i18n::apply(cx);
-        theme::apply_settings(cx);
-        register_keybindings(cx);
+    Application::new()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            cx.set_global(settings_view::SettingsStore(faber_settings::load()));
+            cx.set_global(ProjectRoot(None));
+            cx.set_global(Registry(Arc::new(LanguageRegistry::with_defaults())));
+            i18n::apply(cx);
+            theme::apply_settings(cx);
+            register_keybindings(cx);
 
-        let bounds = Bounds::centered(None, size(px(1024.), px(768.)), cx);
+            let bounds = Bounds::centered(None, size(px(1024.), px(768.)), cx);
 
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    titlebar: Some(TitlebarOptions {
-                        title: None,
-                        appears_transparent: true,
-                        traffic_light_position: Some(point(px(12.), px(11.))),
-                    }),
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                |window, cx| cx.new(|cx| Workspace::new(&paths, window, cx)),
-            )
-            .unwrap();
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        titlebar: Some(TitlebarOptions {
+                            title: None,
+                            appears_transparent: true,
+                            traffic_light_position: Some(point(px(12.), px(11.))),
+                        }),
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        ..Default::default()
+                    },
+                    |window, cx| cx.new(|cx| Workspace::new(&paths, window, cx)),
+                )
+                .unwrap();
 
-        window
-            .update(cx, |view, window, cx| {
-                view.focus_active(window, cx);
-                cx.activate(true);
-            })
-            .unwrap();
-
-        println!("FABER_READY startup_ms={}", start.elapsed().as_millis());
-    });
+            window
+                .update(cx, |view, window, cx| {
+                    view.focus_active(window, cx);
+                    cx.activate(true);
+                })
+                .unwrap();
+        });
 }
 
 fn register_keybindings(cx: &mut App) {

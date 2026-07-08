@@ -18,8 +18,11 @@ pub enum PreviewPosition {
 }
 
 impl PreviewPosition {
-    pub const ALL: &'static [PreviewPosition] =
-        &[PreviewPosition::Right, PreviewPosition::Left, PreviewPosition::Bottom];
+    pub const ALL: &'static [PreviewPosition] = &[
+        PreviewPosition::Right,
+        PreviewPosition::Left,
+        PreviewPosition::Bottom,
+    ];
 
     /// Serde key used to round-trip through settings.toml.
     pub fn key(self) -> &'static str {
@@ -74,7 +77,10 @@ impl Language {
         match locale.split(['-', '_']).next().unwrap_or("") {
             "en" => Language::En,
             other => {
-                eprintln!("[faber-settings] locale {:?} not supported; defaulting to English", other);
+                eprintln!(
+                    "[faber-settings] locale {:?} not supported; defaulting to English",
+                    other
+                );
                 Language::En
             }
         }
@@ -233,7 +239,10 @@ mod tests {
 
     #[test]
     fn autosave_serializes_camel_case() {
-        let s = Settings { auto_save: AutoSave::OnFocusChange, ..Default::default() };
+        let s = Settings {
+            auto_save: AutoSave::OnFocusChange,
+            ..Default::default()
+        };
         let text = toml::to_string(&s).unwrap();
         assert!(text.contains("onFocusChange"), "{text}");
     }
@@ -241,7 +250,10 @@ mod tests {
     #[test]
     fn language_roundtrip() {
         let path = tmp_path("lang");
-        let s = Settings { language: Language::En, ..Default::default() };
+        let s = Settings {
+            language: Language::En,
+            ..Default::default()
+        };
         save_to(&s, &path).unwrap();
         assert_eq!(load_from(&path).language, Language::En);
         std::fs::remove_file(&path).unwrap();

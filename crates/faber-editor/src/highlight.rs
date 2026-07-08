@@ -45,7 +45,11 @@ impl HighlightCache {
         captures.advance();
         while let Some((mat, ci)) = captures.get() {
             let capture = &mat.captures[*ci];
-            let token = match inner.cap_tokens.get(capture.index as usize).and_then(|t| *t) {
+            let token = match inner
+                .cap_tokens
+                .get(capture.index as usize)
+                .and_then(|t| *t)
+            {
                 Some(t) => t,
                 None => {
                     captures.advance();
@@ -148,7 +152,10 @@ mod tests {
         let doc = rust_doc("let s = \"\nline2\n\";");
         let cache = &doc.highlight_cache;
         assert!(cache.lines.len() >= 3, "should have at least 3 lines");
-        assert!(!cache.lines[0].is_empty(), "first line of string should have spans");
+        assert!(
+            !cache.lines[0].is_empty(),
+            "first line of string should have spans"
+        );
     }
 
     #[test]
@@ -156,7 +163,10 @@ mod tests {
         let doc = rust_doc("/* line0\nline1\nline2 */\nfn f() {}");
         let cache = &doc.highlight_cache;
         if cache.lines.len() > 1 {
-            assert!(!cache.lines[1].is_empty(), "middle of block comment should have span");
+            assert!(
+                !cache.lines[1].is_empty(),
+                "middle of block comment should have span"
+            );
         }
     }
 

@@ -48,28 +48,6 @@ cargo build --release
 
 ---
 
-## Performance Checks
-
-Before committing runtime changes, run the perf guardrails:
-
-```sh
-# Generate fixtures (first time only)
-./perf/fixtures/gen.sh
-
-# Run macro benchmarks — all four budget checks must pass
-cargo build --release && ./perf/macro.sh
-
-# Hot-path micro-benchmarks (rope, parse, render)
-cargo bench
-
-# Cross-editor comparison (requires hyperfine, Zed, and VS Code with CLI launchers)
-./perf/compare.sh
-```
-
-Budget thresholds are defined in `perf/budgets.toml`. Current tier: beat VS Code on startup time and idle RAM.
-
----
-
 ## Workspace Layout
 
 ```

@@ -48,7 +48,9 @@ pub fn render_scrollbar(
     let viewport_h = f32::from(bounds.size.height).max(1.0);
     let content_h = viewport_h + max_scroll;
 
-    let thumb_h = (viewport_h * viewport_h / content_h).max(20.0).min(viewport_h);
+    let thumb_h = (viewport_h * viewport_h / content_h)
+        .max(20.0)
+        .min(viewport_h);
     let scroll_frac = f32::from(-offset.y) / max_scroll;
     let available = (viewport_h - thumb_h).max(0.0);
     let thumb_top = (scroll_frac * available).clamp(0.0, available);
@@ -114,7 +116,9 @@ pub fn apply_scrollbar_drag(drag: &ScrollbarDrag, current_mouse_y: f32, handle: 
     let bounds = handle.bounds();
     let viewport_h = f32::from(bounds.size.height).max(1.0);
     let content_h = viewport_h + max_scroll;
-    let thumb_h = (viewport_h * viewport_h / content_h).max(20.0).min(viewport_h);
+    let thumb_h = (viewport_h * viewport_h / content_h)
+        .max(20.0)
+        .min(viewport_h);
     let available = (viewport_h - thumb_h).max(1.0);
 
     let delta_track = current_mouse_y - drag.start_mouse_y;
@@ -122,7 +126,10 @@ pub fn apply_scrollbar_drag(drag: &ScrollbarDrag, current_mouse_y: f32, handle: 
     let new_y = (drag.start_offset_y - delta_content).clamp(-max_scroll, 0.0);
 
     let current = handle.offset();
-    handle.set_offset(Point { x: current.x, y: px(new_y) });
+    handle.set_offset(Point {
+        x: current.x,
+        y: px(new_y),
+    });
 }
 
 /// Convenience: build a `ScrollbarDrag` from a `MouseDownEvent` + handle.

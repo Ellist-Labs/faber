@@ -1,22 +1,24 @@
 use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
 use faber_editor::{
-    ChangeSet, LanguageRegistry, SyntaxToken, Transaction,
+    ChangeSet, LanguageRegistry, Selection, SyntaxToken, Transaction,
     buffer::Document,
     cursor,
     edit_history::History,
     highlight::{HighlightSpan, char_col_to_byte_col},
-    markdown::{parse_markdown, edit::{EnterAction, enter_action, smart_wrap, looks_like_url, toggle_checkbox}},
+    markdown::{
+        edit::{EnterAction, enter_action, looks_like_url, smart_wrap, toggle_checkbox},
+        parse_markdown,
+    },
     outline::{Outline, OutlineItem},
     search::Query,
-    Selection,
 };
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle,
     Focusable, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollStrategy,
-    ScrollWheelEvent, SharedString, TextRun, UniformListScrollHandle, Window, canvas, deferred,
-    div, fill, font, point, prelude::*, px, size, svg, uniform_list,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollStrategy, ScrollWheelEvent,
+    SharedString, TextRun, UniformListScrollHandle, Window, canvas, deferred, div, fill, font,
+    point, prelude::*, px, size, svg, uniform_list,
 };
 
 use crate::input_helpers::{
@@ -25,8 +27,8 @@ use crate::input_helpers::{
 use crate::markdown_preview::MarkdownPreviewView;
 use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
-use crate::ui::{IconName, ScrollbarDrag, render_scrollbar};
 use crate::ui::scrollbar::{start_drag, update_drag};
+use crate::ui::{IconName, ScrollbarDrag, render_scrollbar};
 use rust_i18n::t;
 
 // ── layout ─────────────────────────────────────────────────────────────────────
@@ -38,15 +40,14 @@ const GUTTER_COLS: f32 = 6.0;
 
 use crate::{
     Backspace, BoldSelection, CloseSearch, Copy, Cut, Delete, DeleteLine, DeleteToLineEnd,
-    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev,
-    InputMoveEnd, InputMoveLeft, InputMoveRight, InputMoveStart,
-    ItalicSelection, MoveDocEnd, MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart,
-    MovePageDown, MovePageUp, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace,
-    OpenSearch, Paste, ProjectRoot, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne,
-    SearchBackspace, SelectAll, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft,
-    SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight,
-    Tab, ToggleCheckbox, TogglePreview, ToggleReplace, ToggleSearchCase, ToggleSearchRegex,
-    ToggleSearchWholeWord, Undo,
+    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, InputMoveEnd,
+    InputMoveLeft, InputMoveRight, InputMoveStart, ItalicSelection, MoveDocEnd, MoveDocStart,
+    MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown, MovePageUp, MoveRight, MoveUp,
+    MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste, ProjectRoot, Redo, ReplaceAll,
+    ReplaceBackspace, ReplaceOne, SearchBackspace, SelectAll, SelectDocEnd, SelectDocStart,
+    SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft,
+    SelectWordRight, Tab, ToggleCheckbox, TogglePreview, ToggleReplace, ToggleSearchCase,
+    ToggleSearchRegex, ToggleSearchWholeWord, Undo,
 };
 
 // ── EditorView ─────────────────────────────────────────────────────────────────
@@ -118,8 +119,8 @@ pub struct EditorView {
     // Outline overlay (heading navigator for markdown files)
     pub outline_open: bool,
     pub outline_query: String,
-    pub outline_cursor: usize,           // caret position in the query input
-    pub outline_hover: Option<usize>,    // index into the filtered list
+    pub outline_cursor: usize,        // caret position in the query input
+    pub outline_hover: Option<usize>, // index into the filtered list
     pub outline_highlight: Option<(usize, usize)>, // (start_line, end_line) of hovered section
     pub outline_handle: FocusHandle,
 
@@ -135,8 +136,8 @@ impl EditorView {
     pub fn new(path: &str, cx: &mut Context<EditorView>) -> Self {
         let registry = cx.global::<crate::Registry>().0.clone();
         let doc = Document::open_with_registry(path, &registry).unwrap_or_else(|_| {
-            let mut d = Document::open_with_registry("/dev/null", &registry)
-                .expect("can't open /dev/null");
+            let mut d =
+                Document::open_with_registry("/dev/null", &registry).expect("can't open /dev/null");
             d.path = std::path::PathBuf::from(path);
             d
         });
@@ -213,16 +214,25 @@ impl EditorView {
         let epoch = self.cursor_blink_epoch;
         cx.spawn(async move |view, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_millis(530)).await;
-                let cont = view.update(cx, |this, cx| {
-                    if this.cursor_blink_epoch != epoch { return false; }
-                    this.cursor_blink_on = !this.cursor_blink_on;
-                    cx.notify();
-                    true
-                }).unwrap_or(false);
-                if !cont { break; }
+                cx.background_executor()
+                    .timer(Duration::from_millis(530))
+                    .await;
+                let cont = view
+                    .update(cx, |this, cx| {
+                        if this.cursor_blink_epoch != epoch {
+                            return false;
+                        }
+                        this.cursor_blink_on = !this.cursor_blink_on;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !cont {
+                    break;
+                }
             }
-        }).detach();
+        })
+        .detach();
     }
 
     fn clamp_sel(&mut self) {
@@ -233,7 +243,8 @@ impl EditorView {
 
     /// Scroll to `line`.
     fn scroll_to_line(&self, line: usize) {
-        self.scroll_handle.scroll_to_item(line, ScrollStrategy::Center);
+        self.scroll_handle
+            .scroll_to_item(line, ScrollStrategy::Center);
     }
 
     /// Top visible logical line.
@@ -242,31 +253,6 @@ impl EditorView {
         let y = f32::from(off.y);
         // offset.y is ≤ 0 when scrolled down; negate to get pixels scrolled
         (-y / t.line_height_code).floor().max(0.0) as usize
-    }
-
-    /// Build a breadcrumb stack from the outline at the current top visible line.
-    /// Returns references to each enclosing item (outermost → innermost) — no clones.
-    fn breadcrumb_stack<'a>(outline: &'a Outline, top_line: usize) -> Vec<&'a OutlineItem> {
-        let mut stack: Vec<&'a OutlineItem> = Vec::new();
-        for e in outline.items.iter().take_while(|e| e.source_line <= top_line) {
-            while stack.last().is_some_and(|last| last.depth >= e.depth) {
-                stack.pop();
-            }
-            stack.push(e);
-        }
-        stack
-    }
-
-    /// Map an `@context` keyword string to the appropriate `SyntaxToken` for coloring.
-    /// Delegates to the existing `token_color` helper — single source of truth for colors.
-    fn context_to_token(context: Option<&str>) -> Option<SyntaxToken> {
-        Some(match context? {
-            "fn" => SyntaxToken::Function,
-            "struct" | "enum" | "trait" | "type" | "impl" => SyntaxToken::Type,
-            "mod" => SyntaxToken::Namespace,
-            "const" => SyntaxToken::Constant,
-            _ => return None,
-        })
     }
 
     fn clear_word_occ(&mut self) {
@@ -298,21 +284,27 @@ impl EditorView {
         let registry = self.registry.clone();
         let update_preview = self.show_preview && self.preview.is_some();
         cx.spawn(async move |view, cx| {
-            cx.background_executor().timer(Duration::from_millis(75)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(75))
+                .await;
             let source = rope.to_string();
             let md = Arc::new(parse_markdown(&source, &rope, &registry));
-            let outline = Arc::new(Outline { items: md.outline.clone() });
+            let outline = Arc::new(Outline {
+                items: md.outline.clone(),
+            });
             let _ = view.update(cx, |this, cx| {
-                if this.outline_gen != current_gen { return; }
+                if this.outline_gen != current_gen {
+                    return;
+                }
                 this.outline = outline;
-                if update_preview
-                    && let Some(ref preview) = this.preview {
-                        let md2 = Arc::clone(&md);
-                        preview.update(cx, |pv, _cx| pv.apply_md(md2));
-                    }
+                if update_preview && let Some(ref preview) = this.preview {
+                    let md2 = Arc::clone(&md);
+                    preview.update(cx, |pv, _cx| pv.apply_md(md2));
+                }
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -401,7 +393,10 @@ impl EditorView {
     fn do_delete_to_line_start(&mut self, cx: &mut Context<Self>) {
         self.history.commit();
         let head = self.sel.head;
-        let line_idx = self.doc.rope.char_to_line(head.min(self.doc.len_chars().saturating_sub(1)));
+        let line_idx = self
+            .doc
+            .rope
+            .char_to_line(head.min(self.doc.len_chars().saturating_sub(1)));
         let line_start = self.doc.rope.line_to_char(line_idx);
         if !self.sel.is_empty() {
             let edit = self.doc.delete(self.sel.range());
@@ -443,7 +438,9 @@ impl EditorView {
     fn do_delete_line(&mut self, cx: &mut Context<Self>) {
         self.history.commit();
         let len = self.doc.len_chars();
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
         let head = self.sel.head.min(len.saturating_sub(1));
         let line_idx = self.doc.rope.char_to_line(head);
         let line_start = self.doc.rope.line_to_char(line_idx);
@@ -484,7 +481,8 @@ impl EditorView {
                 widest_chars = chars;
                 widest = i;
             }
-            self.line_cache.push(SharedString::from(content.to_string()));
+            self.line_cache
+                .push(SharedString::from(content.to_string()));
         }
         self.widest_line = widest;
     }
@@ -507,7 +505,8 @@ impl EditorView {
         }
         let px_y = f32::from(p.y);
         let px_x = f32::from(p.x);
-        let (line, rel_x) = if let Some((anchor_line, origin_x, origin_y)) = self.text_origin.get() {
+        let (line, rel_x) = if let Some((anchor_line, origin_x, origin_y)) = self.text_origin.get()
+        {
             // Measured at paint time — identical geometry to glyphs for both axes.
             let line_delta = ((px_y - origin_y) / t.line_height_code).floor();
             let line = (anchor_line as f32 + line_delta).max(0.0) as usize;
@@ -544,7 +543,9 @@ impl EditorView {
         window.focus(&self.focus_handle);
         let t = cx.global::<RuntimeTheme>().clone();
         let show_line_numbers = cx.global::<SettingsStore>().0.line_numbers;
-        let Some(offset) = self.offset_at(ev.position, &t, show_line_numbers, window) else { return };
+        let Some(offset) = self.offset_at(ev.position, &t, show_line_numbers, window) else {
+            return;
+        };
 
         match ev.click_count {
             2 => {
@@ -562,7 +563,11 @@ impl EditorView {
             _ => {
                 if ev.modifiers.shift {
                     let goal_col = cursor::col_of(&self.doc.rope, offset);
-                    self.sel = Selection { anchor: self.sel.anchor, head: offset, goal_col };
+                    self.sel = Selection {
+                        anchor: self.sel.anchor,
+                        head: offset,
+                        goal_col,
+                    };
                 } else {
                     self.sel = Selection::collapsed(offset, &self.doc.rope);
                     self.select_anchor = offset..offset;
@@ -572,9 +577,10 @@ impl EditorView {
         }
         self.mouse_selecting = true;
         self.reset_blink(cx);
-        self.last_scroll_line = self.doc.rope.char_to_line(
-            offset.min(self.doc.len_chars().saturating_sub(1))
-        );
+        self.last_scroll_line = self
+            .doc
+            .rope
+            .char_to_line(offset.min(self.doc.len_chars().saturating_sub(1)));
         cx.notify();
     }
 
@@ -589,12 +595,18 @@ impl EditorView {
         }
         let t = cx.global::<RuntimeTheme>().clone();
         let show_line_numbers = cx.global::<SettingsStore>().0.line_numbers;
-        let Some(offset) = self.offset_at(ev.position, &t, show_line_numbers, window) else { return };
+        let Some(offset) = self.offset_at(ev.position, &t, show_line_numbers, window) else {
+            return;
+        };
 
         let new_sel = match self.select_mode {
             SelectMode::Character => {
                 let goal_col = cursor::col_of(&self.doc.rope, offset);
-                Selection { anchor: self.sel.anchor, head: offset, goal_col }
+                Selection {
+                    anchor: self.sel.anchor,
+                    head: offset,
+                    goal_col,
+                }
             }
             SelectMode::Word => {
                 let word = cursor::word_at(&self.doc.rope, offset);
@@ -671,7 +683,11 @@ impl EditorView {
         }
         self.match_idx = (self.match_idx + 1) % self.matches.len();
         let m = self.matches[self.match_idx].clone();
-        self.sel = Selection { anchor: m.start, head: m.end, goal_col: 0 };
+        self.sel = Selection {
+            anchor: m.start,
+            head: m.end,
+            goal_col: 0,
+        };
         cx.notify();
     }
 
@@ -679,10 +695,17 @@ impl EditorView {
         if self.matches.is_empty() {
             return;
         }
-        self.match_idx =
-            if self.match_idx == 0 { self.matches.len() - 1 } else { self.match_idx - 1 };
+        self.match_idx = if self.match_idx == 0 {
+            self.matches.len() - 1
+        } else {
+            self.match_idx - 1
+        };
         let m = self.matches[self.match_idx].clone();
-        self.sel = Selection { anchor: m.start, head: m.end, goal_col: 0 };
+        self.sel = Selection {
+            anchor: m.start,
+            head: m.end,
+            goal_col: 0,
+        };
         cx.notify();
     }
 
@@ -709,7 +732,9 @@ impl EditorView {
         let doc_len = self.doc.rope.len_chars();
         let changeset = ChangeSet::from_changes(
             doc_len,
-            self.matches.iter().map(|r| (r.start, r.end, self.replace_query.clone())),
+            self.matches
+                .iter()
+                .map(|r| (r.start, r.end, self.replace_query.clone())),
         );
         let tx = Transaction::from_changeset(changeset);
         let inverse = self.doc.apply(tx);
@@ -843,12 +868,7 @@ impl EditorView {
         self.reset_blink(cx);
         cx.notify();
     }
-    fn on_select_doc_start(
-        &mut self,
-        _: &SelectDocStart,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_select_doc_start(&mut self, _: &SelectDocStart, _: &mut Window, cx: &mut Context<Self>) {
         self.sel = cursor::move_doc_start(self.sel, true);
         self.reset_blink(cx);
         cx.notify();
@@ -870,12 +890,7 @@ impl EditorView {
     fn on_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
         self.do_delete_fwd(cx);
     }
-    fn on_delete_word_left(
-        &mut self,
-        _: &DeleteWordLeft,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_delete_word_left(&mut self, _: &DeleteWordLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.do_delete_word_left(cx);
     }
     fn on_delete_word_right(
@@ -925,8 +940,9 @@ impl EditorView {
                     return;
                 }
                 EnterAction::ExitList { delete_cols } => {
-                    let char_start = line_char_start + line_str[..delete_cols.start].chars().count();
-                    let char_end   = line_char_start + line_str[..delete_cols.end].chars().count();
+                    let char_start =
+                        line_char_start + line_str[..delete_cols.start].chars().count();
+                    let char_end = line_char_start + line_str[..delete_cols.end].chars().count();
                     self.history.commit();
                     let edit = self.doc.delete(char_start..char_end);
                     self.history.push_change(edit);
@@ -967,21 +983,24 @@ impl EditorView {
     }
     fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard()
-            && let Some(text) = item.text() {
-                if self.is_markdown() && !self.sel.is_empty() && looks_like_url(&text) {
-                    let sel_text: String = self.doc.rope.slice(self.sel.range()).to_string();
-                    let linked = format!("[{sel_text}]({text})");
-                    self.history.commit();
-                    self.insert_text(&linked, cx);
-                    return;
-                }
+            && let Some(text) = item.text()
+        {
+            if self.is_markdown() && !self.sel.is_empty() && looks_like_url(&text) {
+                let sel_text: String = self.doc.rope.slice(self.sel.range()).to_string();
+                let linked = format!("[{sel_text}]({text})");
                 self.history.commit();
-                self.insert_text(&text.clone(), cx);
+                self.insert_text(&linked, cx);
+                return;
             }
+            self.history.commit();
+            self.insert_text(&text.clone(), cx);
+        }
     }
 
     fn on_bold_selection(&mut self, _: &BoldSelection, _: &mut Window, cx: &mut Context<Self>) {
-        if self.sel.is_empty() { return; }
+        if self.sel.is_empty() {
+            return;
+        }
         let selected: String = self.doc.rope.slice(self.sel.range()).to_string();
         let wrapped = smart_wrap(&selected, "**");
         self.history.commit();
@@ -990,7 +1009,9 @@ impl EditorView {
     }
 
     fn on_italic_selection(&mut self, _: &ItalicSelection, _: &mut Window, cx: &mut Context<Self>) {
-        if self.sel.is_empty() { return; }
+        if self.sel.is_empty() {
+            return;
+        }
         let selected: String = self.doc.rope.slice(self.sel.range()).to_string();
         let wrapped = smart_wrap(&selected, "*");
         self.history.commit();
@@ -1005,7 +1026,7 @@ impl EditorView {
         let line_str: String = self.doc.rope.line(line_idx).to_string();
         if let Some((byte_range, replacement)) = toggle_checkbox(&line_str) {
             let char_start = line_char_start + line_str[..byte_range.start].chars().count();
-            let char_end   = line_char_start + line_str[..byte_range.end].chars().count();
+            let char_end = line_char_start + line_str[..byte_range.end].chars().count();
             self.history.commit();
             let edit = self.doc.delete(char_start..char_end);
             self.history.push_change(edit);
@@ -1077,12 +1098,7 @@ impl EditorView {
     fn on_replace_all(&mut self, _: &ReplaceAll, _: &mut Window, cx: &mut Context<Self>) {
         self.do_replace_all(cx);
     }
-    fn on_search_backspace(
-        &mut self,
-        _: &SearchBackspace,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_search_backspace(&mut self, _: &SearchBackspace, _: &mut Window, cx: &mut Context<Self>) {
         if self.search_cursor > 0 {
             self.search_query = delete_char_before(&self.search_query, self.search_cursor);
             self.search_cursor -= 1;
@@ -1102,7 +1118,12 @@ impl EditorView {
             cx.notify();
         }
     }
-    fn on_input_move_left(&mut self, _: &InputMoveLeft, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_input_move_left(
+        &mut self,
+        _: &InputMoveLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.search_handle.is_focused(window) {
             self.search_cursor = self.search_cursor.saturating_sub(1);
         } else if self.replace_handle.is_focused(window) {
@@ -1111,7 +1132,12 @@ impl EditorView {
         self.reset_blink(cx);
         cx.notify();
     }
-    fn on_input_move_right(&mut self, _: &InputMoveRight, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_input_move_right(
+        &mut self,
+        _: &InputMoveRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.search_handle.is_focused(window) {
             self.search_cursor = (self.search_cursor + 1).min(self.search_query.chars().count());
         } else if self.replace_handle.is_focused(window) {
@@ -1120,7 +1146,12 @@ impl EditorView {
         self.reset_blink(cx);
         cx.notify();
     }
-    fn on_input_move_start(&mut self, _: &InputMoveStart, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_input_move_start(
+        &mut self,
+        _: &InputMoveStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.search_handle.is_focused(window) {
             self.search_cursor = 0;
         } else if self.replace_handle.is_focused(window) {
@@ -1213,20 +1244,33 @@ impl EditorView {
                 }
             }
             match (ks.key.as_str(), ks.modifiers.shift) {
-                ("backspace", false) => { self.do_delete_to_line_start(cx); return; }
-                ("delete", false)    => { self.do_delete_to_line_end(cx); return; }
-                ("k", true)          => { self.do_delete_line(cx); return; }
+                ("backspace", false) => {
+                    self.do_delete_to_line_start(cx);
+                    return;
+                }
+                ("delete", false) => {
+                    self.do_delete_to_line_end(cx);
+                    return;
+                }
+                ("k", true) => {
+                    self.do_delete_line(cx);
+                    return;
+                }
                 _ => {}
             }
         }
         // opt+backspace: delete word backward in search / replace / outline inputs
-        if ks.modifiers.alt && !ks.modifiers.platform && !ks.modifiers.control && !ks.modifiers.shift
+        if ks.modifiers.alt
+            && !ks.modifiers.platform
+            && !ks.modifiers.control
+            && !ks.modifiers.shift
             && ks.key.as_str() == "backspace"
         {
             if self.outline_open && self.outline_handle.is_focused(window) {
                 let ws = word_start_before(&self.outline_query, self.outline_cursor);
                 if ws < self.outline_cursor {
-                    self.outline_query = delete_char_range(&self.outline_query, ws, self.outline_cursor);
+                    self.outline_query =
+                        delete_char_range(&self.outline_query, ws, self.outline_cursor);
                     self.outline_cursor = ws;
                     self.outline_hover = None;
                     cx.notify();
@@ -1236,7 +1280,8 @@ impl EditorView {
             if self.show_search && self.search_handle.is_focused(window) {
                 let ws = word_start_before(&self.search_query, self.search_cursor);
                 if ws < self.search_cursor {
-                    self.search_query = delete_char_range(&self.search_query, ws, self.search_cursor);
+                    self.search_query =
+                        delete_char_range(&self.search_query, ws, self.search_cursor);
                     self.search_cursor = ws;
                     self.update_matches();
                     self.reset_blink(cx);
@@ -1247,7 +1292,8 @@ impl EditorView {
             if self.show_replace && self.replace_handle.is_focused(window) {
                 let ws = word_start_before(&self.replace_query, self.replace_cursor);
                 if ws < self.replace_cursor {
-                    self.replace_query = delete_char_range(&self.replace_query, ws, self.replace_cursor);
+                    self.replace_query =
+                        delete_char_range(&self.replace_query, ws, self.replace_cursor);
                     self.replace_cursor = ws;
                     self.reset_blink(cx);
                     cx.notify();
@@ -1270,7 +1316,8 @@ impl EditorView {
                     "escape" => { /* handled above */ }
                     "backspace" => {
                         if self.outline_cursor > 0 {
-                            self.outline_query = delete_char_before(&self.outline_query, self.outline_cursor);
+                            self.outline_query =
+                                delete_char_before(&self.outline_query, self.outline_cursor);
                             self.outline_cursor = self.outline_cursor.saturating_sub(1);
                             self.outline_hover = None;
                             cx.notify();
@@ -1291,9 +1338,12 @@ impl EditorView {
                     }
                     "enter" => {
                         let q = self.outline_query.to_lowercase();
-                        let first_line = self.outline.items.iter().find(|e| {
-                            q.is_empty() || e.name.to_lowercase().contains(&q)
-                        }).map(|e| e.source_line);
+                        let first_line = self
+                            .outline
+                            .items
+                            .iter()
+                            .find(|e| q.is_empty() || e.name.to_lowercase().contains(&q))
+                            .map(|e| e.source_line);
                         if let Some(line) = first_line {
                             self.scroll_to_line(line);
                         }
@@ -1307,8 +1357,12 @@ impl EditorView {
                 }
                 return;
             };
-            if ks.modifiers.control || ks.modifiers.platform { return; }
-            if raw_text.chars().any(|c| c.is_control()) { return; }
+            if ks.modifiers.control || ks.modifiers.platform {
+                return;
+            }
+            if raw_text.chars().any(|c| c.is_control()) {
+                return;
+            }
             self.outline_query = insert_at(&self.outline_query, self.outline_cursor, raw_text);
             self.outline_cursor += raw_text.chars().count();
             self.outline_hover = None;
@@ -1316,7 +1370,9 @@ impl EditorView {
             return;
         }
 
-        let Some(ref raw_text) = ks.key_char else { return };
+        let Some(ref raw_text) = ks.key_char else {
+            return;
+        };
         if ks.modifiers.control || ks.modifiers.platform {
             return;
         }
@@ -1328,7 +1384,17 @@ impl EditorView {
         let text: &str = if window.capslock().on {
             text_buf = raw_text
                 .chars()
-                .map(|c| if c.is_ascii_alphabetic() { if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() } } else { c })
+                .map(|c| {
+                    if c.is_ascii_alphabetic() {
+                        if c.is_ascii_uppercase() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            c.to_ascii_uppercase()
+                        }
+                    } else {
+                        c
+                    }
+                })
                 .collect::<String>();
             &text_buf
         } else {
@@ -1390,13 +1456,20 @@ impl EditorView {
         let line_char_count = line_str.chars().count();
         let line_char_end = line_char_start + line_char_count;
 
-        let cursor_col = if cursor_on_line { head - line_char_start } else { 0 };
+        let cursor_col = if cursor_on_line {
+            head - line_char_start
+        } else {
+            0
+        };
 
         let sel_start = self.sel.start();
         let sel_end = self.sel.end();
         let line_sel_start = sel_start.saturating_sub(line_char_start);
-        let line_sel_end =
-            if sel_end < line_char_end { sel_end.saturating_sub(line_char_start) } else { line_char_count };
+        let line_sel_end = if sel_end < line_char_end {
+            sel_end.saturating_sub(line_char_start)
+        } else {
+            line_char_count
+        };
 
         let match_ranges_on_line: Vec<(usize, usize, bool)> = self
             .matches
@@ -1405,147 +1478,178 @@ impl EditorView {
             .filter(|(_, m)| m.start <= line_char_end && m.end >= line_char_start)
             .map(|(i, m)| {
                 let s = m.start.saturating_sub(line_char_start);
-                let e = if m.end < line_char_end { m.end - line_char_start } else { line_char_count };
+                let e = if m.end < line_char_end {
+                    m.end - line_char_start
+                } else {
+                    line_char_count
+                };
                 (s, e, i == self.match_idx)
             })
             .collect();
 
-        let make_row = |hl_this_line: bool, is_flash: bool, cursor_on_line: bool, t: &RuntimeTheme| {
-            let line_h = t.line_height_code;
-            let hl_color = t.line_highlight;
-            let flash_color = t.match_bg;
-            let base = div()
-                .flex()
-                .flex_row()
-                .relative()
-                .h(px(line_h))
-                .when(hl_this_line, |r| r.bg(hl_color))
-                .when(is_flash, |r| r.bg(flash_color))
-                .font_family(t.mono_family.clone())
-                .text_size(px(t.font_size_code));
-            // Full-width current-line band: absolute div extends far left/right so the
-            // highlight covers gutter + content + padding, clipped by the scroll viewport.
-            if cursor_on_line && !is_flash {
-                base.child(
-                    div()
-                        .absolute()
-                        .left(px(-9999.))
-                        .w(px(19999.))
-                        .top(px(0.))
-                        .h(px(line_h))
-                        .bg(hl_color),
-                )
-            } else {
-                base
-            }
-        };
+        let make_row =
+            |hl_this_line: bool, is_flash: bool, cursor_on_line: bool, t: &RuntimeTheme| {
+                let line_h = t.line_height_code;
+                let hl_color = t.line_highlight;
+                let flash_color = t.match_bg;
+                let base = div()
+                    .flex()
+                    .flex_row()
+                    .relative()
+                    .h(px(line_h))
+                    .when(hl_this_line, |r| r.bg(hl_color))
+                    .when(is_flash, |r| r.bg(flash_color))
+                    .font_family(t.mono_family.clone())
+                    .text_size(px(t.font_size_code));
+                // Full-width current-line band: absolute div extends far left/right so the
+                // highlight covers gutter + content + padding, clipped by the scroll viewport.
+                if cursor_on_line && !is_flash {
+                    base.child(
+                        div()
+                            .absolute()
+                            .left(px(-9999.))
+                            .w(px(19999.))
+                            .top(px(0.))
+                            .h(px(line_h))
+                            .bg(hl_color),
+                    )
+                } else {
+                    base
+                }
+            };
 
         // ── Non-wrap: shaped line + overlay quads (highlights under text, caret on top) ──
-            let shaped = self.shape_editor_line(line_idx, t, window);
+        let shaped = self.shape_editor_line(line_idx, t, window);
 
-            let mut hl_rects: Vec<(usize, usize, gpui::Hsla)> = Vec::new();
-            if has_sel && line_sel_start < line_sel_end {
-                let s_byte = char_col_to_byte_col(line_str, line_sel_start);
-                let e_byte = char_col_to_byte_col(line_str, line_sel_end);
-                if s_byte < e_byte { hl_rects.push((s_byte, e_byte, t.selection)); }
-            } else {
-                // All occurrences of the word under the caret (no active selection).
-                for occ in &self.word_occ {
-                    if occ.start <= line_char_end && occ.end > line_char_start {
-                        let local_s = occ.start.saturating_sub(line_char_start).min(line_char_count);
-                        let local_e = occ.end.saturating_sub(line_char_start).min(line_char_count);
-                        if local_s < local_e {
-                            let s_byte = char_col_to_byte_col(line_str, local_s);
-                            let e_byte = char_col_to_byte_col(line_str, local_e);
-                            if s_byte < e_byte { hl_rects.push((s_byte, e_byte, t.word_highlight)); }
-                        }
-                    }
-                }
-                // Innermost enclosing bracket pair — one highlight per bracket char.
-                if let Some((open_off, close_off)) = bracket_hl {
-                    for bracket_char in [open_off, close_off] {
-                        if bracket_char >= line_char_start && bracket_char < line_char_end {
-                            let local = bracket_char - line_char_start;
-                            let s_byte = char_col_to_byte_col(line_str, local);
-                            // bracket chars may be multi-byte; advance to next char boundary
-                            let e_byte = char_col_to_byte_col(line_str, local + 1);
-                            if s_byte < e_byte { hl_rects.push((s_byte, e_byte, t.word_highlight)); }
+        let mut hl_rects: Vec<(usize, usize, gpui::Hsla)> = Vec::new();
+        if has_sel && line_sel_start < line_sel_end {
+            let s_byte = char_col_to_byte_col(line_str, line_sel_start);
+            let e_byte = char_col_to_byte_col(line_str, line_sel_end);
+            if s_byte < e_byte {
+                hl_rects.push((s_byte, e_byte, t.selection));
+            }
+        } else {
+            // All occurrences of the word under the caret (no active selection).
+            for occ in &self.word_occ {
+                if occ.start <= line_char_end && occ.end > line_char_start {
+                    let local_s = occ
+                        .start
+                        .saturating_sub(line_char_start)
+                        .min(line_char_count);
+                    let local_e = occ.end.saturating_sub(line_char_start).min(line_char_count);
+                    if local_s < local_e {
+                        let s_byte = char_col_to_byte_col(line_str, local_s);
+                        let e_byte = char_col_to_byte_col(line_str, local_e);
+                        if s_byte < e_byte {
+                            hl_rects.push((s_byte, e_byte, t.word_highlight));
                         }
                     }
                 }
             }
-            for (s, e, active) in &match_ranges_on_line {
-                let s_byte = char_col_to_byte_col(line_str, *s);
-                let e_byte = char_col_to_byte_col(line_str, *e);
-                if s_byte < e_byte {
-                    hl_rects.push((s_byte, e_byte, if *active { t.match_active } else { t.match_bg }));
-                }
-            }
-            // Selection continuing past EOL owns the newline: paint a stub so
-            // multi-line selections have no gaps on short/empty lines.
-            let sel_stub = has_sel && sel_start <= line_char_end && sel_end > line_char_end;
-
-            let caret_byte: Option<usize> = (cursor_on_line && cursor_visible)
-                .then(|| char_col_to_byte_col(line_str, cursor_col));
-
-            let line_h = px(t.line_height_code);
-            let cursor_color = t.cursor;
-            let sel_color = t.selection;
-            let stub_w = px(t.char_w_code * 0.5);
-            let content_w = shaped.width;
-            let anchor_cell = self.text_origin.clone();
-
-            let content = canvas(
-                move |_bounds, _window, _cx| shaped,
-                move |bounds, shaped, window, cx| {
-                    let origin = bounds.origin;
-                    anchor_cell.set(Some((line_idx, f32::from(origin.x), f32::from(origin.y))));
-                    for (s_byte, e_byte, color) in &hl_rects {
-                        let x1 = origin.x + shaped.x_for_index(*s_byte);
-                        let x2 = origin.x + shaped.x_for_index(*e_byte);
-                        if x2 > x1 {
-                            window.paint_quad(fill(
-                                Bounds::new(point(x1, origin.y), size(x2 - x1, line_h)),
-                                *color,
-                            ));
+            // Innermost enclosing bracket pair — one highlight per bracket char.
+            if let Some((open_off, close_off)) = bracket_hl {
+                for bracket_char in [open_off, close_off] {
+                    if bracket_char >= line_char_start && bracket_char < line_char_end {
+                        let local = bracket_char - line_char_start;
+                        let s_byte = char_col_to_byte_col(line_str, local);
+                        // bracket chars may be multi-byte; advance to next char boundary
+                        let e_byte = char_col_to_byte_col(line_str, local + 1);
+                        if s_byte < e_byte {
+                            hl_rects.push((s_byte, e_byte, t.word_highlight));
                         }
                     }
-                    if sel_stub {
+                }
+            }
+        }
+        for (s, e, active) in &match_ranges_on_line {
+            let s_byte = char_col_to_byte_col(line_str, *s);
+            let e_byte = char_col_to_byte_col(line_str, *e);
+            if s_byte < e_byte {
+                hl_rects.push((
+                    s_byte,
+                    e_byte,
+                    if *active { t.match_active } else { t.match_bg },
+                ));
+            }
+        }
+        // Selection continuing past EOL owns the newline: paint a stub so
+        // multi-line selections have no gaps on short/empty lines.
+        let sel_stub = has_sel && sel_start <= line_char_end && sel_end > line_char_end;
+
+        let caret_byte: Option<usize> =
+            (cursor_on_line && cursor_visible).then(|| char_col_to_byte_col(line_str, cursor_col));
+
+        let line_h = px(t.line_height_code);
+        let cursor_color = t.cursor;
+        let sel_color = t.selection;
+        let stub_w = px(t.char_w_code * 0.5);
+        let content_w = shaped.width;
+        let anchor_cell = self.text_origin.clone();
+
+        let content = canvas(
+            move |_bounds, _window, _cx| shaped,
+            move |bounds, shaped, window, cx| {
+                let origin = bounds.origin;
+                anchor_cell.set(Some((line_idx, f32::from(origin.x), f32::from(origin.y))));
+                for (s_byte, e_byte, color) in &hl_rects {
+                    let x1 = origin.x + shaped.x_for_index(*s_byte);
+                    let x2 = origin.x + shaped.x_for_index(*e_byte);
+                    if x2 > x1 {
                         window.paint_quad(fill(
-                            Bounds::new(point(origin.x + shaped.width, origin.y), size(stub_w, line_h)),
-                            sel_color,
+                            Bounds::new(point(x1, origin.y), size(x2 - x1, line_h)),
+                            *color,
                         ));
                     }
-                    let _ = shaped.paint(origin, line_h, window, cx);
-                    if let Some(caret_byte) = caret_byte {
-                        let x = origin.x + shaped.x_for_index(caret_byte);
-                        window.paint_quad(fill(
-                            Bounds::new(point(x, origin.y), size(px(2.0), line_h)),
-                            cursor_color,
-                        ));
-                    }
-                },
+                }
+                if sel_stub {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(origin.x + shaped.width, origin.y),
+                            size(stub_w, line_h),
+                        ),
+                        sel_color,
+                    ));
+                }
+                let _ = shaped.paint(origin, line_h, window, cx);
+                if let Some(caret_byte) = caret_byte {
+                    let x = origin.x + shaped.x_for_index(caret_byte);
+                    window.paint_quad(fill(
+                        Bounds::new(point(x, origin.y), size(px(2.0), line_h)),
+                        cursor_color,
+                    ));
+                }
+            },
+        )
+        .w(content_w)
+        .h(line_h)
+        .flex_shrink_0();
+
+        let row = make_row(hl_this_line, is_flash, cursor_on_line, t);
+        let row = if show_line_numbers {
+            row.child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(GUTTER_COLS * t.char_w_code))
+                    .text_size(px(t.font_size_gutter))
+                    .text_color(if cursor_on_line {
+                        t.gutter_active
+                    } else {
+                        t.gutter
+                    })
+                    .child(format!("{:>4}", line_idx + 1)),
             )
-            .w(content_w)
-            .h(line_h)
-            .flex_shrink_0();
-
-            let row = make_row(hl_this_line, is_flash, cursor_on_line, t);
-            let row = if show_line_numbers {
-                row.child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(GUTTER_COLS * t.char_w_code))
-                        .text_size(px(t.font_size_gutter))
-                        .text_color(if cursor_on_line { t.gutter_active } else { t.gutter })
-                        .child(format!("{:>4}", line_idx + 1)),
-                )
-                .child(div().flex_shrink_0().w(px(2.0 * t.char_w_code)))
-            } else { row };
+            .child(div().flex_shrink_0().w(px(2.0 * t.char_w_code)))
+        } else {
+            row
+        };
         row.child(content).into_any_element()
     }
 
-    pub(crate) fn build_text_runs(line_str: &str, raw_spans: &[HighlightSpan], t: &RuntimeTheme) -> Vec<TextRun> {
+    pub(crate) fn build_text_runs(
+        line_str: &str,
+        raw_spans: &[HighlightSpan],
+        t: &RuntimeTheme,
+    ) -> Vec<TextRun> {
         let line_bytes = line_str.len();
         if line_bytes == 0 {
             return Vec::new();
@@ -1564,8 +1668,15 @@ impl EditorView {
         let mut breakpoints: Vec<usize> = vec![0, line_bytes];
         for s in raw_spans {
             let sb = (s.start_byte_col as usize).min(line_bytes);
-            let eb = if s.end_byte_col == u32::MAX { line_bytes } else { (s.end_byte_col as usize).min(line_bytes) };
-            if sb < eb { breakpoints.push(sb); breakpoints.push(eb); }
+            let eb = if s.end_byte_col == u32::MAX {
+                line_bytes
+            } else {
+                (s.end_byte_col as usize).min(line_bytes)
+            };
+            if sb < eb {
+                breakpoints.push(sb);
+                breakpoints.push(eb);
+            }
         }
         breakpoints.sort_unstable();
         breakpoints.dedup();
@@ -1573,12 +1684,22 @@ impl EditorView {
         for i in 0..breakpoints.len().saturating_sub(1) {
             let start = breakpoints[i];
             let end = breakpoints[i + 1];
-            if start >= end { continue; }
-            let color = raw_spans.iter().rfind(|s| {
-                let sb = (s.start_byte_col as usize).min(line_bytes);
-                let eb = if s.end_byte_col == u32::MAX { line_bytes } else { (s.end_byte_col as usize).min(line_bytes) };
-                start >= sb && end <= eb
-            }).map(|s| Self::token_color(s.token, t)).unwrap_or(t.text);
+            if start >= end {
+                continue;
+            }
+            let color = raw_spans
+                .iter()
+                .rfind(|s| {
+                    let sb = (s.start_byte_col as usize).min(line_bytes);
+                    let eb = if s.end_byte_col == u32::MAX {
+                        line_bytes
+                    } else {
+                        (s.end_byte_col as usize).min(line_bytes)
+                    };
+                    start >= sb && end <= eb
+                })
+                .map(|s| Self::token_color(s.token, t))
+                .unwrap_or(t.text);
             runs.push(TextRun {
                 len: end - start,
                 font: default_font.clone(),
@@ -1589,7 +1710,14 @@ impl EditorView {
             });
         }
         if runs.is_empty() {
-            runs.push(TextRun { len: line_bytes, font: default_font, color: t.text, background_color: None, underline: None, strikethrough: None });
+            runs.push(TextRun {
+                len: line_bytes,
+                font: default_font,
+                color: t.text,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
         }
         runs
     }
@@ -1688,18 +1816,37 @@ impl EditorView {
                 .flex_shrink_0()
                 .text_size(px(t.font_size_code - 1.))
                 .font_family(t.mono_family.clone())
-                .text_color(if active { t.text_on_accent } else { t.text_subtle })
-                .when(active, move |el| el.bg(t.accent).hover(move |s| s.bg(t.accent_hover)))
+                .text_color(if active {
+                    t.text_on_accent
+                } else {
+                    t.text_subtle
+                })
+                .when(active, move |el| {
+                    el.bg(t.accent).hover(move |s| s.bg(t.accent_hover))
+                })
                 .when(!active, move |el| el.hover(move |s| s.bg(hover_bg)))
                 .child(label)
         };
 
         // ── replace-toggle (leftmost, Add = show replace, Remove = hide) ───────
-        let toggle_icon = if show_replace { IconName::Remove } else { IconName::Add };
-        let toggle_color = if show_replace { t.accent } else { t.text_subtle };
+        let toggle_icon = if show_replace {
+            IconName::Remove
+        } else {
+            IconName::Add
+        };
+        let toggle_color = if show_replace {
+            t.accent
+        } else {
+            t.text_subtle
+        };
         let replace_toggle = icon_btn_base("toggle-replace")
             .when(show_replace, |el| el.bg(t.line_highlight))
-            .child(svg().path(toggle_icon.path()).size(px(14.)).text_color(toggle_color))
+            .child(
+                svg()
+                    .path(toggle_icon.path())
+                    .size(px(14.))
+                    .text_color(toggle_color),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|v, _, window, cx| v.on_toggle_replace(&ToggleReplace, window, cx)),
@@ -1707,14 +1854,24 @@ impl EditorView {
 
         // ── navigation group: [◄ prev] [count] [► next] ───────────────────────
         let prev_btn = icon_btn_base("search-prev")
-            .child(svg().path(IconName::ChevronLeft.path()).size(px(14.)).text_color(t.text_subtle))
+            .child(
+                svg()
+                    .path(IconName::ChevronLeft.path())
+                    .size(px(14.))
+                    .text_color(t.text_subtle),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|v, _, window, cx| v.on_find_prev(&FindPrev, window, cx)),
             );
 
         let next_btn = icon_btn_base("search-next")
-            .child(svg().path(IconName::ChevronRight.path()).size(px(14.)).text_color(t.text_subtle))
+            .child(
+                svg()
+                    .path(IconName::ChevronRight.path())
+                    .size(px(14.))
+                    .text_color(t.text_subtle),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|v, _, window, cx| v.on_find_next(&FindNext, window, cx)),
@@ -1740,33 +1897,33 @@ impl EditorView {
             .child(next_btn);
 
         // ── filter chips ───────────────────────────────────────────────────────
-        let case_chip = chip("toggle-case", "Aa", self.search_case_sensitive, t)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|v, _, window, cx| {
-                    v.on_toggle_search_case(&ToggleSearchCase, window, cx)
-                }),
-            );
+        let case_chip = chip("toggle-case", "Aa", self.search_case_sensitive, t).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|v, _, window, cx| v.on_toggle_search_case(&ToggleSearchCase, window, cx)),
+        );
 
-        let word_chip = chip("toggle-word", "W", self.search_whole_word, t)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|v, _, window, cx| {
-                    v.on_toggle_search_whole_word(&ToggleSearchWholeWord, window, cx)
-                }),
-            );
+        let word_chip = chip("toggle-word", "W", self.search_whole_word, t).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|v, _, window, cx| {
+                v.on_toggle_search_whole_word(&ToggleSearchWholeWord, window, cx)
+            }),
+        );
 
-        let regex_chip = chip("toggle-regex", ".*", self.search_regex, t)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|v, _, window, cx| {
-                    v.on_toggle_search_regex(&ToggleSearchRegex, window, cx)
-                }),
-            );
+        let regex_chip = chip("toggle-regex", ".*", self.search_regex, t).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|v, _, window, cx| {
+                v.on_toggle_search_regex(&ToggleSearchRegex, window, cx)
+            }),
+        );
 
         // ── close button (rightmost) ───────────────────────────────────────────
         let close_btn = icon_btn_base("search-close")
-            .child(svg().path(IconName::Close.path()).size(px(13.)).text_color(t.text_subtle))
+            .child(
+                svg()
+                    .path(IconName::Close.path())
+                    .size(px(13.))
+                    .text_color(t.text_subtle),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|v, _, window, cx| v.on_close_search(&CloseSearch, window, cx)),
@@ -1779,7 +1936,11 @@ impl EditorView {
                 .flex_1()
                 .min_w(px(80.))
                 .h(px(24.))
-                .bg(if focused { t.line_highlight } else { t.bg_sunken })
+                .bg(if focused {
+                    t.line_highlight
+                } else {
+                    t.bg_sunken
+                })
                 .px_2()
                 .flex()
                 .items_center()
@@ -1873,13 +2034,19 @@ impl EditorView {
             .child(vsep())
             .child(
                 input_style(search_focused, t)
-                    .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| {
-                        window.focus(&v.search_handle);
-                        v.search_cursor = v.search_query.chars().count();
-                        v.reset_blink(cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|v, _, window, cx| {
+                            window.focus(&v.search_handle);
+                            v.search_cursor = v.search_query.chars().count();
+                            v.reset_blink(cx);
+                        }),
+                    )
                     .child(if !search_focused && self.search_query.is_empty() {
-                        div().text_color(t.text_subtle).child(t!("search.placeholder").to_string()).into_any()
+                        div()
+                            .text_color(t.text_subtle)
+                            .child(t!("search.placeholder").to_string())
+                            .into_any()
                     } else {
                         let cur_on = search_focused && caret_visible;
                         let s_before_owned = s_before.clone();
@@ -1889,15 +2056,33 @@ impl EditorView {
                         let ui_family = t.ui_family.clone();
                         let text_col = t.text;
                         let cursor_col_val = t.cursor;
-                        let cursor_color = if cur_on { cursor_col_val } else { gpui::hsla(0., 0., 0., 0.) };
+                        let cursor_color = if cur_on {
+                            cursor_col_val
+                        } else {
+                            gpui::hsla(0., 0., 0., 0.)
+                        };
                         let full_text = format!("{}{}", s_before_owned, s_after_owned);
                         let caret_byte = s_before_owned.len();
                         canvas(
                             move |_bounds, window, _cx| {
-                                let runs = if full_text.is_empty() { vec![] } else {
-                                    vec![TextRun { len: full_text.len(), font: font(ui_family.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                                let runs = if full_text.is_empty() {
+                                    vec![]
+                                } else {
+                                    vec![TextRun {
+                                        len: full_text.len(),
+                                        font: font(ui_family.clone()),
+                                        color: text_col,
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                    }]
                                 };
-                                window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                                window.text_system().shape_line(
+                                    SharedString::from(full_text),
+                                    font_sz,
+                                    &runs,
+                                    None,
+                                )
                             },
                             move |bounds, shaped, window, cx| {
                                 let origin = bounds.origin;
@@ -1930,13 +2115,19 @@ impl EditorView {
             .child(vsep())
             .child(
                 input_style(replace_focused, t)
-                    .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| {
-                        window.focus(&v.replace_handle);
-                        v.replace_cursor = v.replace_query.chars().count();
-                        v.reset_blink(cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|v, _, window, cx| {
+                            window.focus(&v.replace_handle);
+                            v.replace_cursor = v.replace_query.chars().count();
+                            v.reset_blink(cx);
+                        }),
+                    )
                     .child(if !replace_focused && self.replace_query.is_empty() {
-                        div().text_color(t.text_subtle).child(t!("search.replace_placeholder").to_string()).into_any()
+                        div()
+                            .text_color(t.text_subtle)
+                            .child(t!("search.replace_placeholder").to_string())
+                            .into_any()
                     } else {
                         let cur_on = replace_focused && caret_visible;
                         let r_before_owned = r_before.clone();
@@ -1946,15 +2137,33 @@ impl EditorView {
                         let ui_family2 = t.ui_family.clone();
                         let text_col = t.text;
                         let cursor_col_val = t.cursor;
-                        let cursor_color = if cur_on { cursor_col_val } else { gpui::hsla(0., 0., 0., 0.) };
+                        let cursor_color = if cur_on {
+                            cursor_col_val
+                        } else {
+                            gpui::hsla(0., 0., 0., 0.)
+                        };
                         let full_text = format!("{}{}", r_before_owned, r_after_owned);
                         let caret_byte = r_before_owned.len();
                         canvas(
                             move |_bounds, window, _cx| {
-                                let runs = if full_text.is_empty() { vec![] } else {
-                                    vec![TextRun { len: full_text.len(), font: font(ui_family2.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                                let runs = if full_text.is_empty() {
+                                    vec![]
+                                } else {
+                                    vec![TextRun {
+                                        len: full_text.len(),
+                                        font: font(ui_family2.clone()),
+                                        color: text_col,
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                    }]
                                 };
-                                window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                                window.text_system().shape_line(
+                                    SharedString::from(full_text),
+                                    font_sz,
+                                    &runs,
+                                    None,
+                                )
                             },
                             move |bounds, shaped, window, cx| {
                                 let origin = bounds.origin;
@@ -1993,18 +2202,29 @@ impl EditorView {
     // ── markdown preview ───────────────────────────────────────────────────────
 
     pub fn is_markdown(&self) -> bool {
-        self.doc.language.as_ref().is_some_and(|l| l.id.0 == "markdown")
+        self.doc
+            .language
+            .as_ref()
+            .is_some_and(|l| l.id.0 == "markdown")
     }
 
-    fn on_toggle_preview(&mut self, _: &TogglePreview, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_markdown() { return; }
+    fn on_toggle_preview(
+        &mut self,
+        _: &TogglePreview,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_markdown() {
+            return;
+        }
         let entering_preview = !self.show_preview;
         self.show_preview = entering_preview;
 
         if entering_preview {
-            let source_line = self.doc.rope.char_to_line(
-                self.sel.head.min(self.doc.len_chars().saturating_sub(1))
-            );
+            let source_line = self
+                .doc
+                .rope
+                .char_to_line(self.sel.head.min(self.doc.len_chars().saturating_sub(1)));
             let registry = self.registry.clone();
             if self.preview.is_none() {
                 let rope = self.doc.rope.clone();
@@ -2027,7 +2247,8 @@ impl EditorView {
             } else {
                 0
             };
-            self.scroll_handle.scroll_to_item(source_line, ScrollStrategy::Top);
+            self.scroll_handle
+                .scroll_to_item(source_line, ScrollStrategy::Top);
         }
         cx.notify();
     }
@@ -2053,8 +2274,16 @@ impl Render for EditorView {
 
         // Preview toggle button (only shown for markdown files)
         let toggle_btn: AnyElement = if is_md {
-            let icon = if show_preview { IconName::Code } else { IconName::Visibility };
-            let color = if show_preview { t.accent } else { t.text_subtle };
+            let icon = if show_preview {
+                IconName::Code
+            } else {
+                IconName::Visibility
+            };
+            let color = if show_preview {
+                t.accent
+            } else {
+                t.text_subtle
+            };
             div()
                 .id("preview-toggle")
                 .flex()
@@ -2068,7 +2297,12 @@ impl Render for EditorView {
                     gpui::MouseButton::Left,
                     cx.listener(|v, _, window, cx| v.on_toggle_preview(&TogglePreview, window, cx)),
                 )
-                .child(gpui::svg().path(icon.path()).size(px(14.)).text_color(color))
+                .child(
+                    gpui::svg()
+                        .path(icon.path())
+                        .size(px(14.))
+                        .text_color(color),
+                )
                 .into_any_element()
         } else {
             div().into_any_element()
@@ -2097,7 +2331,7 @@ impl Render for EditorView {
         // Breadcrumb: compute the symbol/heading stack at the current top visible line.
         let top_line = self.top_visible_line(&t);
         let crumb_stack = if !self.outline.is_empty() {
-            Self::breadcrumb_stack(&self.outline, top_line)
+            crate::editor_logic::breadcrumb_stack(&self.outline, top_line)
         } else {
             vec![]
         };
@@ -2106,7 +2340,11 @@ impl Render for EditorView {
         let crumb_hover_bg = t.line_highlight;
         let outline_active = self.outline_open;
         let sep_color = t.text_subtle;
-        let path_color = if can_open_outline { t.text } else { t.text_subtle };
+        let path_color = if can_open_outline {
+            t.text
+        } else {
+            t.text_subtle
+        };
 
         // Build breadcrumb content as individual colored elements so each segment
         // can carry syntax-appropriate color (fn→function, struct→type, mod→namespace).
@@ -2120,15 +2358,25 @@ impl Render for EditorView {
                 .gap(px(2.));
             // File path segment
             inner = inner.child(
-                div().text_color(path_color).text_ellipsis().overflow_hidden().child(path_label.clone())
+                div()
+                    .text_color(path_color)
+                    .text_ellipsis()
+                    .overflow_hidden()
+                    .child(path_label.clone()),
             );
             for item in &crumb_stack {
-                let seg_color = Self::context_to_token(item.context.as_deref())
+                let seg_color = crate::editor_logic::context_to_token(item.context.as_deref())
                     .map(|tok| Self::token_color(tok, &t))
                     .unwrap_or(t.text);
                 inner = inner
                     .child(div().text_color(sep_color).flex_shrink_0().child(" ›"))
-                    .child(div().text_color(seg_color).text_ellipsis().overflow_hidden().child(item.name.clone()));
+                    .child(
+                        div()
+                            .text_color(seg_color)
+                            .text_ellipsis()
+                            .overflow_hidden()
+                            .child(item.name.clone()),
+                    );
             }
             inner
         };
@@ -2150,22 +2398,29 @@ impl Render for EditorView {
                 el.cursor_pointer().hover(move |s| s.bg(crumb_hover_bg))
             })
             .when(can_open_outline, |el| {
-                el.on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| {
-                    v.outline_open = !v.outline_open;
-                    v.outline_query.clear();
-                    v.outline_cursor = 0;
-                    v.outline_hover = None;
-                    if v.outline_open {
-                        window.focus(&v.outline_handle);
-                    } else {
-                        window.focus(&v.focus_handle);
-                    }
-                    cx.notify();
-                }))
+                el.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|v, _, window, cx| {
+                        v.outline_open = !v.outline_open;
+                        v.outline_query.clear();
+                        v.outline_cursor = 0;
+                        v.outline_hover = None;
+                        if v.outline_open {
+                            window.focus(&v.outline_handle);
+                        } else {
+                            window.focus(&v.focus_handle);
+                        }
+                        cx.notify();
+                    }),
+                )
             })
             .child(crumb_content);
 
-        let search_icon_color = if self.show_search { t.accent } else { t.text_subtle };
+        let search_icon_color = if self.show_search {
+            t.accent
+        } else {
+            t.text_subtle
+        };
         let search_btn = div()
             .id("header-search")
             .flex()
@@ -2179,7 +2434,12 @@ impl Render for EditorView {
                 MouseButton::Left,
                 cx.listener(|v, _, window, cx| v.on_open_search(&OpenSearch, window, cx)),
             )
-            .child(svg().path(IconName::Search.path()).size(px(14.)).text_color(search_icon_color));
+            .child(
+                svg()
+                    .path(IconName::Search.path())
+                    .size(px(14.))
+                    .text_color(search_icon_color),
+            );
 
         let header = div()
             .flex()
@@ -2203,7 +2463,10 @@ impl Render for EditorView {
             );
 
         let line_count = self.doc.len_lines();
-        let cursor_line = self.doc.rope.char_to_line(self.sel.head.min(self.doc.len_chars().saturating_sub(1)));
+        let cursor_line = self
+            .doc
+            .rope
+            .char_to_line(self.sel.head.min(self.doc.len_chars().saturating_sub(1)));
         if cursor_line != self.last_scroll_line {
             self.last_scroll_line = cursor_line;
             self.scroll_to_line(cursor_line);
@@ -2224,20 +2487,38 @@ impl Render for EditorView {
             let w = cursor::word_at(&self.doc.rope, self.sel.head);
             if !w.is_empty()
                 && cursor::default_word_classifier(
-                    self.doc.rope.char(self.sel.head.min(self.doc.len_chars().saturating_sub(1)))
+                    self.doc
+                        .rope
+                        .char(self.sel.head.min(self.doc.len_chars().saturating_sub(1))),
                 )
             {
-                let head_char_col = self.sel.head
+                let head_char_col = self
+                    .sel
+                    .head
                     .saturating_sub(self.doc.rope.line_to_char(cursor_line));
-                let line_str = self.line_cache.get(cursor_line).map(|s| s.as_ref()).unwrap_or("");
+                let line_str = self
+                    .line_cache
+                    .get(cursor_line)
+                    .map(|s| s.as_ref())
+                    .unwrap_or("");
                 let head_byte_col = char_col_to_byte_col(line_str, head_char_col);
                 let in_comment = self.doc.highlight_spans(cursor_line).iter().any(|s| {
-                    if s.token != SyntaxToken::Comment { return false; }
+                    if s.token != SyntaxToken::Comment {
+                        return false;
+                    }
                     let start = s.start_byte_col as usize;
-                    let end = if s.end_byte_col == u32::MAX { line_str.len() } else { s.end_byte_col as usize };
+                    let end = if s.end_byte_col == u32::MAX {
+                        line_str.len()
+                    } else {
+                        s.end_byte_col as usize
+                    };
                     head_byte_col >= start && head_byte_col < end
                 });
-                if in_comment { None } else { Some((w.start(), w.end())) }
+                if in_comment {
+                    None
+                } else {
+                    Some((w.start(), w.end()))
+                }
             } else {
                 None
             }
@@ -2248,7 +2529,9 @@ impl Render for EditorView {
         match active_word {
             Some((ws, we)) => {
                 // Compare rope chars against cached key before allocating a String.
-                let same = self.word_occ_key.as_deref()
+                let same = self
+                    .word_occ_key
+                    .as_deref()
                     .map_or(false, |k| self.doc.rope.slice(ws..we).chars().eq(k.chars()));
                 if !same {
                     let word_text = self.doc.rope.slice(ws..we).to_string();
@@ -2303,13 +2586,24 @@ impl Render for EditorView {
                 line_count + TRAILING_BLANK_LINES,
                 move |range: std::ops::Range<usize>, window, cx| {
                     let view = entity.read(cx);
-                    range.map(|i| {
-                        if i < line_count {
-                            view.render_line(i, &t2, show_line_numbers, cursor_visible, outline_hl, flash, bracket_hl, window)
-                        } else {
-                            div().h(px(t2.line_height_code)).into_any_element()
-                        }
-                    }).collect::<Vec<AnyElement>>()
+                    range
+                        .map(|i| {
+                            if i < line_count {
+                                view.render_line(
+                                    i,
+                                    &t2,
+                                    show_line_numbers,
+                                    cursor_visible,
+                                    outline_hl,
+                                    flash,
+                                    bracket_hl,
+                                    window,
+                                )
+                            } else {
+                                div().h(px(t2.line_height_code)).into_any_element()
+                            }
+                        })
+                        .collect::<Vec<AnyElement>>()
                 },
             )
             .flex_1()
@@ -2329,118 +2623,153 @@ impl Render for EditorView {
                 .flex_1()
                 .min_w(px(0.))
                 .min_h(px(0.))
-                .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).cursor(CursorStyle::IBeam).child(content))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .min_h(px(0.))
+                        .cursor(CursorStyle::IBeam)
+                        .child(content),
+                )
                 .child(editor_scrollbar)
         };
 
         // In preview mode: side-by-side split (editor left, preview right).
-        if show_preview
-            && let Some(ref preview_entity) = self.preview {
-                let preview = preview_entity.clone();
-                let split = div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .child(editor_pane)
-                    .child(div().w(px(1.)).bg(t.separator).flex_shrink_0())
-                    .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(preview));
-                let root = div()
-                    .flex()
-                    .flex_col()
-                    .size_full()
-                    .relative()
-                    .bg(t.bg)
-                    .track_focus(&self.focus_handle(cx))
-                    .on_key_down(cx.listener(Self::on_key_down))
-                    .on_action(cx.listener(Self::on_move_left))
-                    .on_action(cx.listener(Self::on_move_right))
-                    .on_action(cx.listener(Self::on_move_up))
-                    .on_action(cx.listener(Self::on_move_down))
-                    .on_action(cx.listener(Self::on_move_word_left))
-                    .on_action(cx.listener(Self::on_move_word_right))
-                    .on_action(cx.listener(Self::on_move_line_start))
-                    .on_action(cx.listener(Self::on_move_line_end))
-                    .on_action(cx.listener(Self::on_move_doc_start))
-                    .on_action(cx.listener(Self::on_move_doc_end))
-                    .on_action(cx.listener(Self::on_move_page_up))
-                    .on_action(cx.listener(Self::on_move_page_down))
-                    .on_action(cx.listener(Self::on_select_left))
-                    .on_action(cx.listener(Self::on_select_right))
-                    .on_action(cx.listener(Self::on_select_up))
-                    .on_action(cx.listener(Self::on_select_down))
-                    .on_action(cx.listener(Self::on_select_word_left))
-                    .on_action(cx.listener(Self::on_select_word_right))
-                    .on_action(cx.listener(Self::on_select_line_start))
-                    .on_action(cx.listener(Self::on_select_line_end))
-                    .on_action(cx.listener(Self::on_select_doc_start))
-                    .on_action(cx.listener(Self::on_select_doc_end))
-                    .on_action(cx.listener(Self::on_select_all))
-                    .on_action(cx.listener(Self::on_backspace))
-                    .on_action(cx.listener(Self::on_delete))
-                    .on_action(cx.listener(Self::on_delete_word_left))
-                    .on_action(cx.listener(Self::on_delete_word_right))
-                    .on_action(cx.listener(Self::on_delete_to_line_start))
-                    .on_action(cx.listener(Self::on_delete_to_line_end))
-                    .on_action(cx.listener(Self::on_delete_line))
-                    .on_action(cx.listener(Self::on_tab))
-                    .on_action(cx.listener(Self::on_enter))
-                    .on_action(cx.listener(Self::on_copy))
-                    .on_action(cx.listener(Self::on_cut))
-                    .on_action(cx.listener(Self::on_paste))
-                    .on_action(cx.listener(Self::on_undo))
-                    .on_action(cx.listener(Self::on_redo))
-                    .on_action(cx.listener(Self::on_open_search))
-                    .on_action(cx.listener(Self::on_open_replace))
-                    .on_action(cx.listener(Self::on_close_search))
-                    .on_action(cx.listener(Self::on_find_next))
-                    .on_action(cx.listener(Self::on_find_prev))
-                    .on_action(cx.listener(Self::on_replace_one))
-                    .on_action(cx.listener(Self::on_replace_all))
-                    .on_action(cx.listener(Self::on_search_backspace))
-                    .on_action(cx.listener(Self::on_replace_backspace))
-                    .on_action(cx.listener(Self::on_input_move_left))
-                    .on_action(cx.listener(Self::on_input_move_right))
-                    .on_action(cx.listener(Self::on_input_move_start))
-                    .on_action(cx.listener(Self::on_input_move_end))
-                    .on_action(cx.listener(Self::on_toggle_search_case))
-                    .on_action(cx.listener(Self::on_toggle_search_whole_word))
-                    .on_action(cx.listener(Self::on_toggle_search_regex))
-                    .on_action(cx.listener(Self::on_toggle_replace))
-                    .on_action(cx.listener(Self::on_toggle_preview))
-                    .on_action(cx.listener(Self::on_bold_selection))
-                    .on_action(cx.listener(Self::on_italic_selection))
-                    .on_action(cx.listener(Self::on_toggle_checkbox))
-                    .when(is_dragging || self.mouse_selecting, |el| {
-                        el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, window, cx| {
-                            if let Some(ref drag) = view.scrollbar_drag {
-                                let handle = view.scroll_handle.0.borrow().base_handle.clone();
-                                update_drag(drag, ev, &handle);
-                                cx.notify();
-                            } else if view.mouse_selecting {
-                                view.on_mouse_move_editor(ev, window, cx);
-                            }
-                        }))
-                        .on_mouse_up(MouseButton::Left, cx.listener(|view, ev: &MouseUpEvent, window, cx| {
+        if show_preview && let Some(ref preview_entity) = self.preview {
+            let preview = preview_entity.clone();
+            let split = div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h(px(0.))
+                .child(editor_pane)
+                .child(div().w(px(1.)).bg(t.separator).flex_shrink_0())
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .min_h(px(0.))
+                        .child(preview),
+                );
+            let root = div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .relative()
+                .bg(t.bg)
+                .track_focus(&self.focus_handle(cx))
+                .on_key_down(cx.listener(Self::on_key_down))
+                .on_action(cx.listener(Self::on_move_left))
+                .on_action(cx.listener(Self::on_move_right))
+                .on_action(cx.listener(Self::on_move_up))
+                .on_action(cx.listener(Self::on_move_down))
+                .on_action(cx.listener(Self::on_move_word_left))
+                .on_action(cx.listener(Self::on_move_word_right))
+                .on_action(cx.listener(Self::on_move_line_start))
+                .on_action(cx.listener(Self::on_move_line_end))
+                .on_action(cx.listener(Self::on_move_doc_start))
+                .on_action(cx.listener(Self::on_move_doc_end))
+                .on_action(cx.listener(Self::on_move_page_up))
+                .on_action(cx.listener(Self::on_move_page_down))
+                .on_action(cx.listener(Self::on_select_left))
+                .on_action(cx.listener(Self::on_select_right))
+                .on_action(cx.listener(Self::on_select_up))
+                .on_action(cx.listener(Self::on_select_down))
+                .on_action(cx.listener(Self::on_select_word_left))
+                .on_action(cx.listener(Self::on_select_word_right))
+                .on_action(cx.listener(Self::on_select_line_start))
+                .on_action(cx.listener(Self::on_select_line_end))
+                .on_action(cx.listener(Self::on_select_doc_start))
+                .on_action(cx.listener(Self::on_select_doc_end))
+                .on_action(cx.listener(Self::on_select_all))
+                .on_action(cx.listener(Self::on_backspace))
+                .on_action(cx.listener(Self::on_delete))
+                .on_action(cx.listener(Self::on_delete_word_left))
+                .on_action(cx.listener(Self::on_delete_word_right))
+                .on_action(cx.listener(Self::on_delete_to_line_start))
+                .on_action(cx.listener(Self::on_delete_to_line_end))
+                .on_action(cx.listener(Self::on_delete_line))
+                .on_action(cx.listener(Self::on_tab))
+                .on_action(cx.listener(Self::on_enter))
+                .on_action(cx.listener(Self::on_copy))
+                .on_action(cx.listener(Self::on_cut))
+                .on_action(cx.listener(Self::on_paste))
+                .on_action(cx.listener(Self::on_undo))
+                .on_action(cx.listener(Self::on_redo))
+                .on_action(cx.listener(Self::on_open_search))
+                .on_action(cx.listener(Self::on_open_replace))
+                .on_action(cx.listener(Self::on_close_search))
+                .on_action(cx.listener(Self::on_find_next))
+                .on_action(cx.listener(Self::on_find_prev))
+                .on_action(cx.listener(Self::on_replace_one))
+                .on_action(cx.listener(Self::on_replace_all))
+                .on_action(cx.listener(Self::on_search_backspace))
+                .on_action(cx.listener(Self::on_replace_backspace))
+                .on_action(cx.listener(Self::on_input_move_left))
+                .on_action(cx.listener(Self::on_input_move_right))
+                .on_action(cx.listener(Self::on_input_move_start))
+                .on_action(cx.listener(Self::on_input_move_end))
+                .on_action(cx.listener(Self::on_toggle_search_case))
+                .on_action(cx.listener(Self::on_toggle_search_whole_word))
+                .on_action(cx.listener(Self::on_toggle_search_regex))
+                .on_action(cx.listener(Self::on_toggle_replace))
+                .on_action(cx.listener(Self::on_toggle_preview))
+                .on_action(cx.listener(Self::on_bold_selection))
+                .on_action(cx.listener(Self::on_italic_selection))
+                .on_action(cx.listener(Self::on_toggle_checkbox))
+                .when(is_dragging || self.mouse_selecting, |el| {
+                    el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, window, cx| {
+                        if let Some(ref drag) = view.scrollbar_drag {
+                            let handle = view.scroll_handle.0.borrow().base_handle.clone();
+                            update_drag(drag, ev, &handle);
+                            cx.notify();
+                        } else if view.mouse_selecting {
+                            view.on_mouse_move_editor(ev, window, cx);
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|view, ev: &MouseUpEvent, window, cx| {
                             view.scrollbar_drag = None;
                             view.on_mouse_up_editor(ev, window, cx);
                             cx.notify();
-                        }))
-                    })
-                    .child(header);
-                let key_ctx = if self.outline_open { "OutlineOverlay" } else if is_md { "Editor markdown" } else { "Editor" };
-                let root = root.key_context(key_ctx);
-                let root = if self.show_search {
-                    root.child(self.render_search_bar(window, &t, cx))
-                } else { root };
-                let root = root.child(split);
-                let root = if self.outline_open {
-                    root.child(self.render_outline_overlay(&t, window, cx))
-                } else { root };
-                return root.into_any();
-            }
+                        }),
+                    )
+                })
+                .child(header);
+            let key_ctx = if self.outline_open {
+                "OutlineOverlay"
+            } else if is_md {
+                "Editor markdown"
+            } else {
+                "Editor"
+            };
+            let root = root.key_context(key_ctx);
+            let root = if self.show_search {
+                root.child(self.render_search_bar(window, &t, cx))
+            } else {
+                root
+            };
+            let root = root.child(split);
+            let root = if self.outline_open {
+                root.child(self.render_outline_overlay(&t, window, cx))
+            } else {
+                root
+            };
+            return root.into_any();
+        }
 
-        let key_ctx = if self.outline_open { "OutlineOverlay" } else if is_md { "Editor markdown" } else { "Editor" };
+        let key_ctx = if self.outline_open {
+            "OutlineOverlay"
+        } else if is_md {
+            "Editor markdown"
+        } else {
+            "Editor"
+        };
 
         let root = div()
             .flex()
@@ -2519,21 +2848,28 @@ impl Render for EditorView {
                         view.on_mouse_move_editor(ev, window, cx);
                     }
                 }))
-                .on_mouse_up(MouseButton::Left, cx.listener(|view, ev: &MouseUpEvent, window, cx| {
-                    view.scrollbar_drag = None;
-                    view.on_mouse_up_editor(ev, window, cx);
-                    cx.notify();
-                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|view, ev: &MouseUpEvent, window, cx| {
+                        view.scrollbar_drag = None;
+                        view.on_mouse_up_editor(ev, window, cx);
+                        cx.notify();
+                    }),
+                )
             })
             .child(header);
 
         let root = if self.show_search {
             root.child(self.render_search_bar(window, &t, cx))
-        } else { root };
+        } else {
+            root
+        };
         let root = root.child(editor_pane);
         let root = if self.outline_open {
             root.child(self.render_outline_overlay(&t, window, cx))
-        } else { root };
+        } else {
+            root
+        };
         root.into_any()
     }
 }
@@ -2579,7 +2915,13 @@ impl EditorView {
             .font_family(t.mono_family.clone())
             .text_size(px(t.font_size_code))
             .text_color(t.text)
-            .child(svg().path(IconName::Search.path()).size(px(15.)).text_color(t.text_muted).flex_shrink_0())
+            .child(
+                svg()
+                    .path(IconName::Search.path())
+                    .size(px(15.))
+                    .text_color(t.text_muted)
+                    .flex_shrink_0(),
+            )
             .child(div().w(px(8.)).flex_shrink_0());
 
         // Mirror search bar: show placeholder only when NOT focused and query is empty.
@@ -2608,29 +2950,49 @@ impl EditorView {
                 let mono_family = t.mono_family.clone();
                 let text_col = t.text;
                 let cursor_col_val = t.cursor;
-                let cursor_color = if cur_on { cursor_col_val } else { gpui::hsla(0., 0., 0., 0.) };
+                let cursor_color = if cur_on {
+                    cursor_col_val
+                } else {
+                    gpui::hsla(0., 0., 0., 0.)
+                };
                 let full_text = format!("{}{}", q_before_owned, q_after_owned);
                 let caret_byte = q_before_owned.len();
                 search_input_base
-                    .child(canvas(
-                        move |_bounds, window, _cx| {
-                            let runs = if full_text.is_empty() { vec![] } else {
-                                vec![TextRun { len: full_text.len(), font: font(mono_family.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
-                            };
-                            window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
-                        },
-                        move |bounds, shaped, window, cx| {
-                            let origin = bounds.origin;
-                            let _ = shaped.paint(origin, caret_h_px, window, cx);
-                            let cx_x = origin.x + shaped.x_for_index(caret_byte);
-                            window.paint_quad(fill(
-                                Bounds::new(point(cx_x, origin.y), size(px(2.0), caret_h_px)),
-                                cursor_color,
-                            ));
-                        },
+                    .child(
+                        canvas(
+                            move |_bounds, window, _cx| {
+                                let runs = if full_text.is_empty() {
+                                    vec![]
+                                } else {
+                                    vec![TextRun {
+                                        len: full_text.len(),
+                                        font: font(mono_family.clone()),
+                                        color: text_col,
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                    }]
+                                };
+                                window.text_system().shape_line(
+                                    SharedString::from(full_text),
+                                    font_sz,
+                                    &runs,
+                                    None,
+                                )
+                            },
+                            move |bounds, shaped, window, cx| {
+                                let origin = bounds.origin;
+                                let _ = shaped.paint(origin, caret_h_px, window, cx);
+                                let cx_x = origin.x + shaped.x_for_index(caret_byte);
+                                window.paint_quad(fill(
+                                    Bounds::new(point(cx_x, origin.y), size(px(2.0), caret_h_px)),
+                                    cursor_color,
+                                ));
+                            },
+                        )
+                        .flex_1()
+                        .h(caret_h_px),
                     )
-                    .flex_1()
-                    .h(caret_h_px))
                     .into_any()
             }
         };
@@ -2682,7 +3044,9 @@ impl EditorView {
                     //   in the FULL outline (not just the filtered view) so the section
                     //   highlight is correct even when a search filter is active.
                     let hl_end = if is_markdown {
-                        outline.items.iter()
+                        outline
+                            .items
+                            .iter()
                             .skip_while(|e| e.source_line <= source_line)
                             .find(|e| e.depth <= depth)
                             .map(|e| e.source_line)
@@ -2714,28 +3078,31 @@ impl EditorView {
                                 cx.notify();
                             }
                         }))
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |view, _, window, cx| {
-                            view.scroll_to_line(source_line);
-                            view.outline_open = false;
-                            view.outline_hover = None;
-                            view.outline_highlight = None;
-                            window.focus(&view.focus_handle);
-                            cx.notify();
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _, window, cx| {
+                                view.scroll_to_line(source_line);
+                                view.outline_open = false;
+                                view.outline_hover = None;
+                                view.outline_highlight = None;
+                                window.focus(&view.focus_handle);
+                                cx.notify();
+                            }),
+                        )
                         .when_some(entry.context.clone(), |el, ctx| {
                             el.child(
                                 div()
                                     .text_color(t.text_muted)
                                     .text_size(px(t.font_size_caption - 1.))
                                     .child(ctx)
-                                    .flex_shrink_0()
+                                    .flex_shrink_0(),
                             )
                         })
                         .child(
                             div()
                                 .flex_1()
                                 .overflow_hidden()
-                                .child(SharedString::from(entry.name.clone()))
+                                .child(SharedString::from(entry.name.clone())),
                         )
                         .into_any()
                 })
@@ -2784,17 +3151,19 @@ impl EditorView {
                 .justify_center()
                 .pt(px(64.))
                 .bg(gpui::hsla(0., 0., 0., 0.35))
-                .on_mouse_down(MouseButton::Left, cx.listener(|view, _, window, cx| {
-                    view.outline_open = false;
-                    view.outline_hover = None;
-                    view.outline_highlight = None;
-                    window.focus(&view.focus_handle);
-                    cx.notify();
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, window, cx| {
+                        view.outline_open = false;
+                        view.outline_hover = None;
+                        view.outline_highlight = None;
+                        window.focus(&view.focus_handle);
+                        cx.notify();
+                    }),
+                )
                 .child(modal),
         )
         .with_priority(2)
         .into_any()
     }
 }
-

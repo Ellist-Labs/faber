@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    # faber-app depends on GPUI which requires macOS frameworks.
+    # Test the five gpui-free crates on Linux; run faber-app tests locally on macOS.
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install build dependencies
+        run: sudo apt-get install -y build-essential
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (gpui-free crates)
+        run: >
+          cargo clippy --locked
+          -p faber-core -p faber-lang -p faber-editor -p faber-settings -p faber-theme
+          --all-targets -- -D warnings
+
+      - name: Test (gpui-free crates)
+        run: >
+          cargo test --locked
+          -p faber-core -p faber-lang -p faber-editor -p faber-settings -p faber-theme

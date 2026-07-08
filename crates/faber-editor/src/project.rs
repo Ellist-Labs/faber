@@ -93,7 +93,9 @@ impl FileTree {
         if !path.starts_with(&self.root) {
             return Ok(());
         }
-        let Ok(rel) = path.strip_prefix(&self.root) else { return Ok(()); };
+        let Ok(rel) = path.strip_prefix(&self.root) else {
+            return Ok(());
+        };
         let components: Vec<_> = rel.components().collect();
         let mut current = self.root.clone();
         // Expand every ancestor (all components except the last = the target itself).
@@ -187,7 +189,13 @@ fn read_dir_sorted(dir: &Path) -> io::Result<Vec<FileNode>> {
                 return None;
             }
             let is_dir = entry.file_type().ok()?.is_dir();
-            Some(FileNode { path: entry.path(), name, is_dir, expanded: false, children: None })
+            Some(FileNode {
+                path: entry.path(),
+                name,
+                is_dir,
+                expanded: false,
+                children: None,
+            })
         })
         .collect();
     nodes.sort_by(|a, b| {
@@ -207,7 +215,9 @@ fn collect_visible(nodes: &[FileNode], depth: usize, rows: &mut Vec<VisibleRow>)
             is_dir: n.is_dir,
             expanded: n.expanded,
         });
-        if n.expanded && let Some(children) = &n.children {
+        if n.expanded
+            && let Some(children) = &n.children
+        {
             collect_visible(children, depth + 1, rows);
         }
     }
@@ -223,8 +233,8 @@ mod tests {
 
     fn fixture() -> PathBuf {
         let n = FIXTURE_N.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir()
-            .join(format!("faber_tree_test_{}_{}", std::process::id(), n));
+        let root =
+            std::env::temp_dir().join(format!("faber_tree_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src/nested")).unwrap();
         fs::create_dir_all(root.join("docs")).unwrap();
@@ -259,7 +269,11 @@ mod tests {
         assert!(!rows.iter().any(|r| r.depth == 2));
 
         tree.toggle(&root.join("src/nested")).unwrap();
-        assert!(tree.visible().iter().any(|r| r.name == "deep.rs" && r.depth == 2));
+        assert!(
+            tree.visible()
+                .iter()
+                .any(|r| r.name == "deep.rs" && r.depth == 2)
+        );
 
         tree.toggle(&src).unwrap();
         let rows = tree.visible();
@@ -313,8 +327,14 @@ mod tests {
         tree.toggle(&root.join("src")).unwrap();
         let rows = tree.visible();
         let main_ix = rows.iter().position(|r| r.name == "main.rs").unwrap();
-        assert_eq!(tree.visible_index_of(&root.join("src/main.rs")), Some(main_ix));
-        assert_eq!(tree.visible_index_of(&root.join("src/nested/deep.rs")), None); // not expanded yet
+        assert_eq!(
+            tree.visible_index_of(&root.join("src/main.rs")),
+            Some(main_ix)
+        );
+        assert_eq!(
+            tree.visible_index_of(&root.join("src/nested/deep.rs")),
+            None
+        ); // not expanded yet
         fs::remove_dir_all(root).unwrap();
     }
 }

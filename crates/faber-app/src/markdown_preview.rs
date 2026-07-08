@@ -1,22 +1,21 @@
 use std::{path::PathBuf, sync::Arc};
 
 use faber_editor::{
-    LanguageRegistry,
-    SyntaxToken,
+    LanguageRegistry, SyntaxToken,
     highlight::HighlightSpan,
     markdown::{Block, BlockKind, InlineRun, ListItem, MarkdownDoc},
 };
 use gpui::{
-    AnyElement, App, Context, Font, FontStyle, FontWeight, Hsla, IntoElement,
-    MouseButton, MouseMoveEvent, Render, ScrollHandle, SharedString, StrikethroughStyle, Styled,
-    TextRun, UnderlineStyle, Window, div, img, prelude::*, px,
+    AnyElement, App, Context, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton,
+    MouseMoveEvent, Render, ScrollHandle, SharedString, StrikethroughStyle, Styled, TextRun,
+    UnderlineStyle, Window, div, img, prelude::*, px,
 };
 use ropey::Rope;
 
 use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
-use crate::ui::{ScrollbarDrag, render_scrollbar};
 use crate::ui::scrollbar::{start_drag, update_drag};
+use crate::ui::{ScrollbarDrag, render_scrollbar};
 
 // ── MarkdownPreviewView ───────────────────────────────────────────────────────
 
@@ -30,11 +29,16 @@ pub struct MarkdownPreviewView {
 impl MarkdownPreviewView {
     pub fn new(rope: &Rope, path: &std::path::Path, registry: &LanguageRegistry) -> Self {
         let source = rope.to_string();
-        let md = Arc::new(faber_editor::markdown::parse_markdown(&source, rope, registry));
+        let md = Arc::new(faber_editor::markdown::parse_markdown(
+            &source, rope, registry,
+        ));
         Self {
             md,
             scroll: ScrollHandle::new(),
-            base_dir: path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf(),
+            base_dir: path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf(),
             scrollbar_drag: None,
         }
     }
@@ -48,15 +52,24 @@ impl MarkdownPreviewView {
 
     /// Scroll the preview to the block whose source_lines best matches `line`.
     pub fn scroll_to_source_line(&self, line: usize) {
-        let ix = self.md.blocks.partition_point(|b| b.source_lines.start <= line);
-        let ix = ix.saturating_sub(1).min(self.md.blocks.len().saturating_sub(1));
+        let ix = self
+            .md
+            .blocks
+            .partition_point(|b| b.source_lines.start <= line);
+        let ix = ix
+            .saturating_sub(1)
+            .min(self.md.blocks.len().saturating_sub(1));
         self.scroll.scroll_to_item(ix);
     }
 
     /// Returns the source line corresponding to the top-visible block.
     pub fn source_line_at_top(&self) -> usize {
         let ix = self.scroll.top_item();
-        self.md.blocks.get(ix).map(|b| b.source_lines.start).unwrap_or(0)
+        self.md
+            .blocks
+            .get(ix)
+            .map(|b| b.source_lines.start)
+            .unwrap_or(0)
     }
 
     /// Apply a new parsed document WITHOUT resetting the scroll position.
@@ -76,15 +89,21 @@ impl MarkdownPreviewView {
     ) -> AnyElement {
         let block = &md.blocks[ix];
         match &block.kind {
-            BlockKind::Heading { level, inlines } => render_heading(*level, inlines, ix, base_dir, t, cx),
+            BlockKind::Heading { level, inlines } => {
+                render_heading(*level, inlines, ix, base_dir, t, cx)
+            }
             BlockKind::Paragraph { inlines } => render_paragraph(inlines, base_dir, t, cx),
-            BlockKind::CodeBlock { lang, text, highlights } => {
-                render_code_block(lang.as_deref(), text, highlights, t)
-            }
+            BlockKind::CodeBlock {
+                lang,
+                text,
+                highlights,
+            } => render_code_block(lang.as_deref(), text, highlights, t),
             BlockKind::Blockquote { children } => render_blockquote(children, base_dir, t, cx),
-            BlockKind::List { ordered, start, items } => {
-                render_list(*ordered, *start, items, base_dir, t, cx)
-            }
+            BlockKind::List {
+                ordered,
+                start,
+                items,
+            } => render_list(*ordered, *start, items, base_dir, t, cx),
             BlockKind::Table { head, rows } => render_table(head, rows, base_dir, t, cx),
             BlockKind::Rule => div().h(px(1.)).bg(t.separator).into_any_element(),
             BlockKind::HtmlBlock { text } => div()
@@ -161,10 +180,13 @@ impl Render for MarkdownPreviewView {
                         cx.notify();
                     }
                 }))
-                .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, cx| {
-                    view.scrollbar_drag = None;
-                    cx.notify();
-                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|view, _, _, cx| {
+                        view.scrollbar_drag = None;
+                        cx.notify();
+                    }),
+                )
             })
             .child(content)
             .child(preview_scroll)
@@ -195,9 +217,9 @@ fn render_heading(
     let top_margin = if block_ix == 0 {
         0.0
     } else if level <= 2 {
-        t.sp6  // 16px for h1/h2
+        t.sp6 // 16px for h1/h2
     } else {
-        t.sp4  // 8px for h3–h6
+        t.sp4 // 8px for h3–h6
     };
 
     let el = div()
@@ -210,13 +232,21 @@ fn render_heading(
         .child(render_inlines(inlines, t, base_dir));
 
     if level <= 2 {
-        el.border_b_1().border_color(t.separator).pb(px(t.sp2)).into_any_element()
+        el.border_b_1()
+            .border_color(t.separator)
+            .pb(px(t.sp2))
+            .into_any_element()
     } else {
         el.into_any_element()
     }
 }
 
-fn render_paragraph(inlines: &[InlineRun], base_dir: &std::path::Path, t: &RuntimeTheme, _cx: &mut App) -> AnyElement {
+fn render_paragraph(
+    inlines: &[InlineRun],
+    base_dir: &std::path::Path,
+    t: &RuntimeTheme,
+    _cx: &mut App,
+) -> AnyElement {
     div()
         .font_family(t.ui_family.clone())
         .text_size(px(t.font_size_body))
@@ -227,31 +257,35 @@ fn render_paragraph(inlines: &[InlineRun], base_dir: &std::path::Path, t: &Runti
 }
 
 /// Render inlines, handling hard breaks (split into stacked lines) and images.
-fn render_inlines(inlines: &[InlineRun], t: &RuntimeTheme, base_dir: &std::path::Path) -> AnyElement {
+fn render_inlines(
+    inlines: &[InlineRun],
+    t: &RuntimeTheme,
+    base_dir: &std::path::Path,
+) -> AnyElement {
     // Split at HardBreak boundaries → stacked lines.
     let has_hard_break = inlines.iter().any(|i| matches!(i, InlineRun::HardBreak));
     if has_hard_break {
-        let lines = split_at_hard_breaks(inlines);
-        let els: Vec<AnyElement> = lines.iter().map(|seg| render_inline_line(seg, t, base_dir)).collect();
-        return div().flex().flex_col().w_full().children(els).into_any_element();
+        let lines = crate::editor_logic::split_at_hard_breaks(inlines);
+        let els: Vec<AnyElement> = lines
+            .iter()
+            .map(|seg| render_inline_line(seg, t, base_dir))
+            .collect();
+        return div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .children(els)
+            .into_any_element();
     }
     render_inline_line(inlines, t, base_dir)
 }
 
-fn split_at_hard_breaks(inlines: &[InlineRun]) -> Vec<Vec<InlineRun>> {
-    let mut lines: Vec<Vec<InlineRun>> = vec![vec![]];
-    for inline in inlines {
-        if matches!(inline, InlineRun::HardBreak) {
-            lines.push(vec![]);
-        } else {
-            lines.last_mut().unwrap().push(inline.clone());
-        }
-    }
-    lines
-}
-
 /// Render a single line of inlines (no HardBreaks), splitting on Image nodes.
-fn render_inline_line(inlines: &[InlineRun], t: &RuntimeTheme, base_dir: &std::path::Path) -> AnyElement {
+fn render_inline_line(
+    inlines: &[InlineRun],
+    t: &RuntimeTheme,
+    base_dir: &std::path::Path,
+) -> AnyElement {
     let has_image = inlines.iter().any(|i| matches!(i, InlineRun::Image { .. }));
     if !has_image {
         return render_text_runs(inlines, t);
@@ -270,7 +304,11 @@ fn render_inline_line(inlines: &[InlineRun], t: &RuntimeTheme, base_dir: &std::p
                 }
                 let is_remote = dest.starts_with("http://") || dest.starts_with("https://");
                 if is_remote {
-                    let label = if alt.is_empty() { "[image]" } else { alt.as_str() };
+                    let label = if alt.is_empty() {
+                        "[image]"
+                    } else {
+                        alt.as_str()
+                    };
                     children.push(
                         div()
                             .text_color(t.text_muted)
@@ -281,7 +319,10 @@ fn render_inline_line(inlines: &[InlineRun], t: &RuntimeTheme, base_dir: &std::p
                 } else {
                     let path = base_dir.join(dest);
                     children.push(
-                        img(path).max_w_full().rounded(px(t.radius_md)).into_any_element(),
+                        img(path)
+                            .max_w_full()
+                            .rounded(px(t.radius_md))
+                            .into_any_element(),
                     );
                 }
             }
@@ -292,7 +333,13 @@ fn render_inline_line(inlines: &[InlineRun], t: &RuntimeTheme, base_dir: &std::p
         children.push(render_text_runs(&text_buf, t));
     }
 
-    div().flex().flex_row().flex_wrap().items_baseline().children(children).into_any_element()
+    div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_baseline()
+        .children(children)
+        .into_any_element()
 }
 
 /// Build a `StyledText` from a slice of text/soft-break inlines (no Image, no HardBreak).
@@ -309,7 +356,11 @@ fn render_text_runs(inlines: &[InlineRun], t: &RuntimeTheme) -> AnyElement {
 
     for inline in inlines {
         match inline {
-            InlineRun::Text { text: t_text, style, link } => {
+            InlineRun::Text {
+                text: t_text,
+                style,
+                link,
+            } => {
                 let start = text.len();
                 text.push_str(t_text);
                 let run_len = text.len() - start;
@@ -323,7 +374,10 @@ fn render_text_runs(inlines: &[InlineRun], t: &RuntimeTheme) -> AnyElement {
                     wavy: false,
                 });
                 let strikethrough = if style.strike {
-                    Some(StrikethroughStyle { thickness: px(1.), color: Some(t.text_muted) })
+                    Some(StrikethroughStyle {
+                        thickness: px(1.),
+                        color: Some(t.text_muted),
+                    })
                 } else {
                     None
                 };
@@ -336,8 +390,16 @@ fn render_text_runs(inlines: &[InlineRun], t: &RuntimeTheme) -> AnyElement {
                     len: run_len,
                     font: Font {
                         family,
-                        weight: if style.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
-                        style: if style.italic { FontStyle::Italic } else { FontStyle::Normal },
+                        weight: if style.bold {
+                            FontWeight::BOLD
+                        } else {
+                            FontWeight::NORMAL
+                        },
+                        style: if style.italic {
+                            FontStyle::Italic
+                        } else {
+                            FontStyle::Normal
+                        },
                         ..default_font.clone()
                     },
                     color,
@@ -438,7 +500,11 @@ fn render_highlighted_line(line: &str, spans: &[HighlightSpan], t: &RuntimeTheme
             (span.end_byte_col as usize).min(line.len())
         };
         if start > byte_cursor {
-            runs.push(plain_run(start - byte_cursor, t.text, t.mono_family.clone()));
+            runs.push(plain_run(
+                start - byte_cursor,
+                t.text,
+                t.mono_family.clone(),
+            ));
         }
         if end > start {
             let col = token_color(span.token, t);
@@ -447,7 +513,11 @@ fn render_highlighted_line(line: &str, spans: &[HighlightSpan], t: &RuntimeTheme
         byte_cursor = end.max(byte_cursor);
     }
     if byte_cursor < line.len() {
-        runs.push(plain_run(line.len() - byte_cursor, t.text, t.mono_family.clone()));
+        runs.push(plain_run(
+            line.len() - byte_cursor,
+            t.text,
+            t.mono_family.clone(),
+        ));
     }
 
     if runs.is_empty() {
@@ -542,7 +612,11 @@ fn render_list(
         .enumerate()
         .map(|(i, item)| {
             let marker: AnyElement = if let Some(checked) = item.task {
-                let (bg, border) = if checked { (t.accent, t.accent) } else { (t.bg, t.border) };
+                let (bg, border) = if checked {
+                    (t.accent, t.accent)
+                } else {
+                    (t.bg, t.border)
+                };
                 let check = if checked { "✓" } else { "" };
                 div()
                     .flex_shrink_0()
@@ -583,12 +657,16 @@ fn render_list(
                 blocks: item.blocks.clone(),
                 outline: vec![],
             });
-            let content = div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(t.sp1)).children(
-                item.blocks
-                    .iter()
-                    .enumerate()
-                    .map(|(j, _)| MarkdownPreviewView::render_block(&md_wrap, j, base_dir, t, cx)),
-            );
+            let content =
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(t.sp1))
+                    .children(item.blocks.iter().enumerate().map(|(j, _)| {
+                        MarkdownPreviewView::render_block(&md_wrap, j, base_dir, t, cx)
+                    }));
 
             div()
                 .flex()
@@ -601,7 +679,12 @@ fn render_list(
         })
         .collect::<Vec<_>>();
 
-    div().flex().flex_col().gap(px(t.sp1)).children(item_els).into_any_element()
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(t.sp1))
+        .children(item_els)
+        .into_any_element()
 }
 
 fn render_table(

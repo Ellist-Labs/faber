@@ -2,15 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use faber_editor::{ChangeSet, Transaction};
 use faber_editor::project_search::{FileSearchResult, ProjectSearchQuery, run};
+use faber_editor::{ChangeSet, Transaction};
 use ropey::Rope;
 
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, ListHorizontalSizingBehavior, MouseButton, MouseMoveEvent,
-    Render, SharedString, Task, TextRun, UniformListScrollHandle, WeakEntity, Window,
-    canvas, div, fill, font, point, prelude::*, px, size, svg, uniform_list,
+    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent,
+    ListHorizontalSizingBehavior, MouseButton, MouseMoveEvent, Render, SharedString, Task, TextRun,
+    UniformListScrollHandle, WeakEntity, Window, canvas, div, fill, font, point, prelude::*, px,
+    size, svg, uniform_list,
 };
 use rust_i18n::t;
 
@@ -21,12 +21,12 @@ use crate::input_helpers::{
 };
 use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
-use crate::ui::{IconName, ScrollbarDrag, h_flex, render_scrollbar, v_flex};
 use crate::ui::scrollbar::{start_drag, update_drag};
+use crate::ui::{IconName, ScrollbarDrag, h_flex, render_scrollbar, v_flex};
 use crate::workspace::Workspace;
 use crate::{
-    ProjectRoot,
-    PsInputBackspace, PsInputMoveLeft, PsInputMoveRight, PsInputMoveStart, PsInputMoveEnd,
+    ProjectRoot, PsInputBackspace, PsInputMoveEnd, PsInputMoveLeft, PsInputMoveRight,
+    PsInputMoveStart,
 };
 
 // ── result row model ──────────────────────────────────────────────────────────
@@ -111,11 +111,7 @@ pub struct ProjectSearchView {
 }
 
 impl ProjectSearchView {
-    pub fn new(
-        workspace: WeakEntity<Workspace>,
-        prefill: String,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(workspace: WeakEntity<Workspace>, prefill: String, cx: &mut Context<Self>) -> Self {
         let mut view = Self {
             focus_handle: cx.focus_handle(),
             workspace,
@@ -193,7 +189,9 @@ impl ProjectSearchView {
 
         let root = cx.global::<ProjectRoot>().0.clone();
         self.root_folder = root.clone();
-        let Some(root) = root else { return; };
+        let Some(root) = root else {
+            return;
+        };
 
         // Collect open-file paths before going async.
         let scope_paths: Option<Vec<PathBuf>> = if self.open_files_only {
@@ -204,7 +202,11 @@ impl ProjectSearchView {
                     .filter_map(|t| {
                         t.editor().and_then(|e| {
                             let p = e.read(cx).doc.path.clone();
-                            if p.as_os_str().is_empty() { None } else { Some(p) }
+                            if p.as_os_str().is_empty() {
+                                None
+                            } else {
+                                Some(p)
+                            }
                         })
                     })
                     .collect()
@@ -231,7 +233,9 @@ impl ProjectSearchView {
 
         self.search_task = Some(cx.spawn(async move |view_entity, cx| {
             // Debounce
-            cx.background_executor().timer(Duration::from_millis(150)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
 
             // Check still valid after debounce.
             let still_valid = view_entity
@@ -279,23 +283,37 @@ impl ProjectSearchView {
                 let path = &result.path;
                 let first_hit_line = result.hits.first().map(|h| h.line).unwrap_or(0);
                 let last_hit_line = result.hits.last().map(|h| h.line).unwrap_or(0);
-                let lines_above = self.context_above.get(path).copied().unwrap_or(0).min(first_hit_line);
+                let lines_above = self
+                    .context_above
+                    .get(path)
+                    .copied()
+                    .unwrap_or(0)
+                    .min(first_hit_line);
                 let file_len = self.file_contents.get(path).map(|v| v.len());
-                let lines_below = self.context_below.get(path).copied().unwrap_or(0)
-                    .min(file_len.map(|n| n.saturating_sub(last_hit_line + 1)).unwrap_or(0));
+                let lines_below = self.context_below.get(path).copied().unwrap_or(0).min(
+                    file_len
+                        .map(|n| n.saturating_sub(last_hit_line + 1))
+                        .unwrap_or(0),
+                );
 
                 if first_hit_line > lines_above {
                     self.rows.push(ResultRow::ExpandAbove { file_idx });
                 }
                 let context_start = first_hit_line.saturating_sub(lines_above);
                 for ln in context_start..first_hit_line {
-                    self.rows.push(ResultRow::ContextLine { file_idx, line_number: ln });
+                    self.rows.push(ResultRow::ContextLine {
+                        file_idx,
+                        line_number: ln,
+                    });
                 }
                 for hit_idx in 0..result.hits.len() {
                     self.rows.push(ResultRow::Hit { file_idx, hit_idx });
                 }
                 for ln in (last_hit_line + 1)..(last_hit_line + 1 + lines_below) {
-                    self.rows.push(ResultRow::ContextLine { file_idx, line_number: ln });
+                    self.rows.push(ResultRow::ContextLine {
+                        file_idx,
+                        line_number: ln,
+                    });
                 }
                 let can_expand_below = match file_len {
                     Some(n) => last_hit_line + 1 + lines_below < n,
@@ -328,12 +346,16 @@ impl ProjectSearchView {
                 Some(ResultRow::ContextLine { file_idx, .. })
                 | Some(ResultRow::Hit { file_idx, .. }) => *file_idx,
                 None => {
-                    if self.results.is_empty() { return; }
+                    if self.results.is_empty() {
+                        return;
+                    }
                     0
                 }
             }
         };
-        let Some(path) = self.results.get(file_idx).map(|r| r.path.clone()) else { return; };
+        let Some(path) = self.results.get(file_idx).map(|r| r.path.clone()) else {
+            return;
+        };
         self.load_file_content(&path);
         *self.context_above.entry(path.clone()).or_insert(0) += 3;
         *self.context_below.entry(path.clone()).or_insert(0) += 3;
@@ -363,7 +385,11 @@ impl ProjectSearchView {
     }
 
     fn all_collapsed(&self) -> bool {
-        !self.results.is_empty() && self.results.iter().all(|r| self.collapsed.contains(&r.path))
+        !self.results.is_empty()
+            && self
+                .results
+                .iter()
+                .all(|r| self.collapsed.contains(&r.path))
     }
 
     // ── cursor blink ──────────────────────────────────────────────────────────
@@ -374,7 +400,9 @@ impl ProjectSearchView {
         let epoch = self.cursor_blink_epoch;
         cx.spawn(async move |view, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_millis(530)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(530))
+                    .await;
                 let cont = view
                     .update(cx, |this, cx| {
                         if this.cursor_blink_epoch != epoch {
@@ -399,7 +427,9 @@ impl ProjectSearchView {
         if self.results.is_empty() || self.replace.is_empty() {
             return;
         }
-        let Some(ws) = self.workspace.upgrade() else { return };
+        let Some(ws) = self.workspace.upgrade() else {
+            return;
+        };
         let replacement = self.replace.clone();
 
         for file_result in &self.results {
@@ -471,20 +501,28 @@ impl ProjectSearchView {
     }
 
     fn do_replace_one(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active_row else { return };
+        let Some(active) = self.active_row else {
+            return;
+        };
         let row = self.rows.get(active).cloned();
         let (file_idx, hit_idx) = match row {
             Some(ResultRow::Hit { file_idx, hit_idx }) => (file_idx, hit_idx),
             Some(ResultRow::FileHeader { file_idx }) => (file_idx, 0),
             _ => return,
         };
-        let Some(file_result) = self.results.get(file_idx) else { return };
-        let Some(hit) = file_result.hits.get(hit_idx) else { return };
+        let Some(file_result) = self.results.get(file_idx) else {
+            return;
+        };
+        let Some(hit) = file_result.hits.get(hit_idx) else {
+            return;
+        };
         let path = file_result.path.clone();
         let hit = hit.clone();
         let replacement = self.replace.clone();
 
-        let Some(ws) = self.workspace.upgrade() else { return };
+        let Some(ws) = self.workspace.upgrade() else {
+            return;
+        };
         let editor_entity: Option<Entity<EditorView>> = ws
             .read(cx)
             .tabs
@@ -630,7 +668,9 @@ impl ProjectSearchView {
             return;
         }
 
-        let Some(ref raw_text) = ks.key_char else { return };
+        let Some(ref raw_text) = ks.key_char else {
+            return;
+        };
         if raw_text.chars().any(|c| c.is_control()) {
             return;
         }
@@ -638,10 +678,16 @@ impl ProjectSearchView {
         let text: &str = if window.capslock().on {
             text_buf = raw_text
                 .chars()
-                .map(|c| if c.is_ascii_alphabetic() {
-                    if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() }
-                } else {
-                    c
+                .map(|c| {
+                    if c.is_ascii_alphabetic() {
+                        if c.is_ascii_uppercase() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            c.to_ascii_uppercase()
+                        }
+                    } else {
+                        c
+                    }
                 })
                 .collect::<String>();
             &text_buf
@@ -660,7 +706,10 @@ impl ProjectSearchView {
         *cursor_ref += text.chars().count();
 
         // Trigger search on query / filter changes.
-        if matches!(active, ActiveInput::Query | ActiveInput::Include | ActiveInput::Exclude) {
+        if matches!(
+            active,
+            ActiveInput::Query | ActiveInput::Include | ActiveInput::Exclude
+        ) {
             self.search_generation += 1;
             self.schedule_search(cx);
         } else {
@@ -725,12 +774,7 @@ impl ProjectSearchView {
         cx.notify();
     }
 
-    fn on_ps_move_end(
-        &mut self,
-        _: &PsInputMoveEnd,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_ps_move_end(&mut self, _: &PsInputMoveEnd, window: &mut Window, cx: &mut Context<Self>) {
         let (text_ref, cursor_ref) = self.active_input_fields(window);
         *cursor_ref = text_ref.chars().count();
         self.reset_blink(cx);
@@ -739,10 +783,7 @@ impl ProjectSearchView {
 
     /// Returns mutable refs to the focused input's text and cursor.
     /// Defaults to query if no input is focused.
-    fn active_input_fields<'a>(
-        &'a mut self,
-        window: &Window,
-    ) -> (&'a mut String, &'a mut usize) {
+    fn active_input_fields<'a>(&'a mut self, window: &Window) -> (&'a mut String, &'a mut usize) {
         if self.replace_handle.is_focused(window) {
             (&mut self.replace, &mut self.replace_cursor)
         } else if self.include_handle.is_focused(window) {
@@ -810,8 +851,12 @@ impl Render for ProjectSearchView {
             })
             // Sub-renders called inline so cx borrows are temporary and don't collide.
             .child(self.render_toolbar(window, &t, cx))
-            .when(replace_open, |el| el.child(self.render_replace_row(window, &t, cx)))
-            .when(filters_open, |el| el.child(self.render_filter_row(window, &t, cx)))
+            .when(replace_open, |el| {
+                el.child(self.render_replace_row(window, &t, cx))
+            })
+            .when(filters_open, |el| {
+                el.child(self.render_filter_row(window, &t, cx))
+            })
             .child({
                 let scrollbar = render_scrollbar(
                     "ps-scrollbar",
@@ -837,7 +882,15 @@ impl Render for ProjectSearchView {
                     .min_h(px(0.))
                     .flex()
                     .flex_row()
-                    .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(body))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .child(body),
+                    )
                     .child(scrollbar)
             })
     }
@@ -880,8 +933,14 @@ impl ProjectSearchView {
                 .flex_shrink_0()
                 .text_size(px(t.font_size_code - 1.))
                 .font_family(t.mono_family.clone())
-                .text_color(if active { t.text_on_accent } else { t.text_subtle })
-                .when(active, move |el| el.bg(t.accent).hover(move |s| s.bg(t.accent_hover)))
+                .text_color(if active {
+                    t.text_on_accent
+                } else {
+                    t.text_subtle
+                })
+                .when(active, move |el| {
+                    el.bg(t.accent).hover(move |s| s.bg(t.accent_hover))
+                })
                 .when(!active, move |el| el.hover(move |s| s.bg(hover_bg)))
                 .child(label)
         };
@@ -900,18 +959,28 @@ impl ProjectSearchView {
             .rounded(px(t.radius_sm))
             .bg(t.bg_sunken)
             .border_1()
-            .border_color(if query_focused { t.border_focus } else { t.border })
+            .border_color(if query_focused {
+                t.border_focus
+            } else {
+                t.border
+            })
             .cursor_text()
             .key_context("ProjectSearch")
             .track_focus(&self.query_handle)
-            .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, window, cx| {
-                window.focus(&ps.query_handle);
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ps, _, window, cx| {
+                    window.focus(&ps.query_handle);
+                    cx.notify();
+                }),
+            )
             .font_family(t.ui_family.clone())
             .text_size(px(t.font_size_caption))
             .child(if self.query.is_empty() && !query_focused {
-                div().text_color(t.text_subtle).child(t!("project_search.placeholder").to_string()).into_any_element()
+                div()
+                    .text_color(t.text_subtle)
+                    .child(t!("project_search.placeholder").to_string())
+                    .into_any_element()
             } else {
                 {
                     let cur_on = query_focused && caret_visible;
@@ -921,13 +990,31 @@ impl ProjectSearchView {
                     let line_h = px(cursor_h);
                     let ui_family = t.ui_family.clone();
                     let text_col = t.text;
-                    let cursor_color = if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
+                    let cursor_color = if cur_on {
+                        t.cursor
+                    } else {
+                        gpui::hsla(0., 0., 0., 0.)
+                    };
                     canvas(
                         move |_bounds, window, _cx| {
-                            let runs = if full_text.is_empty() { vec![] } else {
-                                vec![TextRun { len: full_text.len(), font: font(ui_family.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                            let runs = if full_text.is_empty() {
+                                vec![]
+                            } else {
+                                vec![TextRun {
+                                    len: full_text.len(),
+                                    font: font(ui_family.clone()),
+                                    color: text_col,
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }]
                             };
-                            window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                            window.text_system().shape_line(
+                                SharedString::from(full_text),
+                                font_sz,
+                                &runs,
+                                None,
+                            )
                         },
                         move |bounds, shaped, window, cx| {
                             let origin = bounds.origin;
@@ -955,7 +1042,8 @@ impl ProjectSearchView {
                 t!(
                     "project_search.limit_reached",
                     matches = format!("{}", self.total_matches)
-                ).to_string()
+                )
+                .to_string()
             } else {
                 format!("{}/{}", self.total_matches, self.results.len())
             }
@@ -965,18 +1053,32 @@ impl ProjectSearchView {
 
         // Expand/collapse all toggle
         let all_collapsed = self.all_collapsed();
-        let toggle_icon = if all_collapsed { IconName::UnfoldMore } else { IconName::UnfoldLess };
+        let toggle_icon = if all_collapsed {
+            IconName::UnfoldMore
+        } else {
+            IconName::UnfoldLess
+        };
         let collapse_toggle = icon_btn("ps-collapse-toggle")
             .when(!self.results.is_empty(), |el| {
                 el.on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |ps, _, _, cx| {
-                        if all_collapsed { ps.expand_all_results(); } else { ps.collapse_all_results(); }
+                        if all_collapsed {
+                            ps.expand_all_results();
+                        } else {
+                            ps.collapse_all_results();
+                        }
                         cx.notify();
                     }),
                 )
             })
-            .child(svg().path(toggle_icon.path()).size(px(16.)).text_color(t.text_subtle).flex_shrink_0());
+            .child(
+                svg()
+                    .path(toggle_icon.path())
+                    .size(px(16.))
+                    .text_color(t.text_subtle)
+                    .flex_shrink_0(),
+            );
 
         // Filter toggle
         let filter_active = self.filters_open;
@@ -989,13 +1091,20 @@ impl ProjectSearchView {
                     cx.notify();
                 }),
             )
-            .child(svg().path(IconName::Filter.path()).size(px(14.)).text_color(
-                if filter_active { t.text } else { t.text_subtle },
-            ));
+            .child(
+                svg()
+                    .path(IconName::Filter.path())
+                    .size(px(14.))
+                    .text_color(if filter_active { t.text } else { t.text_subtle }),
+            );
 
         // Replace toggle
         let replace_active = self.replace_open;
-        let replace_toggle_icon = if replace_active { IconName::Remove } else { IconName::Add };
+        let replace_toggle_icon = if replace_active {
+            IconName::Remove
+        } else {
+            IconName::Add
+        };
         let replace_toggle_btn = icon_btn("ps-replace-toggle")
             .when(replace_active, |el| el.bg(t.line_highlight))
             .on_mouse_down(
@@ -1008,9 +1117,16 @@ impl ProjectSearchView {
                     cx.notify();
                 }),
             )
-            .child(svg().path(replace_toggle_icon.path()).size(px(14.)).text_color(
-                if replace_active { t.accent } else { t.text_subtle },
-            ));
+            .child(
+                svg()
+                    .path(replace_toggle_icon.path())
+                    .size(px(14.))
+                    .text_color(if replace_active {
+                        t.accent
+                    } else {
+                        t.text_subtle
+                    }),
+            );
 
         // Option chips
         let case_chip = chip("ps-case", "Aa", self.case_sensitive, t).on_mouse_down(
@@ -1095,14 +1211,21 @@ impl ProjectSearchView {
             .rounded(px(t.radius_sm))
             .bg(t.bg_sunken)
             .border_1()
-            .border_color(if replace_focused { t.border_focus } else { t.border })
+            .border_color(if replace_focused {
+                t.border_focus
+            } else {
+                t.border
+            })
             .cursor_text()
             .key_context("ProjectSearch")
             .track_focus(&self.replace_handle)
-            .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, window, cx| {
-                window.focus(&ps.replace_handle);
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ps, _, window, cx| {
+                    window.focus(&ps.replace_handle);
+                    cx.notify();
+                }),
+            )
             .font_family(t.ui_family.clone())
             .text_size(px(t.font_size_caption))
             .child(if self.replace.is_empty() && !replace_focused {
@@ -1119,13 +1242,31 @@ impl ProjectSearchView {
                     let line_h = px(cursor_h);
                     let ui_family = t.ui_family.clone();
                     let text_col = t.text;
-                    let cursor_color = if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
+                    let cursor_color = if cur_on {
+                        t.cursor
+                    } else {
+                        gpui::hsla(0., 0., 0., 0.)
+                    };
                     canvas(
                         move |_bounds, window, _cx| {
-                            let runs = if full_text.is_empty() { vec![] } else {
-                                vec![TextRun { len: full_text.len(), font: font(ui_family.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                            let runs = if full_text.is_empty() {
+                                vec![]
+                            } else {
+                                vec![TextRun {
+                                    len: full_text.len(),
+                                    font: font(ui_family.clone()),
+                                    color: text_col,
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }]
                             };
-                            window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                            window.text_system().shape_line(
+                                SharedString::from(full_text),
+                                font_sz,
+                                &runs,
+                                None,
+                            )
                         },
                         move |bounds, shaped, window, cx| {
                             let origin = bounds.origin;
@@ -1153,10 +1294,12 @@ impl ProjectSearchView {
             .font_family(t.ui_family.clone())
             .text_color(if has_results { t.text } else { t.text_disabled })
             .when(has_results, |el| {
-                el.cursor_pointer().hover(|s| s.bg(t.line_highlight)).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|ps, _, _, cx| ps.do_replace_one(cx)),
-                )
+                el.cursor_pointer()
+                    .hover(|s| s.bg(t.line_highlight))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ps, _, _, cx| ps.do_replace_one(cx)),
+                    )
             })
             .child(t!("project_search.replace").to_string());
 
@@ -1169,10 +1312,12 @@ impl ProjectSearchView {
             .font_family(t.ui_family.clone())
             .text_color(if has_results { t.text } else { t.text_disabled })
             .when(has_results, |el| {
-                el.cursor_pointer().hover(|s| s.bg(t.line_highlight)).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|ps, _, _, cx| ps.do_replace_all(cx)),
-                )
+                el.cursor_pointer()
+                    .hover(|s| s.bg(t.line_highlight))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ps, _, _, cx| ps.do_replace_all(cx)),
+                    )
             })
             .child(t!("project_search.replace_all").to_string());
 
@@ -1208,8 +1353,13 @@ impl ProjectSearchView {
         let hover_bg = t.line_highlight;
         let radius = t.radius_sm;
 
-        let mk_input = |id: &'static str, text: &str, cursor: usize, placeholder: &str,
-                        focused: bool, caret: bool, t: &RuntimeTheme| {
+        let mk_input = |id: &'static str,
+                        text: &str,
+                        cursor: usize,
+                        placeholder: &str,
+                        focused: bool,
+                        caret: bool,
+                        t: &RuntimeTheme| {
             let cursor_h = t.font_size_code + 2.;
             let (before, after) = split_at_char(text, cursor);
             let placeholder = placeholder.to_string();
@@ -1227,7 +1377,10 @@ impl ProjectSearchView {
                 .text_size(px(t.font_size_caption))
                 .id(id)
                 .child(if text.is_empty() && !focused {
-                    div().text_color(t.text_subtle).child(placeholder).into_any_element()
+                    div()
+                        .text_color(t.text_subtle)
+                        .child(placeholder)
+                        .into_any_element()
                 } else {
                     let cur_on = focused && caret;
                     let full_text = format!("{}{}", before, after);
@@ -1236,13 +1389,31 @@ impl ProjectSearchView {
                     let line_h = px(cursor_h);
                     let ui_family = t.ui_family.clone();
                     let text_col = t.text;
-                    let cursor_color = if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
+                    let cursor_color = if cur_on {
+                        t.cursor
+                    } else {
+                        gpui::hsla(0., 0., 0., 0.)
+                    };
                     canvas(
                         move |_bounds, window, _cx| {
-                            let runs = if full_text.is_empty() { vec![] } else {
-                                vec![TextRun { len: full_text.len(), font: font(ui_family.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                            let runs = if full_text.is_empty() {
+                                vec![]
+                            } else {
+                                vec![TextRun {
+                                    len: full_text.len(),
+                                    font: font(ui_family.clone()),
+                                    color: text_col,
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }]
                             };
-                            window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                            window.text_system().shape_line(
+                                SharedString::from(full_text),
+                                font_sz,
+                                &runs,
+                                None,
+                            )
                         },
                         move |bounds, shaped, window, cx| {
                             let origin = bounds.origin;
@@ -1275,10 +1446,13 @@ impl ProjectSearchView {
         )
         .key_context("ProjectSearch")
         .track_focus(&self.include_handle)
-        .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, window, cx| {
-            window.focus(&ps.include_handle);
-            cx.notify();
-        }));
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|ps, _, window, cx| {
+                window.focus(&ps.include_handle);
+                cx.notify();
+            }),
+        );
 
         let exc_input = mk_input(
             "ps-exclude",
@@ -1291,10 +1465,13 @@ impl ProjectSearchView {
         )
         .key_context("ProjectSearch")
         .track_focus(&self.exclude_handle)
-        .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, window, cx| {
-            window.focus(&ps.exclude_handle);
-            cx.notify();
-        }));
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|ps, _, window, cx| {
+                window.focus(&ps.exclude_handle);
+                cx.notify();
+            }),
+        );
 
         let toggle_chip = |id: &'static str, label: String, active: bool, t: &RuntimeTheme| {
             div()
@@ -1306,7 +1483,11 @@ impl ProjectSearchView {
                 .flex_shrink_0()
                 .text_size(px(t.font_size_caption))
                 .font_family(t.ui_family.clone())
-                .text_color(if active { t.text_on_accent } else { t.text_subtle })
+                .text_color(if active {
+                    t.text_on_accent
+                } else {
+                    t.text_subtle
+                })
                 .when(active, move |el| el.bg(t.accent))
                 .when(!active, move |el| el.hover(move |s| s.bg(hover_bg)))
                 .child(label)
@@ -1318,11 +1499,14 @@ impl ProjectSearchView {
             self.open_files_only,
             t,
         )
-        .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, _, cx| {
-            ps.open_files_only = !ps.open_files_only;
-            ps.search_generation += 1;
-            ps.schedule_search(cx);
-        }));
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|ps, _, _, cx| {
+                ps.open_files_only = !ps.open_files_only;
+                ps.search_generation += 1;
+                ps.schedule_search(cx);
+            }),
+        );
 
         let ignored_chip = toggle_chip(
             "ps-include-ignored",
@@ -1330,11 +1514,14 @@ impl ProjectSearchView {
             self.include_ignored,
             t,
         )
-        .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, _, cx| {
-            ps.include_ignored = !ps.include_ignored;
-            ps.search_generation += 1;
-            ps.schedule_search(cx);
-        }));
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|ps, _, _, cx| {
+                ps.include_ignored = !ps.include_ignored;
+                ps.search_generation += 1;
+                ps.schedule_search(cx);
+            }),
+        );
 
         h_flex()
             .h(px(38.))
@@ -1383,7 +1570,12 @@ impl ProjectSearchView {
                 .justify_center()
                 .gap(px(t.sp2))
                 .font_family(t.ui_family.clone())
-                .child(svg().path(IconName::Search.path()).size(px(28.)).text_color(t.text_disabled))
+                .child(
+                    svg()
+                        .path(IconName::Search.path())
+                        .size(px(28.))
+                        .text_color(t.text_disabled),
+                )
                 .child(
                     div()
                         .text_color(t.text)
@@ -1417,7 +1609,11 @@ impl ProjectSearchView {
                 .justify_center()
                 .rounded(px(radius))
                 .bg(if active { t.accent } else { t.bg_sunken })
-                .text_color(if active { t.text_on_accent } else { t.text_subtle })
+                .text_color(if active {
+                    t.text_on_accent
+                } else {
+                    t.text_subtle
+                })
                 .font_family(t.mono_family.clone())
                 .text_size(px(t.font_size_code - 1.))
                 .child(label)
@@ -1431,12 +1627,11 @@ impl ProjectSearchView {
                 .justify_center()
                 .rounded(px(radius))
                 .bg(if active { t.accent } else { t.bg_sunken })
-                .child(
-                    svg()
-                        .path(icon.path())
-                        .size(px(12.))
-                        .text_color(if active { t.text_on_accent } else { t.text_subtle }),
-                )
+                .child(svg().path(icon.path()).size(px(12.)).text_color(if active {
+                    t.text_on_accent
+                } else {
+                    t.text_subtle
+                }))
         };
         let desc = |text: String, t: &RuntimeTheme| {
             div()
@@ -1483,14 +1678,17 @@ impl ProjectSearchView {
                             .rounded(px(radius))
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover_bg))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, _, cx| {
-                                ps.case_sensitive = !ps.case_sensitive;
-                                if !ps.query.is_empty() {
-                                    ps.search_generation += 1;
-                                    ps.schedule_search(cx);
-                                }
-                                cx.notify();
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|ps, _, _, cx| {
+                                    ps.case_sensitive = !ps.case_sensitive;
+                                    if !ps.query.is_empty() {
+                                        ps.search_generation += 1;
+                                        ps.schedule_search(cx);
+                                    }
+                                    cx.notify();
+                                }),
+                            )
                             .child(mk_chip("Aa", case_active, t))
                             .child(desc(t!("project_search.empty_tip_case").to_string(), t)),
                     )
@@ -1503,14 +1701,17 @@ impl ProjectSearchView {
                             .rounded(px(radius))
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover_bg))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, _, cx| {
-                                ps.whole_word = !ps.whole_word;
-                                if !ps.query.is_empty() {
-                                    ps.search_generation += 1;
-                                    ps.schedule_search(cx);
-                                }
-                                cx.notify();
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|ps, _, _, cx| {
+                                    ps.whole_word = !ps.whole_word;
+                                    if !ps.query.is_empty() {
+                                        ps.search_generation += 1;
+                                        ps.schedule_search(cx);
+                                    }
+                                    cx.notify();
+                                }),
+                            )
                             .child(mk_chip("W", word_active, t))
                             .child(desc(t!("project_search.empty_tip_word").to_string(), t)),
                     )
@@ -1523,14 +1724,17 @@ impl ProjectSearchView {
                             .rounded(px(radius))
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover_bg))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, _, cx| {
-                                ps.regex = !ps.regex;
-                                if !ps.query.is_empty() {
-                                    ps.search_generation += 1;
-                                    ps.schedule_search(cx);
-                                }
-                                cx.notify();
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|ps, _, _, cx| {
+                                    ps.regex = !ps.regex;
+                                    if !ps.query.is_empty() {
+                                        ps.search_generation += 1;
+                                        ps.schedule_search(cx);
+                                    }
+                                    cx.notify();
+                                }),
+                            )
                             .child(mk_chip(".*", regex_active, t))
                             .child(desc(t!("project_search.empty_tip_regex").to_string(), t)),
                     )
@@ -1543,10 +1747,13 @@ impl ProjectSearchView {
                             .rounded(px(radius))
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover_bg))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, _, cx| {
-                                ps.filters_open = !ps.filters_open;
-                                cx.notify();
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|ps, _, _, cx| {
+                                    ps.filters_open = !ps.filters_open;
+                                    cx.notify();
+                                }),
+                            )
                             .child(mk_icon(IconName::Filter, filter_active, t))
                             .child(desc(t!("project_search.empty_tip_filter").to_string(), t)),
                     )
@@ -1559,15 +1766,22 @@ impl ProjectSearchView {
                             .rounded(px(radius))
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover_bg))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|ps, _, window, cx| {
-                                ps.replace_open = !ps.replace_open;
-                                if ps.replace_open {
-                                    window.focus(&ps.replace_handle);
-                                }
-                                cx.notify();
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|ps, _, window, cx| {
+                                    ps.replace_open = !ps.replace_open;
+                                    if ps.replace_open {
+                                        window.focus(&ps.replace_handle);
+                                    }
+                                    cx.notify();
+                                }),
+                            )
                             .child(mk_icon(
-                                if replace_active { IconName::Remove } else { IconName::Add },
+                                if replace_active {
+                                    IconName::Remove
+                                } else {
+                                    IconName::Add
+                                },
                                 replace_active,
                                 t,
                             ))
@@ -1577,25 +1791,17 @@ impl ProjectSearchView {
             .into_any_element()
     }
 
-    fn render_results(
-        &self,
-        t: &RuntimeTheme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_results(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity();
         let t2 = t.clone();
         let row_count = self.rows.len();
 
-        uniform_list(
-            "ps-results",
-            row_count,
-            move |range, _window, cx| {
-                let ps = entity.read(cx);
-                range
-                    .map(|ix| ps.render_result_row(ix, &entity, &t2).into_any_element())
-                    .collect::<Vec<AnyElement>>()
-            },
-        )
+        uniform_list("ps-results", row_count, move |range, _window, cx| {
+            let ps = entity.read(cx);
+            range
+                .map(|ix| ps.render_result_row(ix, &entity, &t2).into_any_element())
+                .collect::<Vec<AnyElement>>()
+        })
         .flex_1()
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
         .track_scroll(self.scroll.clone())
@@ -1618,7 +1824,10 @@ impl ProjectSearchView {
                 let path = file_result.path.clone();
                 let is_collapsed = self.collapsed.contains(&path);
                 let hit_count = file_result.hits.len();
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 let rel_path = self
                     .root_folder
                     .as_ref()
@@ -1629,7 +1838,11 @@ impl ProjectSearchView {
                 let entity = entity.clone();
                 let entity2 = entity.clone();
                 let open_path = path.clone();
-                let first_hit = file_result.hits.first().map(|h| (h.line, h.col)).unwrap_or((0, 0));
+                let first_hit = file_result
+                    .hits
+                    .first()
+                    .map(|h| (h.line, h.col))
+                    .unwrap_or((0, 0));
                 let open_hl_color = t.line_highlight;
                 let open_radius = t.radius_sm;
 
@@ -1667,7 +1880,12 @@ impl ProjectSearchView {
                     )
                     .child(gpui::img(icon).size(px(14.0)).flex_shrink_0())
                     .child(div().text_color(t.text).child(name))
-                    .child(div().text_color(t.text_subtle).flex_1().child(format!(" — {}", rel_path)))
+                    .child(
+                        div()
+                            .text_color(t.text_subtle)
+                            .flex_1()
+                            .child(format!(" — {}", rel_path)),
+                    )
                     .child(
                         div()
                             .px_2()
@@ -1693,7 +1911,13 @@ impl ProjectSearchView {
                                 entity2.update(cx, |ps, cx| {
                                     if let Some(ws) = ps.workspace.upgrade() {
                                         ws.update(cx, |ws, cx| {
-                                            ws.navigate_to(&open_path, first_hit.0, first_hit.1, window, cx);
+                                            ws.navigate_to(
+                                                &open_path,
+                                                first_hit.0,
+                                                first_hit.1,
+                                                window,
+                                                cx,
+                                            );
                                         });
                                     }
                                 });
@@ -1723,13 +1947,29 @@ impl ProjectSearchView {
                             ps.rebuild_rows();
                         });
                     })
-                    .child(svg().path(IconName::UnfoldMore.path()).size(px(12.)).text_color(t.text_subtle).flex_shrink_0())
-                    .child(div().text_size(px(t.font_size_caption - 1.)).text_color(t.text_subtle).font_family(t.ui_family.clone()).child("more above"))
+                    .child(
+                        svg()
+                            .path(IconName::UnfoldMore.path())
+                            .size(px(12.))
+                            .text_color(t.text_subtle)
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(t.font_size_caption - 1.))
+                            .text_color(t.text_subtle)
+                            .font_family(t.ui_family.clone())
+                            .child("more above"),
+                    )
             }
-            ResultRow::ContextLine { file_idx, line_number } => {
+            ResultRow::ContextLine {
+                file_idx,
+                line_number,
+            } => {
                 let file_result = &self.results[file_idx];
                 let path = file_result.path.clone();
-                let line_text = self.file_contents
+                let line_text = self
+                    .file_contents
                     .get(&file_result.path)
                     .and_then(|lines| lines.get(line_number))
                     .cloned()
@@ -1756,8 +1996,21 @@ impl ProjectSearchView {
                             }
                         });
                     })
-                    .child(div().min_w(px(32.)).flex_shrink_0().text_color(t.text_subtle).child(format!("{}", line_number + 1)))
-                    .child(div().flex_1().min_w(px(0.)).overflow_hidden().text_color(t.text_subtle).child(SharedString::from(line_text)))
+                    .child(
+                        div()
+                            .min_w(px(32.))
+                            .flex_shrink_0()
+                            .text_color(t.text_subtle)
+                            .child(format!("{}", line_number + 1)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .text_color(t.text_subtle)
+                            .child(SharedString::from(line_text)),
+                    )
             }
             ResultRow::ExpandBelow { file_idx } => {
                 let file_result = &self.results[file_idx];
@@ -1781,8 +2034,20 @@ impl ProjectSearchView {
                             ps.rebuild_rows();
                         });
                     })
-                    .child(svg().path(IconName::UnfoldLess.path()).size(px(12.)).text_color(t.text_subtle).flex_shrink_0())
-                    .child(div().text_size(px(t.font_size_caption - 1.)).text_color(t.text_subtle).font_family(t.ui_family.clone()).child("more below"))
+                    .child(
+                        svg()
+                            .path(IconName::UnfoldLess.path())
+                            .size(px(12.))
+                            .text_color(t.text_subtle)
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(t.font_size_caption - 1.))
+                            .text_color(t.text_subtle)
+                            .font_family(t.ui_family.clone())
+                            .child("more below"),
+                    )
             }
             ResultRow::Hit { file_idx, hit_idx } => {
                 let file_result = &self.results[file_idx];
@@ -1860,7 +2125,12 @@ fn build_preview_spans(
 
         if pos < start {
             let text: String = chars[pos..start].iter().collect();
-            spans.push(div().text_color(t.text_muted).child(SharedString::from(text)).into_any_element());
+            spans.push(
+                div()
+                    .text_color(t.text_muted)
+                    .child(SharedString::from(text))
+                    .into_any_element(),
+            );
         }
         if start < end {
             let text: String = chars[start..end].iter().collect();
@@ -1878,7 +2148,12 @@ fn build_preview_spans(
 
     if pos < chars.len() {
         let text: String = chars[pos..].iter().collect();
-        spans.push(div().text_color(t.text_muted).child(SharedString::from(text)).into_any_element());
+        spans.push(
+            div()
+                .text_color(t.text_muted)
+                .child(SharedString::from(text))
+                .into_any_element(),
+        );
     }
 
     h_flex()
@@ -1888,4 +2163,3 @@ fn build_preview_spans(
         .children(spans)
         .into_any_element()
 }
-

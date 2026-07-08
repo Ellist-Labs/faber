@@ -52,7 +52,10 @@ mod tests {
         let rope = Rope::from_str(src);
         let (line, col) = char_to_lsp(&rope, char_idx);
         let back = lsp_to_char(&rope, line, col);
-        assert_eq!(back, char_idx, "round-trip failed for '{src}' at {char_idx}");
+        assert_eq!(
+            back, char_idx,
+            "round-trip failed for '{src}' at {char_idx}"
+        );
     }
 
     #[test]
@@ -80,8 +83,8 @@ mod tests {
         let (_, col_emoji) = char_to_lsp(&rope, 1);
         let (_, col_b) = char_to_lsp(&rope, 2);
         assert_eq!(col_a, 0);
-        assert_eq!(col_emoji, 1);   // 'a' = 1 UTF-16 unit
-        assert_eq!(col_b, 3);       // 'a'(1) + '😀'(2) = 3
+        assert_eq!(col_emoji, 1); // 'a' = 1 UTF-16 unit
+        assert_eq!(col_b, 3); // 'a'(1) + '😀'(2) = 3
 
         round_trip("a\u{1F600}b", 0);
         round_trip("a\u{1F600}b", 1);

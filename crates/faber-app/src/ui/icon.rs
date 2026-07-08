@@ -63,7 +63,11 @@ pub struct Icon {
 
 impl Icon {
     pub fn new(name: IconName) -> Self {
-        Self { name, size: px(16.), color: None }
+        Self {
+            name,
+            size: px(16.),
+            color: None,
+        }
     }
 
     pub fn size(mut self, size: Pixels) -> Self {
@@ -80,10 +84,7 @@ impl Icon {
 impl RenderOnce for Icon {
     fn render(self, _window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
         let color = self.color.unwrap_or(cx.theme().text);
-        let el: Svg = svg()
-            .path(self.name.path())
-            .size(self.size)
-            .flex_shrink_0();
+        let el: Svg = svg().path(self.name.path()).size(self.size).flex_shrink_0();
         el.text_color(color)
     }
 }
