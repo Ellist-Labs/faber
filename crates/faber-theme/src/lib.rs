@@ -84,11 +84,19 @@ pub struct HighlightStyle {
 
 impl HighlightStyle {
     pub const fn color(c: HexColor) -> Self {
-        Self { color: c, bold: false, italic: false }
+        Self {
+            color: c,
+            bold: false,
+            italic: false,
+        }
     }
 
     pub const fn italic(c: HexColor) -> Self {
-        Self { color: c, bold: false, italic: true }
+        Self {
+            color: c,
+            bold: false,
+            italic: true,
+        }
     }
 }
 

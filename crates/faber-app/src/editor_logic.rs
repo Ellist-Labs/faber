@@ -11,7 +11,11 @@ use faber_editor::{
 /// Returns each enclosing item (outermost → innermost).
 pub(crate) fn breadcrumb_stack<'a>(outline: &'a Outline, top_line: usize) -> Vec<&'a OutlineItem> {
     let mut stack: Vec<&'a OutlineItem> = Vec::new();
-    for e in outline.items.iter().take_while(|e| e.source_line <= top_line) {
+    for e in outline
+        .items
+        .iter()
+        .take_while(|e| e.source_line <= top_line)
+    {
         while stack.last().is_some_and(|last| last.depth >= e.depth) {
             stack.pop();
         }
@@ -79,7 +83,9 @@ mod tests {
 
     #[test]
     fn breadcrumb_single_item() {
-        let outline = Outline { items: vec![make_item("main", 1, 0)] };
+        let outline = Outline {
+            items: vec![make_item("main", 1, 0)],
+        };
         let stack = breadcrumb_stack(&outline, 5);
         assert_eq!(stack.len(), 1);
         assert_eq!(stack[0].name, "main");
@@ -87,7 +93,9 @@ mod tests {
 
     #[test]
     fn breadcrumb_item_after_top_line_excluded() {
-        let outline = Outline { items: vec![make_item("foo", 1, 10)] };
+        let outline = Outline {
+            items: vec![make_item("foo", 1, 10)],
+        };
         assert!(breadcrumb_stack(&outline, 5).is_empty());
     }
 
@@ -118,7 +126,9 @@ mod tests {
 
     #[test]
     fn breadcrumb_exact_line_match_included() {
-        let outline = Outline { items: vec![make_item("fn exact", 1, 5)] };
+        let outline = Outline {
+            items: vec![make_item("fn exact", 1, 5)],
+        };
         let stack = breadcrumb_stack(&outline, 5);
         assert_eq!(stack.len(), 1);
     }

@@ -63,38 +63,51 @@ impl OutlineCache {
     /// O(node_count) — called once per edit in `Document::apply`, not per frame.
     /// Returns an empty `Outline` when no outline query is configured.
     pub fn compute(&self, tree: &Tree, source: &str) -> Outline {
-        let Some(ref g) = self.grammar else { return Outline::default() };
-        let Some(ref config) = g.outline else { return Outline::default() };
+        let Some(ref g) = self.grammar else {
+            return Outline::default();
+        };
+        let Some(ref config) = g.outline else {
+            return Outline::default();
+        };
 
         let src_bytes = source.as_bytes();
         let root = tree.root_node();
 
         // Collect raw (byte_range, start_line, end_line, name, context) tuples via query matches.
         // Each match groups @item + @name + optional @context from one pattern.
-        let mut raw: Vec<(Range<usize>, usize, usize, String, Option<String>)> = Vec::new();
+        type RawItem = (Range<usize>, usize, usize, String, Option<String>);
+        let mut raw: Vec<RawItem> = Vec::new();
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&config.query, root, src_bytes);
 
         matches.advance();
         while let Some(mat) = matches.get() {
-            let item_node = mat.captures.iter().find(|c| c.index == config.item_ix).map(|c| c.node);
-            let name_node = mat.captures.iter().find(|c| c.index == config.name_ix).map(|c| c.node);
-            let ctx_node = config.context_ix.and_then(|ix| {
-                mat.captures.iter().find(|c| c.index == ix).map(|c| c.node)
-            });
+            let item_node = mat
+                .captures
+                .iter()
+                .find(|c| c.index == config.item_ix)
+                .map(|c| c.node);
+            let name_node = mat
+                .captures
+                .iter()
+                .find(|c| c.index == config.name_ix)
+                .map(|c| c.node);
+            let ctx_node = config
+                .context_ix
+                .and_then(|ix| mat.captures.iter().find(|c| c.index == ix).map(|c| c.node));
 
             if let (Some(item), Some(name)) = (item_node, name_node) {
                 let start = item.start_byte();
                 let end = item.end_byte();
                 let start_line = item.start_position().row;
                 let end_line = item.end_position().row;
-                let name_text = source.get(name.start_byte()..name.end_byte())
+                let name_text = source
+                    .get(name.start_byte()..name.end_byte())
                     .unwrap_or("")
                     .to_string();
-                let ctx_text = ctx_node.and_then(|n| {
-                    source.get(n.start_byte()..n.end_byte()).map(str::to_string)
-                });
+                let ctx_text = ctx_node
+                    .and_then(|n| source.get(n.start_byte()..n.end_byte()).map(str::to_string));
                 raw.push((start..end, start_line, end_line, name_text, ctx_text));
             }
 
@@ -112,7 +125,7 @@ impl OutlineCache {
         let mut items: Vec<OutlineItem> = Vec::with_capacity(raw.len());
 
         for (range, source_line, end_line, name, context) in raw {
-            while stack_ends.last().map_or(false, |&end| end <= range.start) {
+            while stack_ends.last().is_some_and(|&end| end <= range.start) {
                 stack_ends.pop();
             }
             let depth = stack_ends.len() as u32;
@@ -163,9 +176,16 @@ mod tests {
         assert!(names.contains(&"Foo"), "struct expected");
         assert!(names.contains(&"a"), "method a expected");
         assert!(names.contains(&"b"), "method b expected");
-        let impl_depth = items.iter().find(|i| i.name == "Foo" && i.context.as_deref() == Some("impl"))
-            .map(|i| i.depth).unwrap_or(99);
-        let a_depth = items.iter().find(|i| i.name == "a").map(|i| i.depth).unwrap_or(99);
+        let impl_depth = items
+            .iter()
+            .find(|i| i.name == "Foo" && i.context.as_deref() == Some("impl"))
+            .map(|i| i.depth)
+            .unwrap_or(99);
+        let a_depth = items
+            .iter()
+            .find(|i| i.name == "a")
+            .map(|i| i.depth)
+            .unwrap_or(99);
         assert!(a_depth > impl_depth, "method should be deeper than impl");
     }
 
@@ -177,8 +197,15 @@ mod tests {
         let depth_of = |name: &str| items.iter().find(|i| i.name == name).map(|i| i.depth);
         assert_eq!(depth_of("app"), Some(0), "mod at depth 0");
         assert!(depth_of("S").unwrap_or(0) > 0, "struct inside mod");
-        assert!(depth_of("bar").unwrap_or(0) > depth_of("S").unwrap_or(0), "fn deeper than struct");
-        assert_eq!(depth_of("free"), depth_of("S"), "free fn and struct at same depth");
+        assert!(
+            depth_of("bar").unwrap_or(0) > depth_of("S").unwrap_or(0),
+            "fn deeper than struct"
+        );
+        assert_eq!(
+            depth_of("free"),
+            depth_of("S"),
+            "free fn and struct at same depth"
+        );
     }
 
     #[test]
@@ -188,6 +215,9 @@ mod tests {
         let items = &doc.outline.items;
         let outer = items.iter().find(|i| i.name == "outer").map(|i| i.depth);
         let inner = items.iter().find(|i| i.name == "inner").map(|i| i.depth);
-        assert!(inner.unwrap_or(0) > outer.unwrap_or(99), "inner fn deeper than outer");
+        assert!(
+            inner.unwrap_or(0) > outer.unwrap_or(99),
+            "inner fn deeper than outer"
+        );
     }
 }

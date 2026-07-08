@@ -36,8 +36,16 @@ pub struct ChangeSet {
 impl ChangeSet {
     /// Identity change: retain everything.
     pub fn identity(len: usize) -> Self {
-        let changes = if len == 0 { vec![] } else { vec![Operation::Retain(len)] };
-        Self { changes, len_before: len, len_after: len }
+        let changes = if len == 0 {
+            vec![]
+        } else {
+            vec![Operation::Retain(len)]
+        };
+        Self {
+            changes,
+            len_before: len,
+            len_after: len,
+        }
     }
 
     /// Build from a sorted, non-overlapping list of `(start, end, replacement)` char ranges.
@@ -75,7 +83,11 @@ impl ChangeSet {
             len_after += doc_len - cursor;
         }
 
-        Self { changes: ops, len_before: doc_len, len_after }
+        Self {
+            changes: ops,
+            len_before: doc_len,
+            len_after,
+        }
     }
 
     // ── application ──────────────────────────────────────────────────────────
@@ -120,7 +132,11 @@ impl ChangeSet {
             }
         }
 
-        ChangeSet { changes: inv_ops, len_before: self.len_after, len_after: self.len_before }
+        ChangeSet {
+            changes: inv_ops,
+            len_before: self.len_after,
+            len_after: self.len_before,
+        }
     }
 
     // ── position mapping ─────────────────────────────────────────────────────
@@ -175,7 +191,11 @@ impl ChangeSet {
     /// to tree-sitter `InputEdit`s or LSP `TextEdit`s without pulling tree-sitter
     /// into faber-core.
     pub fn iter_changes(&self) -> ChangesIter<'_> {
-        ChangesIter { ops: self.changes.iter(), old_pos: 0, new_pos: 0 }
+        ChangesIter {
+            ops: self.changes.iter(),
+            old_pos: 0,
+            new_pos: 0,
+        }
     }
 
     // ── composition ──────────────────────────────────────────────────────────
@@ -239,7 +259,11 @@ impl ChangeSet {
                     if n <= m {
                         push_insert(&mut result, s);
                         a_cur = a_iter.next();
-                        b_cur = if m > n { Some(Operation::Retain(m - n)) } else { b_iter.next() };
+                        b_cur = if m > n {
+                            Some(Operation::Retain(m - n))
+                        } else {
+                            b_iter.next()
+                        };
                     } else {
                         // b retains only part of a's insert
                         let (kept, rest) = str_split_at_char(s, m);
@@ -254,7 +278,11 @@ impl ChangeSet {
                     let n = s.chars().count();
                     if n <= m {
                         a_cur = a_iter.next();
-                        b_cur = if m > n { Some(Operation::Delete(m - n)) } else { b_iter.next() };
+                        b_cur = if m > n {
+                            Some(Operation::Delete(m - n))
+                        } else {
+                            b_iter.next()
+                        };
                     } else {
                         let rest = s.chars().skip(m).collect::<String>();
                         a_cur = Some(Operation::Insert(rest));
@@ -266,21 +294,41 @@ impl ChangeSet {
                 (Some(Operation::Retain(ra)), Some(Operation::Retain(rb))) => {
                     let n = ra.min(rb);
                     push_retain(&mut result, n);
-                    a_cur = if ra > n { Some(Operation::Retain(ra - n)) } else { a_iter.next() };
-                    b_cur = if rb > n { Some(Operation::Retain(rb - n)) } else { b_iter.next() };
+                    a_cur = if ra > n {
+                        Some(Operation::Retain(ra - n))
+                    } else {
+                        a_iter.next()
+                    };
+                    b_cur = if rb > n {
+                        Some(Operation::Retain(rb - n))
+                    } else {
+                        b_iter.next()
+                    };
                 }
 
                 // Rule 4: a retains, b deletes.
                 (Some(Operation::Retain(ra)), Some(Operation::Delete(db))) => {
                     let n = ra.min(db);
                     push_delete(&mut result, n);
-                    a_cur = if ra > n { Some(Operation::Retain(ra - n)) } else { a_iter.next() };
-                    b_cur = if db > n { Some(Operation::Delete(db - n)) } else { b_iter.next() };
+                    a_cur = if ra > n {
+                        Some(Operation::Retain(ra - n))
+                    } else {
+                        a_iter.next()
+                    };
+                    b_cur = if db > n {
+                        Some(Operation::Delete(db - n))
+                    } else {
+                        b_iter.next()
+                    };
                 }
             }
         }
 
-        ChangeSet { changes: result, len_before, len_after }
+        ChangeSet {
+            changes: result,
+            len_before,
+            len_after,
+        }
     }
 }
 
@@ -401,7 +449,10 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn from_changeset(changes: ChangeSet) -> Self {
-        Self { changes, selection: None }
+        Self {
+            changes,
+            selection: None,
+        }
     }
 
     pub fn with_selection(mut self, sel: SelectionSet) -> Self {
@@ -413,24 +464,27 @@ impl Transaction {
     pub fn insert(rope: &Rope, pos: usize, text: impl Into<String>) -> Self {
         let text = text.into();
         let doc_len = rope.len_chars();
-        let changes =
-            ChangeSet::from_changes(doc_len, std::iter::once((pos, pos, text)));
+        let changes = ChangeSet::from_changes(doc_len, std::iter::once((pos, pos, text)));
         Self::from_changeset(changes)
     }
 
     /// A single-range delete of `range` (char offsets, exclusive end).
     pub fn delete(rope: &Rope, range: std::ops::Range<usize>) -> Self {
         let doc_len = rope.len_chars();
-        let changes =
-            ChangeSet::from_changes(doc_len, std::iter::once((range.start, range.end, String::new())));
+        let changes = ChangeSet::from_changes(
+            doc_len,
+            std::iter::once((range.start, range.end, String::new())),
+        );
         Self::from_changeset(changes)
     }
 
     /// A single replace: delete `range` and insert `text`.
     pub fn replace(rope: &Rope, range: std::ops::Range<usize>, text: impl Into<String>) -> Self {
         let doc_len = rope.len_chars();
-        let changes =
-            ChangeSet::from_changes(doc_len, std::iter::once((range.start, range.end, text.into())));
+        let changes = ChangeSet::from_changes(
+            doc_len,
+            std::iter::once((range.start, range.end, text.into())),
+        );
         Self::from_changeset(changes)
     }
 }
@@ -452,7 +506,7 @@ mod tests {
 
     #[test]
     fn insert_at_start() {
-        let cs = ChangeSet::from_changes(5, [( 0, 0, "XYZ".into())]);
+        let cs = ChangeSet::from_changes(5, [(0, 0, "XYZ".into())]);
         assert_eq!(apply("hello", &cs), "XYZhello");
     }
 

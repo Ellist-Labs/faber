@@ -29,7 +29,9 @@ pub fn load_file(path: &Path) -> LoadedFile {
         Err(_) => return LoadedFile::Unreadable,
         _ => {}
     }
-    let Ok(bytes) = std::fs::read(path) else { return LoadedFile::Unreadable };
+    let Ok(bytes) = std::fs::read(path) else {
+        return LoadedFile::Unreadable;
+    };
     if bytes.contains(&0u8) {
         return LoadedFile::Binary;
     }
@@ -45,7 +47,10 @@ pub enum PreviewContent {
     TooLarge,
     Binary,
     Unreadable,
-    Doc { doc: Box<Document>, lines: Vec<SharedString> },
+    Doc {
+        doc: Box<Document>,
+        lines: Vec<SharedString>,
+    },
 }
 
 /// Read-only syntax-highlighted preview pane state, embedded in the finder.
@@ -83,7 +88,10 @@ impl FilePreview {
                     .take(PREVIEW_MAX_LINES)
                     .map(|l| SharedString::from(l.trim_end_matches('\r').to_string()))
                     .collect();
-                PreviewContent::Doc { doc: Box::new(doc), lines }
+                PreviewContent::Doc {
+                    doc: Box::new(doc),
+                    lines,
+                }
             }
         };
         self.path = Some(path);
@@ -130,19 +138,21 @@ pub fn render_preview(
                 range
                     .map(|i| {
                         let text = lines[i].clone();
-                        let runs =
-                            EditorView::build_text_runs(&text, doc.highlight_spans(i), &t2);
+                        let runs = EditorView::build_text_runs(&text, doc.highlight_spans(i), &t2);
                         div()
                             .h(line_h)
                             .w_full()
-                            .child(canvas(
-                                move |_bounds, window, _cx| {
-                                    window.text_system().shape_line(text, font_sz, &runs, None)
-                                },
-                                move |bounds, shaped, window, cx| {
-                                    let _ = shaped.paint(bounds.origin, line_h, window, cx);
-                                },
-                            ).size_full())
+                            .child(
+                                canvas(
+                                    move |_bounds, window, _cx| {
+                                        window.text_system().shape_line(text, font_sz, &runs, None)
+                                    },
+                                    move |bounds, shaped, window, cx| {
+                                        let _ = shaped.paint(bounds.origin, line_h, window, cx);
+                                    },
+                                )
+                                .size_full(),
+                            )
                             .into_any_element()
                     })
                     .collect()
@@ -154,5 +164,11 @@ pub fn render_preview(
         }
     };
 
-    v_flex().flex_1().min_w(px(0.)).min_h(px(0.)).bg(t.bg).child(body).into_any_element()
+    v_flex()
+        .flex_1()
+        .min_w(px(0.))
+        .min_h(px(0.))
+        .bg(t.bg)
+        .child(body)
+        .into_any_element()
 }

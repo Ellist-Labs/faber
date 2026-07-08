@@ -23,13 +23,13 @@ use crate::project_search_view::ProjectSearchView;
 use crate::settings_view::{SettingsStore, SettingsView};
 use crate::sidebar::{SidebarItem, SidebarItemKind, SidebarState, default_items};
 use crate::theme::{ActiveTheme, RuntimeTheme};
-use crate::ui::{IconName, ScrollbarDrag, h_flex, v_flex};
 use crate::ui::scrollbar::update_drag;
+use crate::ui::{IconName, ScrollbarDrag, h_flex, v_flex};
 use crate::welcome_view::render_welcome;
 use crate::{
     CloseFile, CloseFolder, CloseTab, NewFile, NextTab, OpenFile, OpenFileFinder,
-    OpenFileFinderPreview, OpenFolder, OpenProjectSearch, OpenSettings, PrevTab, ProjectRoot,
-    Quit, SaveFile, ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
+    OpenFileFinderPreview, OpenFolder, OpenProjectSearch, OpenSettings, PrevTab, ProjectRoot, Quit,
+    SaveFile, ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
 };
 
 /// Rescan the file index when the cached snapshot is older than this.
@@ -80,11 +80,11 @@ impl RenderOnce for ContextMenuItem {
             .text_color(if self.enabled { t.text } else { t.text_subtle })
             .text_size(px(t.font_size_caption))
             .font_family(t.ui_family.clone())
-            .when(self.enabled, |el| el.cursor_pointer().hover(|s| s.bg(t.line_highlight)))
             .when(self.enabled, |el| {
-                el.on_mouse_down(MouseButton::Left, move |e, w, cx| {
-                    (self.on_click)(e, w, cx)
-                })
+                el.cursor_pointer().hover(|s| s.bg(t.line_highlight))
+            })
+            .when(self.enabled, |el| {
+                el.on_mouse_down(MouseButton::Left, move |e, w, cx| (self.on_click)(e, w, cx))
             })
             .child(self.label)
     }
@@ -176,7 +176,10 @@ impl Workspace {
         cx.observe_window_activation(window, |ws, window, cx| {
             let auto_save = cx.global::<SettingsStore>().0.auto_save;
             if !window.is_window_active()
-                && matches!(auto_save, AutoSave::OnWindowChange | AutoSave::OnFocusChange)
+                && matches!(
+                    auto_save,
+                    AutoSave::OnWindowChange | AutoSave::OnFocusChange
+                )
             {
                 ws.save_all_dirty(cx);
             }
@@ -186,8 +189,14 @@ impl Workspace {
     }
 
     fn push_editor_tab(&mut self, editor: Entity<EditorView>, cx: &mut Context<Self>) {
-        cx.subscribe(&editor, |ws, _, _: &EditorEvent, cx| ws.on_editor_edited(cx)).detach();
-        self.tabs.push(Tab { id: self.next_tab_id, content: TabContent::Editor(editor) });
+        cx.subscribe(&editor, |ws, _, _: &EditorEvent, cx| {
+            ws.on_editor_edited(cx)
+        })
+        .detach();
+        self.tabs.push(Tab {
+            id: self.next_tab_id,
+            content: TabContent::Editor(editor),
+        });
         self.next_tab_id += 1;
         self.active = Some(self.tabs.len() - 1);
     }
@@ -216,12 +225,17 @@ impl Workspace {
 
     /// Navigate the active editor to `line`, moving the cursor and scrolling.
     pub(crate) fn outline_navigate(&mut self, line: usize, cx: &mut Context<Self>) {
-        if let Some(editor) = self.active.and_then(|i| self.tabs.get(i)).and_then(|t| t.editor()) {
+        if let Some(editor) = self
+            .active
+            .and_then(|i| self.tabs.get(i))
+            .and_then(|t| t.editor())
+        {
             editor.update(cx, |ev, _cx| {
                 let char_idx = ev.line_starts.get(line).copied().unwrap_or(0);
                 ev.sel.head = char_idx;
                 ev.sel.anchor = char_idx;
-                ev.scroll_handle.scroll_to_item(line, gpui::ScrollStrategy::Top);
+                ev.scroll_handle
+                    .scroll_to_item(line, gpui::ScrollStrategy::Top);
             });
         }
     }
@@ -229,8 +243,12 @@ impl Workspace {
     /// Saves every dirty document that has a path; untitled docs are skipped
     /// (VS Code behavior). Never touches content or history.
     fn save_all_dirty(&mut self, cx: &mut Context<Self>) {
-        let editors: Vec<Entity<EditorView>> =
-            self.tabs.iter().filter_map(|t| t.editor()).cloned().collect();
+        let editors: Vec<Entity<EditorView>> = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.editor())
+            .cloned()
+            .collect();
         for editor in editors {
             Self::save_doc_now(&editor, cx);
         }
@@ -267,9 +285,10 @@ impl Workspace {
         // Leaving a tab counts as a focus change for auto-save purposes.
         if cx.global::<SettingsStore>().0.auto_save == AutoSave::OnFocusChange
             && let Some(prev) = self.active.filter(|&prev| prev != ix)
-                && let Some(editor) = self.tabs.get(prev).and_then(|t| t.editor()).cloned() {
-                    Self::save_doc_now(&editor, cx);
-                }
+            && let Some(editor) = self.tabs.get(prev).and_then(|t| t.editor()).cloned()
+        {
+            Self::save_doc_now(&editor, cx);
+        }
         self.active = Some(ix);
         self.focus_active(window, cx);
         cx.notify();
@@ -312,9 +331,10 @@ impl Workspace {
     }
 
     fn doc_display_name(doc: &Document) -> String {
-        doc.path
-            .file_name()
-            .map_or_else(|| rust_i18n::t!("editor.untitled").to_string(), |n| n.to_string_lossy().to_string())
+        doc.path.file_name().map_or_else(
+            || rust_i18n::t!("editor.untitled").to_string(),
+            |n| n.to_string_lossy().to_string(),
+        )
     }
 
     /// Returns the file path of the active editor tab, or `None` for untitled/Settings tabs.
@@ -323,16 +343,26 @@ impl Workspace {
         let tab = self.tabs.get(ix)?;
         let editor = tab.editor()?;
         let path = editor.read(cx).doc.path.clone();
-        if path.as_os_str().is_empty() { None } else { Some(path) }
+        if path.as_os_str().is_empty() {
+            None
+        } else {
+            Some(path)
+        }
     }
 
     /// Expand the tree so `path` is visible, scroll the explorer to it, and notify.
     /// No-op when no folder is open or `path` is outside the root.
     pub(crate) fn reveal_in_tree(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let Some(root) = self.root_folder.clone() else { return; };
-        if !path.starts_with(&root) { return; }
+        let Some(root) = self.root_folder.clone() else {
+            return;
+        };
+        if !path.starts_with(&root) {
+            return;
+        }
         let rows = if let Some(tree) = &mut self.tree {
-            if tree.reveal(path).is_err() { return; }
+            if tree.reveal(path).is_err() {
+                return;
+            }
             Some(tree.visible())
         } else {
             None
@@ -376,7 +406,10 @@ impl Workspace {
     /// while the full scan is still running (stale-while-revalidate).
     pub(crate) fn index_snapshot(&self, include_ignored: bool) -> Option<Arc<FileIndexSnapshot>> {
         if include_ignored {
-            self.file_index.full.clone().or_else(|| self.file_index.normal.clone())
+            self.file_index
+                .full
+                .clone()
+                .or_else(|| self.file_index.normal.clone())
         } else {
             self.file_index.normal.clone()
         }
@@ -390,7 +423,9 @@ impl Workspace {
     }
 
     fn kick_index_scan(&mut self, include_ignored: bool, cx: &mut Context<Self>) {
-        let Some(root) = self.root_folder.clone() else { return };
+        let Some(root) = self.root_folder.clone() else {
+            return;
+        };
         let scanning = if include_ignored {
             &mut self.file_index.scanning_full
         } else {
@@ -470,7 +505,12 @@ impl Workspace {
         }
     }
 
-    fn on_open_file_finder(&mut self, _: &OpenFileFinder, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_open_file_finder(
+        &mut self,
+        _: &OpenFileFinder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_file_finder(false, window, cx);
     }
 
@@ -512,7 +552,9 @@ impl Workspace {
             let rx = cx.prompt_for_new_path(&dir, Some("untitled.txt"));
             let editor = editor.clone();
             cx.spawn_in(window, async move |_, cx| {
-                let Ok(Ok(Some(path))) = rx.await else { return false };
+                let Ok(Ok(Some(path))) = rx.await else {
+                    return false;
+                };
                 editor
                     .update(cx, |ed, cx| {
                         ed.doc.assign_path(path, &ed.registry);
@@ -591,8 +633,7 @@ impl Workspace {
 
     fn on_new_file(&mut self, _: &NewFile, window: &mut Window, cx: &mut Context<Self>) {
         let registry = cx.global::<crate::Registry>().0.clone();
-        let editor =
-            cx.new(|cx| EditorView::from_doc(Document::empty_untitled(), registry, cx));
+        let editor = cx.new(|cx| EditorView::from_doc(Document::empty_untitled(), registry, cx));
         self.push_editor_tab(editor, cx);
         self.activate_tab(self.tabs.len() - 1, window, cx);
     }
@@ -605,7 +646,9 @@ impl Workspace {
             prompt: None,
         });
         cx.spawn_in(window, async move |ws, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
             ws.update_in(cx, |ws, window, cx| {
                 for path in paths {
                     ws.open_path(&path, window, cx);
@@ -624,16 +667,24 @@ impl Workspace {
             prompt: None,
         });
         cx.spawn_in(window, async move |ws, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else { return };
-            let Some(folder) = paths.into_iter().next() else { return };
-            ws.update_in(cx, |ws, _, cx| ws.set_root_folder(folder, cx)).ok();
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(folder) = paths.into_iter().next() else {
+                return;
+            };
+            ws.update_in(cx, |ws, _, cx| ws.set_root_folder(folder, cx))
+                .ok();
         })
         .detach();
     }
 
     fn on_save_file(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(editor) =
-            self.active.and_then(|ix| self.tabs.get(ix)).and_then(|tab| tab.editor()).cloned()
+        if let Some(editor) = self
+            .active
+            .and_then(|ix| self.tabs.get(ix))
+            .and_then(|tab| tab.editor())
+            .cloned()
         {
             self.save_editor(&editor, window, cx).detach();
         }
@@ -649,7 +700,10 @@ impl Workspace {
             return;
         }
         let view = cx.new(SettingsView::new);
-        self.tabs.push(Tab { id: self.next_tab_id, content: TabContent::Settings(view) });
+        self.tabs.push(Tab {
+            id: self.next_tab_id,
+            content: TabContent::Settings(view),
+        });
         self.next_tab_id += 1;
         self.activate_tab(self.tabs.len() - 1, window, cx);
     }
@@ -678,8 +732,10 @@ impl Workspace {
             })
             .unwrap_or_default();
 
-        let existing =
-            self.tabs.iter().position(|t| matches!(t.content, TabContent::ProjectSearch(_)));
+        let existing = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t.content, TabContent::ProjectSearch(_)));
         if let Some(ix) = existing {
             // Toggle closed if already the active tab (mirrors Cmd+F in-file behaviour).
             if self.active == Some(ix) {
@@ -702,7 +758,10 @@ impl Workspace {
         }
         let ws_entity = cx.entity();
         let view = cx.new(|cx| ProjectSearchView::new(ws_entity.downgrade(), prefill, cx));
-        self.tabs.push(Tab { id: self.next_tab_id, content: TabContent::ProjectSearch(view.clone()) });
+        self.tabs.push(Tab {
+            id: self.next_tab_id,
+            content: TabContent::ProjectSearch(view.clone()),
+        });
         self.next_tab_id += 1;
         self.activate_tab(self.tabs.len() - 1, window, cx);
         let qh = view.read(cx).query_handle.clone();
@@ -720,8 +779,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.open_path(path, window, cx);
-        if let Some(editor) =
-            self.active.and_then(|i| self.tabs.get(i)).and_then(|t| t.editor()).cloned()
+        if let Some(editor) = self
+            .active
+            .and_then(|i| self.tabs.get(i))
+            .and_then(|t| t.editor())
+            .cloned()
         {
             editor.update(cx, |ev, cx| {
                 let char_idx = ev
@@ -731,15 +793,20 @@ impl Workspace {
                     .unwrap_or(ev.doc.rope.len_chars().saturating_sub(1));
                 ev.sel.head = char_idx;
                 ev.sel.anchor = char_idx;
-                ev.scroll_handle.scroll_to_item(line, gpui::ScrollStrategy::Center);
+                ev.scroll_handle
+                    .scroll_to_item(line, gpui::ScrollStrategy::Center);
                 ev.flash_line = Some(line);
                 cx.spawn(async move |view, cx| {
-                    cx.background_executor().timer(Duration::from_millis(800)).await;
+                    cx.background_executor()
+                        .timer(Duration::from_millis(800))
+                        .await;
                     view.update(cx, |ev, cx| {
                         ev.flash_line = None;
                         cx.notify();
-                    }).ok();
-                }).detach();
+                    })
+                    .ok();
+                })
+                .detach();
                 cx.notify();
             });
         }
@@ -792,12 +859,22 @@ impl Workspace {
         cx.notify();
     }
 
-    fn on_toggle_bottom_panel(&mut self, _: &ToggleBottomPanel, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_bottom_panel(
+        &mut self,
+        _: &ToggleBottomPanel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.bottom_open = !self.bottom_open;
         cx.notify();
     }
 
-    fn on_toggle_right_panel(&mut self, _: &ToggleRightPanel, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_right_panel(
+        &mut self,
+        _: &ToggleRightPanel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.right_open = !self.right_open;
         cx.notify();
     }
@@ -859,8 +936,12 @@ impl Workspace {
 
     /// Close all tabs except the one with `keep_id`.
     fn close_other_tabs(&mut self, keep_id: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let ids: Vec<usize> =
-            self.tabs.iter().filter(|t| t.id != keep_id).map(|t| t.id).collect();
+        let ids: Vec<usize> = self
+            .tabs
+            .iter()
+            .filter(|t| t.id != keep_id)
+            .map(|t| t.id)
+            .collect();
         for id in ids {
             if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
                 self.request_close_tab(ix, window, cx);
@@ -879,8 +960,17 @@ impl Workspace {
     }
 
     /// Close all tabs to the left of `anchor_id`.
-    fn close_tabs_to_left(&mut self, anchor_id: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let anchor_ix = self.tabs.iter().position(|t| t.id == anchor_id).unwrap_or(0);
+    fn close_tabs_to_left(
+        &mut self,
+        anchor_id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor_ix = self
+            .tabs
+            .iter()
+            .position(|t| t.id == anchor_id)
+            .unwrap_or(0);
         let ids: Vec<usize> = self.tabs[..anchor_ix].iter().map(|t| t.id).collect();
         for id in ids {
             if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
@@ -890,8 +980,17 @@ impl Workspace {
     }
 
     /// Close all tabs to the right of `anchor_id`.
-    fn close_tabs_to_right(&mut self, anchor_id: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let anchor_ix = self.tabs.iter().position(|t| t.id == anchor_id).unwrap_or(0);
+    fn close_tabs_to_right(
+        &mut self,
+        anchor_id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor_ix = self
+            .tabs
+            .iter()
+            .position(|t| t.id == anchor_id)
+            .unwrap_or(0);
         let ids: Vec<usize> = self.tabs[anchor_ix + 1..].iter().map(|t| t.id).collect();
         for id in ids {
             if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
@@ -964,7 +1063,10 @@ impl Workspace {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
-                    ws.tab_menu = Some(TabMenu { tab_id, pos: ev.position });
+                    ws.tab_menu = Some(TabMenu {
+                        tab_id,
+                        pos: ev.position,
+                    });
                     cx.notify();
                 }),
             )
@@ -1014,7 +1116,9 @@ impl Workspace {
         let pos = menu.pos;
 
         let tab_ix = self.tabs.iter().position(|t| t.id == tab_id)?;
-        let path = self.tabs.get(tab_ix)
+        let path = self
+            .tabs
+            .get(tab_ix)
             .and_then(|t| t.editor())
             .map(|e| e.read(cx).doc.path.clone())
             .filter(|p| !p.as_os_str().is_empty());
@@ -1028,127 +1132,175 @@ impl Workspace {
         let ws = cx.entity();
 
         // ── helper: build a single menu item ─────────────────────────────────
-        let item = |label: SharedString, enabled: bool, on_click: MenuClickFn| {
-            ContextMenuItem { label, enabled, on_click }
+        let item = |label: SharedString, enabled: bool, on_click: MenuClickFn| ContextMenuItem {
+            label,
+            enabled,
+            on_click,
         };
         let sep = || div().h(px(1.)).mx(px(t.sp2)).my(px(t.sp1)).bg(t.separator);
 
         // ── close group ──────────────────────────────────────────────────────
         let close_item = {
             let ws = ws.clone();
-            item(rust_i18n::t!("tab_menu.close").into(), true, Box::new(move |_, window, cx| {
-                ws.update(cx, |ws, cx| {
-                    ws.tab_menu = None;
-                    if let Some(ix) = ws.tabs.iter().position(|t| t.id == tab_id) {
-                        ws.request_close_tab(ix, window, cx);
-                    }
-                });
-            }))
+            item(
+                rust_i18n::t!("tab_menu.close").into(),
+                true,
+                Box::new(move |_, window, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.tab_menu = None;
+                        if let Some(ix) = ws.tabs.iter().position(|t| t.id == tab_id) {
+                            ws.request_close_tab(ix, window, cx);
+                        }
+                    });
+                }),
+            )
         };
 
         let close_others = {
             let ws = ws.clone();
-            item(rust_i18n::t!("tab_menu.close_others").into(), has_others, Box::new(move |_, window, cx| {
-                ws.update(cx, |ws, cx| {
-                    ws.tab_menu = None;
-                    ws.close_other_tabs(tab_id, window, cx);
-                });
-            }))
+            item(
+                rust_i18n::t!("tab_menu.close_others").into(),
+                has_others,
+                Box::new(move |_, window, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.tab_menu = None;
+                        ws.close_other_tabs(tab_id, window, cx);
+                    });
+                }),
+            )
         };
 
         let close_all = {
             let ws = ws.clone();
-            item(rust_i18n::t!("tab_menu.close_all").into(), true, Box::new(move |_, window, cx| {
-                ws.update(cx, |ws, cx| {
-                    ws.tab_menu = None;
-                    ws.close_all_tabs(window, cx);
-                });
-            }))
+            item(
+                rust_i18n::t!("tab_menu.close_all").into(),
+                true,
+                Box::new(move |_, window, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.tab_menu = None;
+                        ws.close_all_tabs(window, cx);
+                    });
+                }),
+            )
         };
 
         let close_left = {
             let ws = ws.clone();
-            item(rust_i18n::t!("tab_menu.close_left").into(), has_left, Box::new(move |_, window, cx| {
-                ws.update(cx, |ws, cx| {
-                    ws.tab_menu = None;
-                    ws.close_tabs_to_left(tab_id, window, cx);
-                });
-            }))
+            item(
+                rust_i18n::t!("tab_menu.close_left").into(),
+                has_left,
+                Box::new(move |_, window, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.tab_menu = None;
+                        ws.close_tabs_to_left(tab_id, window, cx);
+                    });
+                }),
+            )
         };
 
         let close_right = {
             let ws = ws.clone();
-            item(rust_i18n::t!("tab_menu.close_right").into(), has_right, Box::new(move |_, window, cx| {
-                ws.update(cx, |ws, cx| {
-                    ws.tab_menu = None;
-                    ws.close_tabs_to_right(tab_id, window, cx);
-                });
-            }))
+            item(
+                rust_i18n::t!("tab_menu.close_right").into(),
+                has_right,
+                Box::new(move |_, window, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.tab_menu = None;
+                        ws.close_tabs_to_right(tab_id, window, cx);
+                    });
+                }),
+            )
         };
 
         // ── copy group ───────────────────────────────────────────────────────
         let copy_path = {
             let ws = ws.clone();
             let p = path.clone();
-            item(rust_i18n::t!("tab_menu.copy_path").into(), has_path, Box::new(move |_, _, cx| {
-                let Some(p) = p.clone() else { return };
-                ws.update(cx, |ws, cx| {
-                    ws.tab_menu = None;
-                    cx.write_to_clipboard(ClipboardItem::new_string(p.display().to_string()));
-                    cx.notify();
-                });
-            }))
+            item(
+                rust_i18n::t!("tab_menu.copy_path").into(),
+                has_path,
+                Box::new(move |_, _, cx| {
+                    let Some(p) = p.clone() else { return };
+                    ws.update(cx, |ws, cx| {
+                        ws.tab_menu = None;
+                        cx.write_to_clipboard(ClipboardItem::new_string(p.display().to_string()));
+                        cx.notify();
+                    });
+                }),
+            )
         };
 
         let copy_rel = {
             let ws = ws.clone();
             let rel = match (&root, &path) {
-                (Some(r), Some(p)) => p.strip_prefix(r).ok()
+                (Some(r), Some(p)) => p
+                    .strip_prefix(r)
+                    .ok()
                     .map(|rel| rel.display().to_string())
-                    .unwrap_or_else(|| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
-                (None, Some(p)) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                    .unwrap_or_else(|| {
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    }),
+                (None, Some(p)) => p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
                 _ => String::new(),
             };
-            item(rust_i18n::t!("tab_menu.copy_relative_path").into(), has_path, Box::new(move |_, _, cx| {
-                let rel = rel.clone();
-                ws.update(cx, |ws, cx| {
-                    ws.tab_menu = None;
-                    cx.write_to_clipboard(ClipboardItem::new_string(rel));
-                    cx.notify();
-                });
-            }))
+            item(
+                rust_i18n::t!("tab_menu.copy_relative_path").into(),
+                has_path,
+                Box::new(move |_, _, cx| {
+                    let rel = rel.clone();
+                    ws.update(cx, |ws, cx| {
+                        ws.tab_menu = None;
+                        cx.write_to_clipboard(ClipboardItem::new_string(rel));
+                        cx.notify();
+                    });
+                }),
+            )
         };
 
         // ── reveal group ─────────────────────────────────────────────────────
         let reveal_finder = {
             let ws = ws.clone();
             let p = path.clone();
-            item(rust_i18n::t!("tab_menu.reveal_in_finder").into(), has_path, Box::new(move |_, _, cx| {
-                let Some(p) = p.clone() else { return };
-                ws.update(cx, |ws, cx| {
-                    ws.tab_menu = None;
-                    cx.reveal_path(&p);
-                    cx.notify();
-                });
-            }))
+            item(
+                rust_i18n::t!("tab_menu.reveal_in_finder").into(),
+                has_path,
+                Box::new(move |_, _, cx| {
+                    let Some(p) = p.clone() else { return };
+                    ws.update(cx, |ws, cx| {
+                        ws.tab_menu = None;
+                        cx.reveal_path(&p);
+                        cx.notify();
+                    });
+                }),
+            )
         };
 
         let reveal_explorer = {
             let ws = ws.clone();
             let p = path.clone();
-            item(rust_i18n::t!("tab_menu.reveal_in_explorer").into(), has_path, Box::new(move |_, _, cx| {
-                let Some(p) = p.clone() else { return };
-                ws.update(cx, |ws, cx| {
-                    ws.tab_menu = None;
-                    ws.sidebar.open = true;
-                    ws.sidebar.active = SidebarItemKind::Explorer;
-                    ws.reveal_in_tree(&p, cx);
-                    cx.notify();
-                });
-            }))
+            item(
+                rust_i18n::t!("tab_menu.reveal_in_explorer").into(),
+                has_path,
+                Box::new(move |_, _, cx| {
+                    let Some(p) = p.clone() else { return };
+                    ws.update(cx, |ws, cx| {
+                        ws.tab_menu = None;
+                        ws.sidebar.open = true;
+                        ws.sidebar.active = SidebarItemKind::Explorer;
+                        ws.reveal_in_tree(&p, cx);
+                        cx.notify();
+                    });
+                }),
+            )
         };
 
-        let items: Vec<ContextMenuItem> = vec![close_item, close_others, close_all, close_left, close_right];
+        let items: Vec<ContextMenuItem> =
+            vec![close_item, close_others, close_all, close_left, close_right];
         let copy_items: Vec<ContextMenuItem> = vec![copy_path, copy_rel];
         let reveal_items: Vec<ContextMenuItem> = vec![reveal_finder, reveal_explorer];
 
@@ -1280,7 +1432,14 @@ impl Workspace {
             })
             .child(div().w(px(72.)).flex_shrink_0())
             .child(div().flex_1())
-            .child(h_flex().gap_1().child(left_btn).child(right_btn).child(bottom_btn).child(settings_btn))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(left_btn)
+                    .child(right_btn)
+                    .child(bottom_btn)
+                    .child(settings_btn),
+            )
             .child(div().w_2())
     }
 
@@ -1360,11 +1519,13 @@ impl Render for Workspace {
         let t = cx.global::<RuntimeTheme>().clone();
 
         let content: Option<AnyElement> =
-            self.active.and_then(|ix| self.tabs.get(ix)).map(|tab| match &tab.content {
-                TabContent::Editor(e) => e.clone().into_any_element(),
-                TabContent::Settings(s) => s.clone().into_any_element(),
-                TabContent::ProjectSearch(p) => p.clone().into_any_element(),
-            });
+            self.active
+                .and_then(|ix| self.tabs.get(ix))
+                .map(|tab| match &tab.content {
+                    TabContent::Editor(e) => e.clone().into_any_element(),
+                    TabContent::Settings(s) => s.clone().into_any_element(),
+                    TabContent::ProjectSearch(p) => p.clone().into_any_element(),
+                });
 
         let base = div()
             .size_full()
@@ -1411,10 +1572,13 @@ impl Render for Workspace {
                         cx.notify();
                     }
                 }))
-                .on_mouse_up(MouseButton::Left, cx.listener(|ws, _, _, cx| {
-                    ws.tree_scrollbar_drag = None;
-                    cx.notify();
-                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|ws, _, _, cx| {
+                        ws.tree_scrollbar_drag = None;
+                        cx.notify();
+                    }),
+                )
             });
 
         // Empty state: show welcome screen only when no folder and no tabs are open.
@@ -1424,7 +1588,9 @@ impl Render for Workspace {
                 .items_center()
                 .justify_center()
                 .child(render_welcome(&t))
-                .when_some(self.file_finder.clone(), |el, finder| el.relative().child(finder))
+                .when_some(self.file_finder.clone(), |el, finder| {
+                    el.relative().child(finder)
+                })
                 .into_any();
         }
 
@@ -1433,7 +1599,12 @@ impl Render for Workspace {
             .min_w(px(0.))
             .h_full()
             .child(self.render_tab_bar(&t, cx))
-            .child(div().flex_1().min_h(px(0.)).when_some(content, |el, c| el.child(c)));
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .when_some(content, |el, c| el.child(c)),
+            );
 
         let body_row = h_flex()
             .flex_1()
@@ -1450,7 +1621,9 @@ impl Render for Workspace {
             .flex_1()
             .min_h(px(0.))
             .child(body_row)
-            .when(self.bottom_open, |el| el.child(self.render_bottom_panel(&t)));
+            .when(self.bottom_open, |el| {
+                el.child(self.render_bottom_panel(&t))
+            });
 
         let root = base
             .flex()

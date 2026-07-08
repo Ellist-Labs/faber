@@ -12,7 +12,9 @@ pub struct LanguageRegistry {
 
 impl LanguageRegistry {
     pub fn new() -> Self {
-        Self { languages: Vec::new() }
+        Self {
+            languages: Vec::new(),
+        }
     }
 
     /// Bootstrap registry with all built-in languages.
@@ -34,7 +36,10 @@ impl LanguageRegistry {
     /// Resolve the language for a file path by matching the lowercase extension.
     pub fn language_for_path(&self, path: &Path) -> Option<Arc<Language>> {
         let ext = path.extension()?.to_string_lossy().to_lowercase();
-        self.languages.iter().find(|l| l.extensions.iter().any(|e| e == &ext)).cloned()
+        self.languages
+            .iter()
+            .find(|l| l.extensions.iter().any(|e| e == &ext))
+            .cloned()
     }
 
     /// Look up a language by its id.
@@ -79,7 +84,9 @@ mod tests {
         let reg = LanguageRegistry::with_defaults();
         let lang = reg.language_for_path(&PathBuf::from("README.md")).unwrap();
         assert_eq!(lang.id.0, "markdown");
-        let lang2 = reg.language_for_path(&PathBuf::from("notes.markdown")).unwrap();
+        let lang2 = reg
+            .language_for_path(&PathBuf::from("notes.markdown"))
+            .unwrap();
         assert_eq!(lang2.id.0, "markdown");
     }
 

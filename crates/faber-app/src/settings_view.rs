@@ -96,9 +96,18 @@ fn sections() -> Vec<SettingsSectionDef> {
                     control: SettingControl::Select {
                         options: vec![
                             ("off", t!("settings.auto_save_options.off").to_string()),
-                            ("afterDelay", t!("settings.auto_save_options.after_delay").to_string()),
-                            ("onFocusChange", t!("settings.auto_save_options.on_focus_change").to_string()),
-                            ("onWindowChange", t!("settings.auto_save_options.on_window_change").to_string()),
+                            (
+                                "afterDelay",
+                                t!("settings.auto_save_options.after_delay").to_string(),
+                            ),
+                            (
+                                "onFocusChange",
+                                t!("settings.auto_save_options.on_focus_change").to_string(),
+                            ),
+                            (
+                                "onWindowChange",
+                                t!("settings.auto_save_options.on_window_change").to_string(),
+                            ),
                         ],
                         get: |s| match s.auto_save {
                             AutoSave::Off => "off",
@@ -122,9 +131,18 @@ fn sections() -> Vec<SettingsSectionDef> {
                     enabled: |_| true,
                     control: SettingControl::Select {
                         options: vec![
-                            ("right", t!("settings.finder_preview_options.right").to_string()),
-                            ("left", t!("settings.finder_preview_options.left").to_string()),
-                            ("bottom", t!("settings.finder_preview_options.bottom").to_string()),
+                            (
+                                "right",
+                                t!("settings.finder_preview_options.right").to_string(),
+                            ),
+                            (
+                                "left",
+                                t!("settings.finder_preview_options.left").to_string(),
+                            ),
+                            (
+                                "bottom",
+                                t!("settings.finder_preview_options.bottom").to_string(),
+                            ),
                         ],
                         get: |s| s.file_finder_preview_position.key(),
                         set: |s, v| {
@@ -198,7 +216,9 @@ pub struct SettingsView {
 
 impl SettingsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { focus_handle: cx.focus_handle() }
+        Self {
+            focus_handle: cx.focus_handle(),
+        }
     }
 
     fn apply_change(&mut self, f: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
@@ -223,7 +243,11 @@ impl SettingsView {
     ) -> AnyElement {
         let enabled = (entry.enabled)(settings);
         match entry.control {
-            SettingControl::Select { ref options, get, set } => {
+            SettingControl::Select {
+                ref options,
+                get,
+                set,
+            } => {
                 let current = get(settings);
                 h_flex()
                     .rounded(px(t.radius_md))
@@ -246,7 +270,14 @@ impl SettingsView {
                     }))
                     .into_any_element()
             }
-            SettingControl::Stepper { min, max, step, unit, get, set } => {
+            SettingControl::Stepper {
+                min,
+                max,
+                step,
+                unit,
+                get,
+                set,
+            } => {
                 let value = get(settings);
                 let color = if enabled { t.text } else { t.text_disabled };
                 let stepper_button = |id: &'static str, icon: IconName, delta: f32| {
@@ -335,7 +366,7 @@ impl SettingsView {
             .child(
                 div()
                     .flex_shrink_0()
-                    .child(self.render_control(entry_ix, entry, settings, t, cx))
+                    .child(self.render_control(entry_ix, entry, settings, t, cx)),
             )
     }
 }

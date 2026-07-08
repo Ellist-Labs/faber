@@ -2,8 +2,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use faber_core::search::Query;
-use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -43,7 +43,11 @@ impl ProjectSearchQuery {
 
     /// Split a comma-separated filter string into trimmed, non-empty patterns.
     pub fn parse_globs(s: &str) -> Vec<String> {
-        s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect()
+        s.split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect()
     }
 }
 
@@ -87,10 +91,14 @@ fn match_file(query: &Query, path: &Path) -> Option<FileSearchResult> {
 
     // Map whole-file char offsets → per-line hits.
     let line_starts: Vec<usize> = std::iter::once(0)
-        .chain(text.char_indices().filter(|(_, c)| *c == '\n').map(|(i, _)| {
-            // char count up to and including the newline byte → next line start char
-            text[..i].chars().count() + 1
-        }))
+        .chain(
+            text.char_indices()
+                .filter(|(_, c)| *c == '\n')
+                .map(|(i, _)| {
+                    // char count up to and including the newline byte → next line start char
+                    text[..i].chars().count() + 1
+                }),
+        )
         .collect();
 
     // Build a map: for each match range, find its line and localise the range.
@@ -103,7 +111,10 @@ fn match_file(query: &Query, path: &Path) -> Option<FileSearchResult> {
         let line_start_char = line_starts[line_idx];
         let local_start = m.start - line_start_char;
         let local_end = m.end - line_start_char;
-        line_hits.entry(line_idx).or_default().push(local_start..local_end);
+        line_hits
+            .entry(line_idx)
+            .or_default()
+            .push(local_start..local_end);
     }
 
     let lines: Vec<&str> = text.split('\n').collect();
@@ -114,14 +125,23 @@ fn match_file(query: &Query, path: &Path) -> Option<FileSearchResult> {
             let preview = lines.get(line_idx).unwrap_or(&"").to_string();
             let col = ranges.first().map(|r| r.start).unwrap_or(0);
             let lsc = line_starts.get(line_idx).copied().unwrap_or(0);
-            SearchHit { line: line_idx, col, line_start_char: lsc, preview, ranges }
+            SearchHit {
+                line: line_idx,
+                col,
+                line_start_char: lsc,
+                preview,
+                ranges,
+            }
         })
         .collect();
 
     if hits.is_empty() {
         None
     } else {
-        Some(FileSearchResult { path: path.to_owned(), hits })
+        Some(FileSearchResult {
+            path: path.to_owned(),
+            hits,
+        })
     }
 }
 
@@ -182,7 +202,9 @@ pub fn run(
     };
 
     let mut walker = WalkBuilder::new(root);
-    walker.hidden(!query.include_ignored).git_ignore(!query.include_ignored);
+    walker
+        .hidden(!query.include_ignored)
+        .git_ignore(!query.include_ignored);
     if let Some(ov) = overrides {
         walker.overrides(ov);
     }

@@ -12,7 +12,11 @@ pub struct Surface {
 
 impl Surface {
     pub fn new(child: impl IntoElement) -> Self {
-        Self { children: child.into_any_element(), elevated: false, radius: None }
+        Self {
+            children: child.into_any_element(),
+            elevated: false,
+            radius: None,
+        }
     }
 
     pub fn elevated(mut self) -> Self {
@@ -29,7 +33,11 @@ impl Surface {
 impl RenderOnce for Surface {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let bg = if self.elevated { theme.bg_elevated } else { theme.bg };
+        let bg = if self.elevated {
+            theme.bg_elevated
+        } else {
+            theme.bg
+        };
         let radius = self.radius.unwrap_or(theme.radius_md);
         div()
             .bg(bg)

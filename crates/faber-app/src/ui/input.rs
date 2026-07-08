@@ -1,8 +1,6 @@
 //! Presentational input — styles existing text + caret. Not a text-input engine.
 #![allow(dead_code)] // removed when Wave 2 adopts ui::Input
-use gpui::{
-    App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px,
-};
+use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px};
 
 use crate::theme::ActiveTheme;
 
@@ -36,7 +34,11 @@ impl Input {
 impl RenderOnce for Input {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let border = if self.focused { theme.border_focus } else { theme.border };
+        let border = if self.focused {
+            theme.border_focus
+        } else {
+            theme.border
+        };
         let (text_color, display) = if self.value.is_empty() {
             (theme.text_subtle, self.placeholder)
         } else {

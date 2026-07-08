@@ -1,12 +1,7 @@
 //! Behavior-level integration tests for the editing engine (Document + History + save).
 //! Drive the stable public API, not internals — these tests survive refactors.
 
-use faber_editor::{
-    Transaction,
-    buffer::Document,
-    edit_history::History,
-    save::save,
-};
+use faber_editor::{Transaction, buffer::Document, edit_history::History, save::save};
 use tempfile::NamedTempFile;
 
 fn plain(s: &str) -> Document {
@@ -45,7 +40,10 @@ fn restoring_original_content_clears_dirty() {
     assert!(doc.is_dirty());
     doc.delete(3..4);
     assert_eq!(doc.rope.to_string(), "abc");
-    assert!(!doc.is_dirty(), "rope matches saved_rope — should not be dirty");
+    assert!(
+        !doc.is_dirty(),
+        "rope matches saved_rope — should not be dirty"
+    );
 }
 
 // ── History (undo / redo) ───────────────────────────────────────────────────
@@ -100,7 +98,11 @@ fn coalesced_inserts_undo_as_one_unit() {
     h.commit();
     assert_eq!(doc.rope.to_string(), "hello");
     h.undo(&mut doc);
-    assert_eq!(doc.rope.to_string(), "", "all coalesced inserts undone as one");
+    assert_eq!(
+        doc.rope.to_string(),
+        "",
+        "all coalesced inserts undone as one"
+    );
 }
 
 #[test]

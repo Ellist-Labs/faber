@@ -23,8 +23,8 @@ fn flatten_keys(table: &toml::Value, prefix: &str, out: &mut BTreeSet<String>) {
 fn load_keys(path: &Path) -> BTreeSet<String> {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
-    let val: toml::Value = toml::from_str(&text)
-        .unwrap_or_else(|e| panic!("invalid TOML in {}: {e}", path.display()));
+    let val: toml::Value =
+        toml::from_str(&text).unwrap_or_else(|e| panic!("invalid TOML in {}: {e}", path.display()));
     let mut keys = BTreeSet::new();
     flatten_keys(&val, "", &mut keys);
     keys

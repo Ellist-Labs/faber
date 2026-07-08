@@ -62,9 +62,7 @@ pub fn capture_name_to_token(name: &str) -> Option<SyntaxToken> {
         "comment" | "comment.documentation" => SyntaxToken::Comment,
         "constant" | "constant.builtin" | "constant.macro" => SyntaxToken::Constant,
         "operator" => SyntaxToken::Operator,
-        "punctuation" | "punctuation.bracket" | "punctuation.delimiter" => {
-            SyntaxToken::Punctuation
-        }
+        "punctuation" | "punctuation.bracket" | "punctuation.delimiter" => SyntaxToken::Punctuation,
         "variable" | "variable.parameter" | "variable.builtin" => SyntaxToken::Variable,
         "property" | "field" => SyntaxToken::Property,
         "attribute" => SyntaxToken::Attribute,
@@ -180,7 +178,8 @@ impl Language {
     /// Build a tree-sitter parser configured for this language.
     pub fn make_parser(&self) -> Parser {
         let mut p = Parser::new();
-        p.set_language(&(self.grammar)()).expect("failed to set grammar");
+        p.set_language(&(self.grammar)())
+            .expect("failed to set grammar");
         p
     }
 
@@ -190,8 +189,11 @@ impl Language {
         let q_src = (self.highlights_query?)();
         let ts_lang: TsLanguage = (self.grammar)();
         let query = Query::new(&ts_lang, q_src).ok()?;
-        let cap_tokens: Vec<Option<SyntaxToken>> =
-            query.capture_names().iter().map(|n| self.resolve_capture(n)).collect();
+        let cap_tokens: Vec<Option<SyntaxToken>> = query
+            .capture_names()
+            .iter()
+            .map(|n| self.resolve_capture(n))
+            .collect();
         Some((query, cap_tokens))
     }
 
@@ -202,13 +204,17 @@ impl Language {
         let ts_lang: TsLanguage = (self.grammar)();
         let query = Query::new(&ts_lang, q_src).ok()?;
         let names = query.capture_names();
-        let index_of = |name: &str| -> Option<u32> {
-            names.iter().position(|n| *n == name).map(|i| i as u32)
-        };
+        let index_of =
+            |name: &str| -> Option<u32> { names.iter().position(|n| *n == name).map(|i| i as u32) };
         let item_ix = index_of("item")?;
         let name_ix = index_of("name")?;
         let context_ix = index_of("context");
-        Some(OutlineConfig { query, item_ix, name_ix, context_ix })
+        Some(OutlineConfig {
+            query,
+            item_ix,
+            name_ix,
+            context_ix,
+        })
     }
 }
 
@@ -225,9 +231,11 @@ fn markdown_token_map() -> &'static [(&'static str, SyntaxToken)] {
 
 /// Built-in Markdown language definition (block grammar).
 pub fn markdown() -> Language {
-    Language::new("markdown", ["md", "markdown"], || tree_sitter_md::LANGUAGE.into())
-        .with_highlights(|| tree_sitter_md::HIGHLIGHT_QUERY_BLOCK)
-        .with_token_map(markdown_token_map)
+    Language::new("markdown", ["md", "markdown"], || {
+        tree_sitter_md::LANGUAGE.into()
+    })
+    .with_highlights(|| tree_sitter_md::HIGHLIGHT_QUERY_BLOCK)
+    .with_token_map(markdown_token_map)
 }
 
 /// Built-in Rust language definition.
@@ -252,7 +260,10 @@ mod tests {
     #[test]
     fn text_title_maps_via_global_fallback() {
         // text.title is a markdown capture retained in the global fallback.
-        assert_eq!(capture_name_to_token("text.title"), Some(SyntaxToken::Keyword));
+        assert_eq!(
+            capture_name_to_token("text.title"),
+            Some(SyntaxToken::Keyword)
+        );
     }
 
     #[test]
@@ -269,11 +280,16 @@ mod tests {
 
     #[test]
     fn rust_outline_query_compiles_and_has_captures() {
-        let config = rust().make_outline_query().expect("Rust outline query should compile");
+        let config = rust()
+            .make_outline_query()
+            .expect("Rust outline query should compile");
         // All mandatory captures must resolve.
         assert!(config.item_ix < u32::MAX, "item capture must exist");
         assert!(config.name_ix < u32::MAX, "name capture must exist");
-        assert!(config.context_ix.is_some(), "context capture expected for Rust");
+        assert!(
+            config.context_ix.is_some(),
+            "context capture expected for Rust"
+        );
     }
 
     #[test]

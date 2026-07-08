@@ -53,7 +53,11 @@ pub fn icon_for_folder(name: &str, open: bool) -> &'static str {
         let (_, closed, opened) = FOLDER_NAMES[ix];
         return if open { opened } else { closed };
     }
-    if open { DEFAULT_FOLDER_OPEN } else { DEFAULT_FOLDER }
+    if open {
+        DEFAULT_FOLDER_OPEN
+    } else {
+        DEFAULT_FOLDER
+    }
 }
 
 #[cfg(test)]
@@ -89,7 +93,10 @@ mod tests {
     #[test]
     fn folder_variants() {
         assert_eq!(icon_for_folder("src", false), "icons/file/folder-src.svg");
-        assert_eq!(icon_for_folder("src", true), "icons/file/folder-src-open.svg");
+        assert_eq!(
+            icon_for_folder("src", true),
+            "icons/file/folder-src-open.svg"
+        );
         assert_eq!(icon_for_folder("random", false), DEFAULT_FOLDER);
         assert_eq!(icon_for_folder("random", true), DEFAULT_FOLDER_OPEN);
     }

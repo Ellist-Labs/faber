@@ -30,12 +30,17 @@ pub fn enter_action(current_line: &str, cursor_col: usize) -> EnterAction {
     let rest = &line[indent_end..];
 
     // ── task list item: `- [ ] ` or `- [x] ` ───────────────────────────────
-    if let Some(body) = rest.strip_prefix("- [ ] ").or_else(|| rest.strip_prefix("- [x] ")) {
+    if let Some(body) = rest
+        .strip_prefix("- [ ] ")
+        .or_else(|| rest.strip_prefix("- [x] "))
+    {
         let marker_len = "- [ ] ".len();
         let marker_start = indent_end;
         let marker_end = indent_end + marker_len;
         if body.trim().is_empty() {
-            return EnterAction::ExitList { delete_cols: marker_start..marker_end };
+            return EnterAction::ExitList {
+                delete_cols: marker_start..marker_end,
+            };
         }
         return EnterAction::ContinueList {
             insert: format!("\n{indent}- [ ] "),
@@ -48,7 +53,9 @@ pub fn enter_action(current_line: &str, cursor_col: usize) -> EnterAction {
             let marker_start = indent_end;
             let marker_end = indent_end + prefix.len();
             if body.trim().is_empty() {
-                return EnterAction::ExitList { delete_cols: marker_start..marker_end };
+                return EnterAction::ExitList {
+                    delete_cols: marker_start..marker_end,
+                };
             }
             let ch = &prefix[..1];
             return EnterAction::ContinueList {
@@ -62,7 +69,9 @@ pub fn enter_action(current_line: &str, cursor_col: usize) -> EnterAction {
         let marker_start = indent_end;
         let marker_end = indent_end + ordered.prefix_len;
         if ordered.body.trim().is_empty() {
-            return EnterAction::ExitList { delete_cols: marker_start..marker_end };
+            return EnterAction::ExitList {
+                delete_cols: marker_start..marker_end,
+            };
         }
         let next_n = ordered.n + 1;
         let sep = ordered.sep;
@@ -106,7 +115,10 @@ fn parse_ordered_prefix(s: &str) -> Option<OrderedPrefix<'_>> {
 /// Wrap (or unwrap) `selected` with `marker` (`"**"` for bold, `"*"` for italic).
 /// If the selection is already wrapped, strips the markers.
 pub fn smart_wrap(selected: &str, marker: &str) -> String {
-    if selected.starts_with(marker) && selected.ends_with(marker) && selected.len() > marker.len() * 2 {
+    if selected.starts_with(marker)
+        && selected.ends_with(marker)
+        && selected.len() > marker.len() * 2
+    {
         selected[marker.len()..selected.len() - marker.len()].to_owned()
     } else {
         format!("{marker}{selected}{marker}")
@@ -127,7 +139,11 @@ pub fn toggle_checkbox(line: &str) -> Option<(std::ops::Range<usize>, &'static s
         (Some(u), None) => Some((u..u + 3, "[x]")),
         (None, Some(c)) => Some((c..c + 3, "[ ]")),
         (Some(u), Some(c)) => {
-            if u < c { Some((u..u + 3, "[x]")) } else { Some((c..c + 3, "[ ]")) }
+            if u < c {
+                Some((u..u + 3, "[x]"))
+            } else {
+                Some((c..c + 3, "[ ]"))
+            }
         }
         (None, None) => None,
     }
@@ -140,7 +156,9 @@ mod tests {
     use super::*;
 
     fn cont(s: &str) -> EnterAction {
-        EnterAction::ContinueList { insert: s.to_owned() }
+        EnterAction::ContinueList {
+            insert: s.to_owned(),
+        }
     }
     fn exit(r: std::ops::Range<usize>) -> EnterAction {
         EnterAction::ExitList { delete_cols: r }

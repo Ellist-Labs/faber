@@ -7,11 +7,11 @@ use gpui::{
     SharedString, Stateful, div, img, prelude::*, px, svg, uniform_list,
 };
 
+use crate::OpenProjectSearch;
 use crate::file_icons;
 use crate::theme::RuntimeTheme;
 use crate::ui::{Icon, IconName, h_flex, v_flex};
 use crate::workspace::Workspace;
-use crate::OpenProjectSearch;
 
 pub const ACTIVITY_BAR_W: f32 = 44.0;
 pub const SIDEBAR_PANEL_W: f32 = 240.0;
@@ -37,9 +37,21 @@ pub struct SidebarItem {
 
 pub fn default_items() -> Vec<SidebarItem> {
     vec![
-        SidebarItem { kind: SidebarItemKind::Explorer, icon: IconName::FileCopy, id: "Explorer" },
-        SidebarItem { kind: SidebarItemKind::Search, icon: IconName::Search, id: "Search" },
-        SidebarItem { kind: SidebarItemKind::Outline, icon: IconName::Toc, id: "Outline" },
+        SidebarItem {
+            kind: SidebarItemKind::Explorer,
+            icon: IconName::FileCopy,
+            id: "Explorer",
+        },
+        SidebarItem {
+            kind: SidebarItemKind::Search,
+            icon: IconName::Search,
+            id: "Search",
+        },
+        SidebarItem {
+            kind: SidebarItemKind::Outline,
+            icon: IconName::Toc,
+            id: "Outline",
+        },
     ]
 }
 
@@ -51,7 +63,11 @@ pub struct SidebarState {
 
 impl Default for SidebarState {
     fn default() -> Self {
-        Self { open: false, active: SidebarItemKind::Explorer, width: SIDEBAR_PANEL_W }
+        Self {
+            open: false,
+            active: SidebarItemKind::Explorer,
+            width: SIDEBAR_PANEL_W,
+        }
     }
 }
 
@@ -86,7 +102,9 @@ impl Workspace {
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |ws, _, window, cx| ws.on_activity_click(kind, window, cx)),
+                        cx.listener(move |ws, _, window, cx| {
+                            ws.on_activity_click(kind, window, cx)
+                        }),
                     )
                     .child(
                         svg()
@@ -220,12 +238,23 @@ impl Workspace {
                         cx.notify();
                     }
                 }))
-                .on_mouse_up(gpui::MouseButton::Left, cx.listener(|ws, _, _, cx| {
-                    ws.tree_scrollbar_drag = None;
-                    cx.notify();
-                }))
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|ws, _, _, cx| {
+                        ws.tree_scrollbar_drag = None;
+                        cx.notify();
+                    }),
+                )
             })
-            .child(div().flex().flex_col().flex_1().min_w(px(0.)).min_h(px(0.)).child(tree_list))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .min_h(px(0.))
+                    .child(tree_list),
+            )
             .child(scrollbar)
             .into_any_element()
     }
@@ -275,7 +304,9 @@ impl Workspace {
                         .top_0()
                         .bottom_0()
                         .w(px(1.0))
-                        .left(px(8.0 + d as f32 * TREE_INDENT_W + TREE_INDENT_W * 0.5 - 0.5))
+                        .left(px(
+                            8.0 + d as f32 * TREE_INDENT_W + TREE_INDENT_W * 0.5 - 0.5
+                        ))
                         .bg(t.separator)
                         .into_any_element()
                 })
@@ -293,7 +324,11 @@ impl Workspace {
             .gap_1()
             .font_family(t.ui_family.clone())
             .text_size(px(t.font_size_caption))
-            .text_color(if is_active || is_dir { t.text } else { t.text_muted })
+            .text_color(if is_active || is_dir {
+                t.text
+            } else {
+                t.text_muted
+            })
             .cursor_pointer()
             .when(is_active, |el| el.bg(t.selection))
             .hover(|el| el.bg(t.line_highlight))
@@ -309,7 +344,12 @@ impl Workspace {
             .children(guides)
             .child(div().flex_shrink_0().child(chevron))
             .child(img(icon).size(px(16.0)).flex_shrink_0())
-            .child(div().whitespace_nowrap().flex_shrink_0().child(row.name.clone()))
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .flex_shrink_0()
+                    .child(row.name.clone()),
+            )
     }
 
     fn render_outline(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> AnyElement {
@@ -330,16 +370,15 @@ impl Workspace {
                 .into_any_element();
         }
 
-        uniform_list(
-            "outline",
-            outline.items.len(),
-            move |range, _window, cx| {
-                let ws = entity.read(cx);
-                range
-                    .map(|ix| ws.render_outline_row(ix, &outline, &entity, &t2).into_any_element())
-                    .collect::<Vec<_>>()
-            },
-        )
+        uniform_list("outline", outline.items.len(), move |range, _window, cx| {
+            let ws = entity.read(cx);
+            range
+                .map(|ix| {
+                    ws.render_outline_row(ix, &outline, &entity, &t2)
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>()
+        })
         .flex_1()
         .into_any_element()
     }
@@ -364,7 +403,11 @@ impl Workspace {
             .gap_1()
             .font_family(t.ui_family.clone())
             .text_size(px(t.font_size_caption))
-            .text_color(if entry.depth == 0 { t.text } else { t.text_muted })
+            .text_color(if entry.depth == 0 {
+                t.text
+            } else {
+                t.text_muted
+            })
             .cursor_pointer()
             .hover(|el| el.bg(t.line_highlight))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -380,17 +423,19 @@ impl Workspace {
 
     /// Returns the outline of the active editor, or empty.
     fn active_outline(&self, cx: &Context<Self>) -> Arc<Outline> {
-        let Some(i) = self.active else { return Arc::new(Outline::default()); };
-        let Some(tab) = self.tabs.get(i) else { return Arc::new(Outline::default()); };
-        let Some(editor) = tab.editor() else { return Arc::new(Outline::default()); };
+        let Some(i) = self.active else {
+            return Arc::new(Outline::default());
+        };
+        let Some(tab) = self.tabs.get(i) else {
+            return Arc::new(Outline::default());
+        };
+        let Some(editor) = tab.editor() else {
+            return Arc::new(Outline::default());
+        };
         Arc::clone(&editor.read(cx).outline)
     }
 
-    fn render_explorer_header(
-        &self,
-        t: &RuntimeTheme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_explorer_header(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> AnyElement {
         let icon_btn = |id: &'static str, _icon: IconName, t: &RuntimeTheme| {
             div()
                 .id(id)
@@ -418,24 +463,45 @@ impl Workspace {
                     .gap_1()
                     .child(
                         icon_btn("explorer-refresh", IconName::Refresh, t)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, _, cx| {
-                                ws.refresh_tree(cx);
-                            }))
-                            .child(Icon::new(IconName::Refresh).size(px(14.0)).color(t.text_subtle)),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|ws, _, _, cx| {
+                                    ws.refresh_tree(cx);
+                                }),
+                            )
+                            .child(
+                                Icon::new(IconName::Refresh)
+                                    .size(px(14.0))
+                                    .color(t.text_subtle),
+                            ),
                     )
                     .child(
                         icon_btn("explorer-collapse", IconName::UnfoldLess, t)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, _, cx| {
-                                ws.collapse_tree_all(cx);
-                            }))
-                            .child(Icon::new(IconName::UnfoldLess).size(px(14.0)).color(t.text_subtle)),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|ws, _, _, cx| {
+                                    ws.collapse_tree_all(cx);
+                                }),
+                            )
+                            .child(
+                                Icon::new(IconName::UnfoldLess)
+                                    .size(px(14.0))
+                                    .color(t.text_subtle),
+                            ),
                     )
                     .child(
                         icon_btn("explorer-expand", IconName::UnfoldMore, t)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, _, cx| {
-                                ws.expand_tree_all(cx);
-                            }))
-                            .child(Icon::new(IconName::UnfoldMore).size(px(14.0)).color(t.text_subtle)),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|ws, _, _, cx| {
+                                    ws.expand_tree_all(cx);
+                                }),
+                            )
+                            .child(
+                                Icon::new(IconName::UnfoldMore)
+                                    .size(px(14.0))
+                                    .color(t.text_subtle),
+                            ),
                     ),
             )
             .into_any_element()
@@ -463,7 +529,12 @@ impl Workspace {
             )
     }
 
-    fn on_activity_click(&mut self, kind: SidebarItemKind, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    fn on_activity_click(
+        &mut self,
+        kind: SidebarItemKind,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
         if kind == SidebarItemKind::Search {
             // Search opens a full tab rather than a sidebar panel.
             window.dispatch_action(Box::new(OpenProjectSearch), cx);

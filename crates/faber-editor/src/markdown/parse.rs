@@ -5,21 +5,15 @@ use ropey::Rope;
 
 use faber_lang::LanguageRegistry;
 
+use super::{Block, BlockKind, InlineRun, InlineStyle, ListItem, MarkdownDoc};
 use crate::highlight::{HighlightCache, HighlightSpan};
 use crate::outline::OutlineItem;
-use super::{
-    Block, BlockKind, InlineRun, InlineStyle, ListItem, MarkdownDoc,
-};
 
 /// Parse a markdown string into a `MarkdownDoc`.
 ///
 /// `rope` is used to convert byte offsets to line numbers for scroll sync.
 /// `registry` resolves fenced-code-block language tags for syntax highlighting.
-pub fn parse_markdown(
-    source: &str,
-    rope: &Rope,
-    registry: &LanguageRegistry,
-) -> MarkdownDoc {
+pub fn parse_markdown(source: &str, rope: &Rope, registry: &LanguageRegistry) -> MarkdownDoc {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
@@ -35,7 +29,10 @@ pub fn parse_markdown(
     };
 
     let blocks = collect_blocks(parser.collect::<Vec<_>>().as_slice(), &mut ctx);
-    MarkdownDoc { blocks, outline: ctx.outline }
+    MarkdownDoc {
+        blocks,
+        outline: ctx.outline,
+    }
 }
 
 // ── internal helpers ─────────────────────────────────────────────────────────
@@ -76,7 +73,8 @@ fn collect_blocks(
             Event::Start(Tag::Heading { level, .. }) => {
                 let source_lines = ctx.source_lines(range);
                 // Collect inline events up to the matching End.
-                let (inlines, skip) = collect_inlines_until(&events[i + 1..], TagEnd::Heading(*level));
+                let (inlines, skip) =
+                    collect_inlines_until(&events[i + 1..], TagEnd::Heading(*level));
                 let level_u8 = heading_level_u8(*level);
                 let text = inline_text(&inlines);
                 let block_ix = ctx.block_ix_counter;
@@ -95,7 +93,10 @@ fn collect_blocks(
                     block_ix: Some(block_ix),
                 });
                 blocks.push(Block {
-                    kind: BlockKind::Heading { level: level_u8, inlines },
+                    kind: BlockKind::Heading {
+                        level: level_u8,
+                        inlines,
+                    },
                     source_lines,
                 });
                 i += 1 + skip + 1; // start + inlines + end tag
@@ -124,7 +125,11 @@ fn collect_blocks(
                 let (text, skip) = collect_code_text(&events[i + 1..]);
                 let highlights = highlight_code(&text, lang.as_deref(), ctx.registry);
                 blocks.push(Block {
-                    kind: BlockKind::CodeBlock { lang, text, highlights },
+                    kind: BlockKind::CodeBlock {
+                        lang,
+                        text,
+                        highlights,
+                    },
                     source_lines,
                 });
                 ctx.block_ix_counter += 1;
@@ -151,7 +156,11 @@ fn collect_blocks(
                 let (inner, skip) = extract_nested(&events[i + 1..], TagEnd::List(ordered));
                 let items = collect_list_items(inner, ctx);
                 blocks.push(Block {
-                    kind: BlockKind::List { ordered, start, items },
+                    kind: BlockKind::List {
+                        ordered,
+                        start,
+                        items,
+                    },
                     source_lines,
                 });
                 ctx.block_ix_counter += 1;
@@ -172,7 +181,10 @@ fn collect_blocks(
 
             Event::Rule => {
                 let source_lines = ctx.source_lines(range);
-                blocks.push(Block { kind: BlockKind::Rule, source_lines });
+                blocks.push(Block {
+                    kind: BlockKind::Rule,
+                    source_lines,
+                });
                 ctx.block_ix_counter += 1;
                 i += 1;
             }
@@ -180,7 +192,9 @@ fn collect_blocks(
             Event::Html(text) => {
                 let source_lines = ctx.source_lines(range);
                 blocks.push(Block {
-                    kind: BlockKind::HtmlBlock { text: text.to_string() },
+                    kind: BlockKind::HtmlBlock {
+                        text: text.to_string(),
+                    },
                     source_lines,
                 });
                 ctx.block_ix_counter += 1;
@@ -215,7 +229,9 @@ fn collect_blocks(
             }
 
             // Skip End tags and anything else at block level.
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
 
@@ -256,26 +272,34 @@ fn collect_inlines(
                 s.bold = true;
                 style_stack.push(s);
             }
-            Event::End(TagEnd::Strong) => { style_stack.pop(); }
+            Event::End(TagEnd::Strong) => {
+                style_stack.pop();
+            }
 
             Event::Start(Tag::Emphasis) => {
                 let mut s = style_stack.last().cloned().unwrap_or_default();
                 s.italic = true;
                 style_stack.push(s);
             }
-            Event::End(TagEnd::Emphasis) => { style_stack.pop(); }
+            Event::End(TagEnd::Emphasis) => {
+                style_stack.pop();
+            }
 
             Event::Start(Tag::Strikethrough) => {
                 let mut s = style_stack.last().cloned().unwrap_or_default();
                 s.strike = true;
                 style_stack.push(s);
             }
-            Event::End(TagEnd::Strikethrough) => { style_stack.pop(); }
+            Event::End(TagEnd::Strikethrough) => {
+                style_stack.pop();
+            }
 
             Event::Start(Tag::Link { dest_url, .. }) => {
                 link_stack.push(dest_url.to_string());
             }
-            Event::End(TagEnd::Link) => { link_stack.pop(); }
+            Event::End(TagEnd::Link) => {
+                link_stack.pop();
+            }
 
             Event::Start(Tag::Image { dest_url, .. }) => {
                 let mut alt = String::new();
@@ -288,7 +312,10 @@ fn collect_inlines(
                     }
                     i += 1;
                 }
-                inlines.push(InlineRun::Image { alt, dest: dest_url.to_string() });
+                inlines.push(InlineRun::Image {
+                    alt,
+                    dest: dest_url.to_string(),
+                });
                 i += 1;
                 continue;
             }
@@ -335,30 +362,30 @@ fn is_block_boundary(event: &Event<'_>) -> bool {
         event,
         Event::Start(
             Tag::Heading { .. }
-            | Tag::Paragraph
-            | Tag::CodeBlock(_)
-            | Tag::BlockQuote(_)
-            | Tag::List(_)
-            | Tag::Item
-            | Tag::Table(_)
-            | Tag::TableHead
-            | Tag::TableRow
-            | Tag::TableCell
-            | Tag::FootnoteDefinition(_)
+                | Tag::Paragraph
+                | Tag::CodeBlock(_)
+                | Tag::BlockQuote(_)
+                | Tag::List(_)
+                | Tag::Item
+                | Tag::Table(_)
+                | Tag::TableHead
+                | Tag::TableRow
+                | Tag::TableCell
+                | Tag::FootnoteDefinition(_)
         ) | Event::End(
             TagEnd::Heading(_)
-            | TagEnd::Paragraph
-            | TagEnd::CodeBlock
-            | TagEnd::BlockQuote(_)
-            | TagEnd::List(_)
-            | TagEnd::Item
-            | TagEnd::Table
-            | TagEnd::TableHead
-            | TagEnd::TableRow
-            | TagEnd::TableCell
-            | TagEnd::FootnoteDefinition
+                | TagEnd::Paragraph
+                | TagEnd::CodeBlock
+                | TagEnd::BlockQuote(_)
+                | TagEnd::List(_)
+                | TagEnd::Item
+                | TagEnd::Table
+                | TagEnd::TableHead
+                | TagEnd::TableRow
+                | TagEnd::TableCell
+                | TagEnd::FootnoteDefinition
         ) | Event::Rule
-          | Event::Html(_)
+            | Event::Html(_)
     )
 }
 
@@ -408,7 +435,11 @@ fn collect_list_items(
             let task_source_line = Some(ctx.byte_to_line(range.start));
             // Detect task checkbox from the first event inside.
             let task = inner.first().and_then(|(e, _)| {
-                if let Event::TaskListMarker(checked) = e { Some(*checked) } else { None }
+                if let Event::TaskListMarker(checked) = e {
+                    Some(*checked)
+                } else {
+                    None
+                }
                 // `checked` is already a bool value, no deref needed above
             });
             // Skip the TaskListMarker event itself when collecting sub-blocks.
@@ -420,7 +451,11 @@ fn collect_list_items(
             let blocks = collect_blocks(inner_for_blocks, ctx);
             items.push(ListItem {
                 task,
-                task_source_line: if task.is_some() { task_source_line } else { None },
+                task_source_line: if task.is_some() {
+                    task_source_line
+                } else {
+                    None
+                },
                 blocks,
             });
             i += 1 + skip + 1;
@@ -451,7 +486,9 @@ fn parse_table(
                 rows.push(parse_table_row(inner));
                 i += 1 + skip + 1;
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
     (head, rows)
@@ -541,28 +578,42 @@ mod tests {
     }
 
     fn item_text(item: &ListItem) -> String {
-        item.blocks.iter().flat_map(|b| match &b.kind {
-            BlockKind::Paragraph { inlines } => inlines.iter().collect::<Vec<_>>(),
-            _ => vec![],
-        }).filter_map(|r| match r {
-            InlineRun::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        }).collect()
+        item.blocks
+            .iter()
+            .flat_map(|b| match &b.kind {
+                BlockKind::Paragraph { inlines } => inlines.iter().collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .filter_map(|r| match r {
+                InlineRun::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
     fn list_does_not_swallow_following_heading() {
         let doc = parse("- a\n\n# H");
-        assert_eq!(doc.blocks.len(), 2, "expected List + Heading, got {:?} blocks", doc.blocks.len());
+        assert_eq!(
+            doc.blocks.len(),
+            2,
+            "expected List + Heading, got {:?} blocks",
+            doc.blocks.len()
+        );
         assert!(matches!(doc.blocks[0].kind, BlockKind::List { .. }));
-        assert!(matches!(doc.blocks[1].kind, BlockKind::Heading { level: 1, .. }));
+        assert!(matches!(
+            doc.blocks[1].kind,
+            BlockKind::Heading { level: 1, .. }
+        ));
     }
 
     #[test]
     fn tight_list_items_contain_text() {
         let doc = parse("- foo\n- bar");
         assert_eq!(doc.blocks.len(), 1);
-        let BlockKind::List { items, .. } = &doc.blocks[0].kind else { panic!("expected List") };
+        let BlockKind::List { items, .. } = &doc.blocks[0].kind else {
+            panic!("expected List")
+        };
         assert_eq!(items.len(), 2);
         assert_eq!(item_text(&items[0]), "foo");
         assert_eq!(item_text(&items[1]), "bar");
@@ -571,7 +622,9 @@ mod tests {
     #[test]
     fn ordered_list_items_contain_text() {
         let doc = parse("1. first\n2. second");
-        let BlockKind::List { ordered, items, .. } = &doc.blocks[0].kind else { panic!() };
+        let BlockKind::List { ordered, items, .. } = &doc.blocks[0].kind else {
+            panic!()
+        };
         assert!(ordered);
         assert_eq!(items.len(), 2);
         assert_eq!(item_text(&items[0]), "first");
@@ -581,10 +634,15 @@ mod tests {
     #[test]
     fn nested_list_structure() {
         let doc = parse("- a\n  - b");
-        let BlockKind::List { items, .. } = &doc.blocks[0].kind else { panic!() };
+        let BlockKind::List { items, .. } = &doc.blocks[0].kind else {
+            panic!()
+        };
         assert_eq!(items.len(), 1);
         // item 0 should have a nested list
-        let has_nested = items[0].blocks.iter().any(|b| matches!(b.kind, BlockKind::List { .. }));
+        let has_nested = items[0]
+            .blocks
+            .iter()
+            .any(|b| matches!(b.kind, BlockKind::List { .. }));
         assert!(has_nested, "expected nested list inside item 0");
     }
 
@@ -593,13 +651,18 @@ mod tests {
         let doc = parse("> q\n\n# H");
         assert_eq!(doc.blocks.len(), 2);
         assert!(matches!(doc.blocks[0].kind, BlockKind::Blockquote { .. }));
-        assert!(matches!(doc.blocks[1].kind, BlockKind::Heading { level: 1, .. }));
+        assert!(matches!(
+            doc.blocks[1].kind,
+            BlockKind::Heading { level: 1, .. }
+        ));
     }
 
     #[test]
     fn task_list_items_contain_text() {
         let doc = parse("- [ ] todo\n- [x] done");
-        let BlockKind::List { items, .. } = &doc.blocks[0].kind else { panic!() };
+        let BlockKind::List { items, .. } = &doc.blocks[0].kind else {
+            panic!()
+        };
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].task, Some(false));
         assert_eq!(items[1].task, Some(true));

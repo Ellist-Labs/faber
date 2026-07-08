@@ -38,7 +38,11 @@ fn apply(sel: Selection, new_head: usize, rope: &Rope, extend: bool) -> Selectio
 pub fn move_left(rope: &Rope, sel: Selection, extend: bool) -> Selection {
     if !extend && !sel.is_empty() {
         let pos = sel.start();
-        return Selection { anchor: pos, head: pos, goal_col: col_of(rope, pos) };
+        return Selection {
+            anchor: pos,
+            head: pos,
+            goal_col: col_of(rope, pos),
+        };
     }
     let new_head = sel.head.saturating_sub(1);
     apply(sel, new_head, rope, extend)
@@ -47,7 +51,11 @@ pub fn move_left(rope: &Rope, sel: Selection, extend: bool) -> Selection {
 pub fn move_right(rope: &Rope, sel: Selection, extend: bool) -> Selection {
     if !extend && !sel.is_empty() {
         let pos = sel.end();
-        return Selection { anchor: pos, head: pos, goal_col: col_of(rope, pos) };
+        return Selection {
+            anchor: pos,
+            head: pos,
+            goal_col: col_of(rope, pos),
+        };
     }
     let new_head = (sel.head + 1).min(rope.len_chars());
     apply(sel, new_head, rope, extend)
@@ -98,7 +106,11 @@ pub fn move_down(rope: &Rope, sel: Selection, extend: bool) -> Selection {
 pub fn move_home(rope: &Rope, sel: Selection, extend: bool) -> Selection {
     let line = rope.char_to_line(sel.head);
     let pos = rope.line_to_char(line);
-    Selection { anchor: if extend { sel.anchor } else { pos }, head: pos, goal_col: 0 }
+    Selection {
+        anchor: if extend { sel.anchor } else { pos },
+        head: pos,
+        goal_col: 0,
+    }
 }
 
 pub fn move_end(rope: &Rope, sel: Selection, extend: bool) -> Selection {
@@ -115,13 +127,21 @@ pub fn move_end(rope: &Rope, sel: Selection, extend: bool) -> Selection {
 // ── document movement ─────────────────────────────────────────────────────────
 
 pub fn move_doc_start(sel: Selection, extend: bool) -> Selection {
-    Selection { anchor: if extend { sel.anchor } else { 0 }, head: 0, goal_col: 0 }
+    Selection {
+        anchor: if extend { sel.anchor } else { 0 },
+        head: 0,
+        goal_col: 0,
+    }
 }
 
 pub fn move_doc_end(rope: &Rope, sel: Selection, extend: bool) -> Selection {
     let pos = rope.len_chars();
     let col = col_of(rope, pos);
-    Selection { anchor: if extend { sel.anchor } else { pos }, head: pos, goal_col: col }
+    Selection {
+        anchor: if extend { sel.anchor } else { pos },
+        head: pos,
+        goal_col: col,
+    }
 }
 
 // ── page movement ─────────────────────────────────────────────────────────────
@@ -165,7 +185,11 @@ pub fn move_word_right(rope: &Rope, sel: Selection, extend: bool) -> Selection {
 
 pub fn select_all(rope: &Rope) -> Selection {
     let pos = rope.len_chars();
-    Selection { anchor: 0, head: pos, goal_col: col_of(rope, pos) }
+    Selection {
+        anchor: 0,
+        head: pos,
+        goal_col: col_of(rope, pos),
+    }
 }
 
 fn word_boundary_left(rope: &Rope, mut pos: usize, is_word: WordClassifier) -> usize {
@@ -208,7 +232,11 @@ fn word_boundary_right(rope: &Rope, mut pos: usize, is_word: WordClassifier) -> 
 pub fn word_at(rope: &Rope, pos: usize) -> Selection {
     let len = rope.len_chars();
     if len == 0 {
-        return Selection { anchor: 0, head: 0, goal_col: 0 };
+        return Selection {
+            anchor: 0,
+            head: 0,
+            goal_col: 0,
+        };
     }
     let pos = pos.min(len.saturating_sub(1));
     let ch = rope.char(pos);
@@ -221,7 +249,11 @@ pub fn word_at(rope: &Rope, pos: usize) -> Selection {
     while end < len && default_word_classifier(rope.char(end)) == is_word {
         end += 1;
     }
-    Selection { anchor: start, head: end, goal_col: col_of(rope, end) }
+    Selection {
+        anchor: start,
+        head: end,
+        goal_col: col_of(rope, end),
+    }
 }
 
 /// Returns a Selection spanning the entire content of the line containing `pos`
@@ -229,13 +261,21 @@ pub fn word_at(rope: &Rope, pos: usize) -> Selection {
 pub fn line_selection(rope: &Rope, pos: usize) -> Selection {
     let len = rope.len_chars();
     if len == 0 {
-        return Selection { anchor: 0, head: 0, goal_col: 0 };
+        return Selection {
+            anchor: 0,
+            head: 0,
+            goal_col: 0,
+        };
     }
     let line = rope.char_to_line(pos.min(len.saturating_sub(1)));
     let start = rope.line_to_char(line);
     let content = line_content_len(rope, line);
     let end = start + content;
-    Selection { anchor: start, head: end, goal_col: content }
+    Selection {
+        anchor: start,
+        head: end,
+        goal_col: content,
+    }
 }
 
 #[cfg(test)]
@@ -244,7 +284,11 @@ mod tests {
     use ropey::Rope;
 
     fn sel(pos: usize) -> Selection {
-        Selection { anchor: pos, head: pos, goal_col: 0 }
+        Selection {
+            anchor: pos,
+            head: pos,
+            goal_col: 0,
+        }
     }
 
     // ── left / right ─────────────────────────────────────────────────────────
@@ -272,7 +316,11 @@ mod tests {
     #[test]
     fn move_left_collapses_selection() {
         let r = Rope::from_str("hello world");
-        let s = Selection { anchor: 2, head: 6, goal_col: 0 };
+        let s = Selection {
+            anchor: 2,
+            head: 6,
+            goal_col: 0,
+        };
         let result = move_left(&r, s, false);
         assert_eq!(result.head, 2);
         assert_eq!(result.anchor, 2);
@@ -281,7 +329,11 @@ mod tests {
     #[test]
     fn move_right_collapses_selection_to_end() {
         let r = Rope::from_str("hello world");
-        let s = Selection { anchor: 2, head: 6, goal_col: 0 };
+        let s = Selection {
+            anchor: 2,
+            head: 6,
+            goal_col: 0,
+        };
         let result = move_right(&r, s, false);
         assert_eq!(result.head, 6);
         assert_eq!(result.anchor, 6);
@@ -306,7 +358,11 @@ mod tests {
     #[test]
     fn move_down_preserves_goal_col() {
         let r = Rope::from_str("hello\nhi");
-        let s = Selection { anchor: 4, head: 4, goal_col: 4 };
+        let s = Selection {
+            anchor: 4,
+            head: 4,
+            goal_col: 4,
+        };
         let result = move_down(&r, s, false);
         // "hi" only has 2 chars, goal_col=4 clamped to 2
         assert_eq!(result.head, r.line_to_char(1) + 2);
