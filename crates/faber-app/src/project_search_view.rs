@@ -7,10 +7,10 @@ use faber_editor::project_search::{FileSearchResult, ProjectSearchQuery, run};
 use ropey::Rope;
 
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement,
+    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement,
     KeyDownEvent, ListHorizontalSizingBehavior, MouseButton, MouseMoveEvent,
-    Render, SharedString, Task, UniformListScrollHandle, WeakEntity, Window,
-    div, prelude::*, px, svg, uniform_list,
+    Render, SharedString, Task, TextRun, UniformListScrollHandle, WeakEntity, Window,
+    canvas, div, fill, font, point, prelude::*, px, size, svg, uniform_list,
 };
 use rust_i18n::t;
 
@@ -910,25 +910,34 @@ impl ProjectSearchView {
                 div().text_color(t.text_subtle).child(t!("project_search.placeholder").to_string()).into_any_element()
             } else {
                 {
-                    let at_ch: String = q_after.chars().take(1).collect();
-                    let after_rest: String = q_after.chars().skip(1).collect();
                     let cur_on = query_focused && caret_visible;
-                    h_flex()
-                        .gap(px(0.))
-                        .child(div().text_color(t.text).child(SharedString::from(q_before)))
-                        .child(if at_ch.is_empty() {
-                            div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0()
-                                .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                                .into_any_element()
-                        } else {
-                            div().flex_shrink_0()
-                                .text_color(if cur_on { t.bg } else { t.text })
-                                .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                                .child(SharedString::from(at_ch))
-                                .into_any_element()
-                        })
-                        .child(div().text_color(t.text).child(SharedString::from(after_rest)))
-                        .into_any_element()
+                    let full_text = format!("{}{}", q_before, q_after);
+                    let caret_byte = q_before.len();
+                    let font_sz = px(t.font_size_caption);
+                    let line_h = px(cursor_h);
+                    let ui_family = t.ui_family.clone();
+                    let text_col = t.text;
+                    let cursor_color = if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
+                    canvas(
+                        move |_bounds, window, _cx| {
+                            let runs = if full_text.is_empty() { vec![] } else {
+                                vec![TextRun { len: full_text.len(), font: font(ui_family.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                            };
+                            window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                        },
+                        move |bounds, shaped, window, cx| {
+                            let origin = bounds.origin;
+                            let _ = shaped.paint(origin, line_h, window, cx);
+                            let cx_x = origin.x + shaped.x_for_index(caret_byte);
+                            window.paint_quad(fill(
+                                Bounds::new(point(cx_x, origin.y), size(px(2.0), line_h)),
+                                cursor_color,
+                            ));
+                        },
+                    )
+                    .flex_1()
+                    .h(line_h)
+                    .into_any_element()
                 }
             });
 
@@ -1099,25 +1108,34 @@ impl ProjectSearchView {
                     .into_any_element()
             } else {
                 {
-                    let at_ch: String = r_after.chars().take(1).collect();
-                    let after_rest: String = r_after.chars().skip(1).collect();
                     let cur_on = replace_focused && caret_visible;
-                    h_flex()
-                        .gap(px(0.))
-                        .child(div().text_color(t.text).child(SharedString::from(r_before)))
-                        .child(if at_ch.is_empty() {
-                            div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0()
-                                .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                                .into_any_element()
-                        } else {
-                            div().flex_shrink_0()
-                                .text_color(if cur_on { t.bg } else { t.text })
-                                .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                                .child(SharedString::from(at_ch))
-                                .into_any_element()
-                        })
-                        .child(div().text_color(t.text).child(SharedString::from(after_rest)))
-                        .into_any_element()
+                    let full_text = format!("{}{}", r_before, r_after);
+                    let caret_byte = r_before.len();
+                    let font_sz = px(t.font_size_caption);
+                    let line_h = px(cursor_h);
+                    let ui_family = t.ui_family.clone();
+                    let text_col = t.text;
+                    let cursor_color = if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
+                    canvas(
+                        move |_bounds, window, _cx| {
+                            let runs = if full_text.is_empty() { vec![] } else {
+                                vec![TextRun { len: full_text.len(), font: font(ui_family.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                            };
+                            window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                        },
+                        move |bounds, shaped, window, cx| {
+                            let origin = bounds.origin;
+                            let _ = shaped.paint(origin, line_h, window, cx);
+                            let cx_x = origin.x + shaped.x_for_index(caret_byte);
+                            window.paint_quad(fill(
+                                Bounds::new(point(cx_x, origin.y), size(px(2.0), line_h)),
+                                cursor_color,
+                            ));
+                        },
+                    )
+                    .flex_1()
+                    .h(line_h)
+                    .into_any_element()
                 }
             });
 
@@ -1207,25 +1225,34 @@ impl ProjectSearchView {
                 .child(if text.is_empty() && !focused {
                     div().text_color(t.text_subtle).child(placeholder).into_any_element()
                 } else {
-                    let at_ch: String = after.chars().take(1).collect();
-                    let after_rest: String = after.chars().skip(1).collect();
                     let cur_on = focused && caret;
-                    h_flex()
-                        .gap(px(0.))
-                        .child(div().text_color(t.text).child(SharedString::from(before)))
-                        .child(if at_ch.is_empty() {
-                            div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0()
-                                .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                                .into_any_element()
-                        } else {
-                            div().flex_shrink_0()
-                                .text_color(if cur_on { t.bg } else { t.text })
-                                .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
-                                .child(SharedString::from(at_ch))
-                                .into_any_element()
-                        })
-                        .child(div().text_color(t.text).child(SharedString::from(after_rest)))
-                        .into_any_element()
+                    let full_text = format!("{}{}", before, after);
+                    let caret_byte_pos = before.len();
+                    let font_sz = px(t.font_size_caption);
+                    let line_h = px(cursor_h);
+                    let ui_family = t.ui_family.clone();
+                    let text_col = t.text;
+                    let cursor_color = if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
+                    canvas(
+                        move |_bounds, window, _cx| {
+                            let runs = if full_text.is_empty() { vec![] } else {
+                                vec![TextRun { len: full_text.len(), font: font(ui_family.clone()), color: text_col, background_color: None, underline: None, strikethrough: None }]
+                            };
+                            window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                        },
+                        move |bounds, shaped, window, cx| {
+                            let origin = bounds.origin;
+                            let _ = shaped.paint(origin, line_h, window, cx);
+                            let cx_x = origin.x + shaped.x_for_index(caret_byte_pos);
+                            window.paint_quad(fill(
+                                Bounds::new(point(cx_x, origin.y), size(px(2.0), line_h)),
+                                cursor_color,
+                            ));
+                        },
+                    )
+                    .flex_1()
+                    .h(line_h)
+                    .into_any_element()
                 })
         };
 
