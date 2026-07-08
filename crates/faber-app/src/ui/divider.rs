@@ -15,11 +15,15 @@ pub struct Divider {
 
 impl Divider {
     pub fn horizontal() -> Self {
-        Self { direction: DividerDirection::Horizontal }
+        Self {
+            direction: DividerDirection::Horizontal,
+        }
     }
 
     pub fn vertical() -> Self {
-        Self { direction: DividerDirection::Vertical }
+        Self {
+            direction: DividerDirection::Vertical,
+        }
     }
 }
 
@@ -27,14 +31,8 @@ impl RenderOnce for Divider {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme().clone();
         match self.direction {
-            DividerDirection::Horizontal => div()
-                .w_full()
-                .h(px(1.0))
-                .bg(theme.separator),
-            DividerDirection::Vertical => div()
-                .h_full()
-                .w(px(1.0))
-                .bg(theme.separator),
+            DividerDirection::Horizontal => div().w_full().h(px(1.0)).bg(theme.separator),
+            DividerDirection::Vertical => div().h_full().w(px(1.0)).bg(theme.separator),
         }
     }
 }

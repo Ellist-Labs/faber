@@ -49,8 +49,12 @@ pub fn scan(root: &Path, include_ignored: bool) -> FileIndexSnapshot {
 pub fn scan_with_limit(root: &Path, include_ignored: bool, limit: usize) -> FileIndexSnapshot {
     // The full walk can't tell which entries a normal walk would have skipped,
     // so collect the non-ignored set first and diff against it.
-    let normal_set: Option<HashSet<String>> = include_ignored
-        .then(|| walk(root, false, limit).into_iter().map(|(p, _)| p).collect());
+    let normal_set: Option<HashSet<String>> = include_ignored.then(|| {
+        walk(root, false, limit)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect()
+    });
 
     let raw = walk(root, include_ignored, limit);
     let truncated = raw.len() >= limit;
@@ -62,9 +66,14 @@ pub fn scan_with_limit(root: &Path, include_ignored: bool, limit: usize) -> File
             if let Some(ext) = extension_of(&rel_path[name_off as usize..]) {
                 *ext_counts.entry(ext).or_insert(0) += 1;
             }
-            let is_ignored =
-                normal_set.as_ref().is_some_and(|set| !set.contains(rel_path.as_str()));
-            FileEntry { rel_path, name_off, is_ignored }
+            let is_ignored = normal_set
+                .as_ref()
+                .is_some_and(|set| !set.contains(rel_path.as_str()));
+            FileEntry {
+                rel_path,
+                name_off,
+                is_ignored,
+            }
         })
         .collect();
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
@@ -72,7 +81,12 @@ pub fn scan_with_limit(root: &Path, include_ignored: bool, limit: usize) -> File
     let mut extensions: Vec<(String, u32)> = ext_counts.into_iter().collect();
     extensions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    FileIndexSnapshot { root: root.to_owned(), entries, extensions, truncated }
+    FileIndexSnapshot {
+        root: root.to_owned(),
+        entries,
+        extensions,
+        truncated,
+    }
 }
 
 /// Walk the tree, returning `(rel_path, name_off)` pairs, capped at `limit`.
@@ -90,7 +104,9 @@ fn walk(root: &Path, include_ignored: bool, limit: usize) -> Vec<(String, u32)> 
         if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
             continue;
         }
-        let Ok(rel) = entry.path().strip_prefix(root) else { continue };
+        let Ok(rel) = entry.path().strip_prefix(root) else {
+            continue;
+        };
         let rel_path = rel.to_string_lossy().into_owned();
         let name_off = rel_path.rfind('/').map(|i| i + 1).unwrap_or(0) as u32;
         out.push((rel_path, name_off));
@@ -156,7 +172,10 @@ pub fn filter(
             if out.len() >= limit {
                 break;
             }
-            if let Ok(ix) = snap.entries.binary_search_by(|e| e.rel_path.as_str().cmp(rel)) {
+            if let Ok(ix) = snap
+                .entries
+                .binary_search_by(|e| e.rel_path.as_str().cmp(rel))
+            {
                 if mask_ok(&snap.entries[ix]) {
                     out.push(FinderMatch {
                         entry_ix: ix as u32,
@@ -172,12 +191,18 @@ pub fn filter(
 
     // Compile regex / build matcher once — reused in both passes.
     let compiled_re = if q.regex {
-        let Some(re) = build_regex(q) else { return Vec::new() };
+        let Some(re) = build_regex(q) else {
+            return Vec::new();
+        };
         Some(re)
     } else {
         None
     };
-    let case = if q.case_sensitive { CaseMatching::Respect } else { CaseMatching::Ignore };
+    let case = if q.case_sensitive {
+        CaseMatching::Respect
+    } else {
+        CaseMatching::Ignore
+    };
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let pattern = Pattern::parse(&q.text, case, Normalization::Smart);
 
@@ -188,7 +213,9 @@ pub fn filter(
             if !mask_ok(e) {
                 continue;
             }
-            let Some(first) = re.find(&e.rel_path) else { continue };
+            let Some(first) = re.find(&e.rel_path) else {
+                continue;
+            };
             // Later match start and longer path rank lower.
             let score = 100_000u32
                 .saturating_sub(first.start() as u32 * 16)
@@ -202,9 +229,12 @@ pub fn filter(
             if !mask_ok(e) {
                 continue;
             }
-            let haystack = if q.whole_word { e.name() } else { e.rel_path.as_str() };
-            let Some(score) = pattern.score(Utf32Str::new(haystack, &mut buf), &mut matcher)
-            else {
+            let haystack = if q.whole_word {
+                e.name()
+            } else {
+                e.rel_path.as_str()
+            };
+            let Some(score) = pattern.score(Utf32Str::new(haystack, &mut buf), &mut matcher) else {
                 continue;
             };
             let rank = history_rank.get(e.rel_path.as_str());
@@ -213,7 +243,11 @@ pub fn filter(
     }
 
     scored.sort_by(|a, b| {
-        b.1.cmp(&a.1).then_with(|| snap.entries[a.0 as usize].rel_path.cmp(&snap.entries[b.0 as usize].rel_path))
+        b.1.cmp(&a.1).then_with(|| {
+            snap.entries[a.0 as usize]
+                .rel_path
+                .cmp(&snap.entries[b.0 as usize].rel_path)
+        })
     });
     scored.truncate(limit);
 
@@ -230,15 +264,28 @@ pub fn filter(
                     (start..start + len).collect()
                 })
                 .unwrap_or_default();
-            out.push(FinderMatch { entry_ix, score, from_history, positions });
+            out.push(FinderMatch {
+                entry_ix,
+                score,
+                from_history,
+                positions,
+            });
         }
     } else {
         let mut buf = Vec::new();
         for (entry_ix, score, from_history) in scored {
             let e = &snap.entries[entry_ix as usize];
-            let haystack = if q.whole_word { e.name() } else { e.rel_path.as_str() };
+            let haystack = if q.whole_word {
+                e.name()
+            } else {
+                e.rel_path.as_str()
+            };
             let mut positions: Vec<u32> = Vec::new();
-            pattern.indices(Utf32Str::new(haystack, &mut buf), &mut matcher, &mut positions);
+            pattern.indices(
+                Utf32Str::new(haystack, &mut buf),
+                &mut matcher,
+                &mut positions,
+            );
             positions.sort_unstable();
             positions.dedup();
             if q.whole_word {
@@ -249,16 +296,27 @@ pub fn filter(
                     *p += prefix_chars;
                 }
             }
-            out.push(FinderMatch { entry_ix, score, from_history, positions });
+            out.push(FinderMatch {
+                entry_ix,
+                score,
+                from_history,
+                positions,
+            });
         }
     }
     out
 }
 
 fn build_regex(q: &FinderQuery) -> Option<regex::Regex> {
-    let pat =
-        if q.whole_word { format!(r"\b(?:{})\b", q.text) } else { q.text.clone() };
-    regex::RegexBuilder::new(&pat).case_insensitive(!q.case_sensitive).build().ok()
+    let pat = if q.whole_word {
+        format!(r"\b(?:{})\b", q.text)
+    } else {
+        q.text.clone()
+    };
+    regex::RegexBuilder::new(&pat)
+        .case_insensitive(!q.case_sensitive)
+        .build()
+        .ok()
 }
 
 fn extension_of(name: &str) -> Option<String> {
@@ -308,12 +366,24 @@ mod tests {
         assert!(normal.entries.iter().all(|e| !e.is_ignored));
 
         let full = scan(dir.path(), true);
-        let target = full.entries.iter().find(|e| e.rel_path == "target/out.bin").unwrap();
+        let target = full
+            .entries
+            .iter()
+            .find(|e| e.rel_path == "target/out.bin")
+            .unwrap();
         assert!(target.is_ignored);
-        let lib = full.entries.iter().find(|e| e.rel_path == "src/lib.rs").unwrap();
+        let lib = full
+            .entries
+            .iter()
+            .find(|e| e.rel_path == "src/lib.rs")
+            .unwrap();
         assert!(!lib.is_ignored);
         // Dotfiles show up in the full scan, flagged as ignored.
-        let gi = full.entries.iter().find(|e| e.rel_path == ".gitignore").unwrap();
+        let gi = full
+            .entries
+            .iter()
+            .find(|e| e.rel_path == ".gitignore")
+            .unwrap();
         assert!(gi.is_ignored);
     }
 
@@ -324,7 +394,11 @@ mod tests {
         touch(&dir, "a.rs");
 
         let full = scan(dir.path(), true);
-        assert!(full.entries.iter().all(|e| !e.rel_path.starts_with(".git/")));
+        assert!(
+            full.entries
+                .iter()
+                .all(|e| !e.rel_path.starts_with(".git/"))
+        );
     }
 
     #[test]
@@ -361,29 +435,50 @@ mod tests {
             })
             .collect();
         entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-        FileIndexSnapshot { root: PathBuf::new(), entries, extensions: Vec::new(), truncated: false }
+        FileIndexSnapshot {
+            root: PathBuf::new(),
+            entries,
+            extensions: Vec::new(),
+            truncated: false,
+        }
     }
 
     fn q(text: &str) -> FinderQuery {
-        FinderQuery { text: text.into(), ..Default::default() }
+        FinderQuery {
+            text: text.into(),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn fuzzy_matches_subsequences_and_reports_positions() {
-        let snap = snap_of(&["src/workspace.rs", "crates/faber-app/src/main.rs", "README.md"]);
+        let snap = snap_of(&[
+            "src/workspace.rs",
+            "crates/faber-app/src/main.rs",
+            "README.md",
+        ]);
         let m = filter(&snap, &q("wsp"), &[], 100);
         assert_eq!(m.len(), 1);
-        assert_eq!(snap.entries[m[0].entry_ix as usize].rel_path, "src/workspace.rs");
+        assert_eq!(
+            snap.entries[m[0].entry_ix as usize].rel_path,
+            "src/workspace.rs"
+        );
         assert!(!m[0].positions.is_empty());
     }
 
     #[test]
     fn empty_query_returns_history_in_order() {
         let snap = snap_of(&["a.rs", "b.rs", "c.rs"]);
-        let history = vec!["b.rs".to_string(), "gone.rs".to_string(), "a.rs".to_string()];
+        let history = vec![
+            "b.rs".to_string(),
+            "gone.rs".to_string(),
+            "a.rs".to_string(),
+        ];
         let m = filter(&snap, &q(""), &history, 100);
-        let paths: Vec<_> =
-            m.iter().map(|x| snap.entries[x.entry_ix as usize].rel_path.as_str()).collect();
+        let paths: Vec<_> = m
+            .iter()
+            .map(|x| snap.entries[x.entry_ix as usize].rel_path.as_str())
+            .collect();
         assert_eq!(paths, ["b.rs", "a.rs"]); // missing files pruned, order kept
         assert!(m.iter().all(|x| x.from_history));
     }
@@ -393,7 +488,10 @@ mod tests {
         let snap = snap_of(&["exact.rs", "src/deep/loose_ex.rs"]);
         let history = vec!["src/deep/loose_ex.rs".to_string()];
         let m = filter(&snap, &q("ex"), &history, 100);
-        assert_eq!(snap.entries[m[0].entry_ix as usize].rel_path, "src/deep/loose_ex.rs");
+        assert_eq!(
+            snap.entries[m[0].entry_ix as usize].rel_path,
+            "src/deep/loose_ex.rs"
+        );
         assert!(m[0].from_history);
         assert!(!m[1].from_history);
     }
@@ -438,7 +536,10 @@ mod tests {
         query.regex = true;
         let m = filter(&snap, &query, &[], 100);
         assert_eq!(m.len(), 1);
-        assert_eq!(snap.entries[m[0].entry_ix as usize].rel_path, "src/editor_view.rs");
+        assert_eq!(
+            snap.entries[m[0].entry_ix as usize].rel_path,
+            "src/editor_view.rs"
+        );
         assert!(!m[0].positions.is_empty());
     }
 

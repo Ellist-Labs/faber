@@ -8,8 +8,8 @@ use faber_settings::state as app_state;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, Context, FocusHandle, Focusable,
     IntoElement, KeyDownEvent, MouseButton, Render, ScrollHandle, SharedString, Task, TextRun,
-    WeakEntity, Window, canvas, deferred, div, ease_in_out, fill, font, img, point, prelude::*,
-    px, size, svg,
+    WeakEntity, Window, canvas, deferred, div, ease_in_out, fill, font, img, point, prelude::*, px,
+    size, svg,
 };
 use rust_i18n::t;
 
@@ -137,7 +137,9 @@ impl FileFinderView {
     }
 
     fn root(&self, cx: &App) -> Option<PathBuf> {
-        self.workspace.upgrade().and_then(|ws| ws.read(cx).root_folder().cloned())
+        self.workspace
+            .upgrade()
+            .and_then(|ws| ws.read(cx).root_folder().cloned())
     }
 
     fn snapshot(&self, cx: &App) -> Option<Arc<FileIndexSnapshot>> {
@@ -147,9 +149,7 @@ impl FileFinderView {
 
     fn history(&self, cx: &App) -> Vec<String> {
         match self.root(cx) {
-            Some(root) => {
-                self.state.history_for(&root.to_string_lossy()).to_vec()
-            }
+            Some(root) => self.state.history_for(&root.to_string_lossy()).to_vec(),
             None => Vec::new(),
         }
     }
@@ -184,9 +184,12 @@ impl FileFinderView {
         cx.notify();
 
         self.filter_task = Some(cx.spawn(async move |view, cx| {
-            cx.background_executor().timer(Duration::from_millis(FILTER_DEBOUNCE_MS)).await;
-            let valid =
-                view.update(cx, |v, _| v.filter_generation == generation).unwrap_or(false);
+            cx.background_executor()
+                .timer(Duration::from_millis(FILTER_DEBOUNCE_MS))
+                .await;
+            let valid = view
+                .update(cx, |v, _| v.filter_generation == generation)
+                .unwrap_or(false);
             if !valid {
                 return;
             }
@@ -248,14 +251,20 @@ impl FileFinderView {
             cx.notify();
         }
         self.preview_task = Some(cx.spawn(async move |view, cx| {
-            cx.background_executor().timer(Duration::from_millis(PREVIEW_DEBOUNCE_MS)).await;
-            let valid = view.update(cx, |v, _| v.preview.epoch == epoch).unwrap_or(false);
+            cx.background_executor()
+                .timer(Duration::from_millis(PREVIEW_DEBOUNCE_MS))
+                .await;
+            let valid = view
+                .update(cx, |v, _| v.preview.epoch == epoch)
+                .unwrap_or(false);
             if !valid {
                 return;
             }
             let path = abs.clone();
-            let loaded =
-                cx.background_executor().spawn(async move { load_file(&path) }).await;
+            let loaded = cx
+                .background_executor()
+                .spawn(async move { load_file(&path) })
+                .await;
             view.update(cx, |view, cx| {
                 if view.preview.epoch != epoch {
                     return;
@@ -334,7 +343,9 @@ impl FileFinderView {
         let epoch = self.blink_epoch;
         self.blink_task = Some(cx.spawn(async move |view, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_millis(530)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(530))
+                    .await;
                 let cont = view
                     .update(cx, |this, cx| {
                         if this.blink_epoch != epoch {
@@ -356,7 +367,9 @@ impl FileFinderView {
         let ks = &ev.keystroke;
         // cmd-backspace clears; alt-backspace deletes the word before the cursor.
         // Both bypass GPUI dispatch on macOS (NSTextInputClient) — handle here.
-        if ks.modifiers.platform && !ks.modifiers.control && !ks.modifiers.alt
+        if ks.modifiers.platform
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
             && ks.key.as_str() == "backspace"
         {
             self.query.clear();
@@ -364,7 +377,10 @@ impl FileFinderView {
             self.set_query_changed(cx);
             return;
         }
-        if ks.modifiers.alt && !ks.modifiers.platform && !ks.modifiers.control && !ks.modifiers.shift
+        if ks.modifiers.alt
+            && !ks.modifiers.platform
+            && !ks.modifiers.control
+            && !ks.modifiers.shift
             && ks.key.as_str() == "backspace"
         {
             let ws = word_start_before(&self.query, self.cursor);
@@ -375,7 +391,9 @@ impl FileFinderView {
             }
             return;
         }
-        let Some(ref raw_text) = ks.key_char else { return };
+        let Some(ref raw_text) = ks.key_char else {
+            return;
+        };
         if ks.modifiers.control || ks.modifiers.platform {
             return;
         }
@@ -504,7 +522,12 @@ impl FileFinderView {
 
     // ── render pieces ──────────────────────────────────────────────────────────
 
-    fn render_input_row(&self, t: &RuntimeTheme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_input_row(
+        &self,
+        t: &RuntimeTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let focused = self.focus_handle.is_focused(window);
         let is_empty = self.query.is_empty();
         let caret_h = t.font_size_code + 4.;
@@ -521,7 +544,11 @@ impl FileFinderView {
                 .flex_shrink_0()
                 .text_size(px(t.font_size_code - 1.))
                 .font_family(t.mono_family.clone())
-                .text_color(if active { t.text_on_accent } else { t.text_subtle })
+                .text_color(if active {
+                    t.text_on_accent
+                } else {
+                    t.text_subtle
+                })
                 .when(active, {
                     let accent = t.accent;
                     let accent_hover = t.accent_hover;
@@ -551,8 +578,11 @@ impl FileFinderView {
             let caret_h_px = px(caret_h);
             let mono = t.mono_family.clone();
             let text_col = t.text;
-            let cursor_color =
-                if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
+            let cursor_color = if cur_on {
+                t.cursor
+            } else {
+                gpui::hsla(0., 0., 0., 0.)
+            };
             canvas(
                 move |_bounds, window, _cx| {
                     let runs = if full_text.is_empty() {
@@ -567,7 +597,12 @@ impl FileFinderView {
                             strikethrough: None,
                         }]
                     };
-                    window.text_system().shape_line(SharedString::from(full_text), font_sz, &runs, None)
+                    window.text_system().shape_line(
+                        SharedString::from(full_text),
+                        font_sz,
+                        &runs,
+                        None,
+                    )
                 },
                 move |bounds, shaped, window, cx| {
                     let origin = bounds.origin;
@@ -599,12 +634,18 @@ impl FileFinderView {
                 let accent_hover = t.accent_hover;
                 move |el| el.bg(accent).hover(move |s| s.bg(accent_hover))
             })
-            .when(!self.include_ignored, move |el| el.hover(move |s| s.bg(hover_bg)))
+            .when(!self.include_ignored, move |el| {
+                el.hover(move |s| s.bg(hover_bg))
+            })
             .child(
                 svg()
                     .path(IconName::Visibility.path())
                     .size(px(14.))
-                    .text_color(if self.include_ignored { t.text_on_accent } else { t.text_subtle }),
+                    .text_color(if self.include_ignored {
+                        t.text_on_accent
+                    } else {
+                        t.text_subtle
+                    }),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -633,33 +674,27 @@ impl FileFinderView {
                 h_flex()
                     .gap_1()
                     .flex_shrink_0()
-                    .child(
-                        chip("ff-case", "Aa", self.case_sensitive, t).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _, _, cx| {
-                                view.case_sensitive = !view.case_sensitive;
-                                view.schedule_filter(cx);
-                            }),
-                        ),
-                    )
-                    .child(
-                        chip("ff-word", "W", self.whole_word, t).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _, _, cx| {
-                                view.whole_word = !view.whole_word;
-                                view.schedule_filter(cx);
-                            }),
-                        ),
-                    )
-                    .child(
-                        chip("ff-regex", ".*", self.regex_mode, t).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _, _, cx| {
-                                view.regex_mode = !view.regex_mode;
-                                view.schedule_filter(cx);
-                            }),
-                        ),
-                    )
+                    .child(chip("ff-case", "Aa", self.case_sensitive, t).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _, cx| {
+                            view.case_sensitive = !view.case_sensitive;
+                            view.schedule_filter(cx);
+                        }),
+                    ))
+                    .child(chip("ff-word", "W", self.whole_word, t).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _, cx| {
+                            view.whole_word = !view.whole_word;
+                            view.schedule_filter(cx);
+                        }),
+                    ))
+                    .child(chip("ff-regex", ".*", self.regex_mode, t).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _, cx| {
+                            view.regex_mode = !view.regex_mode;
+                            view.schedule_filter(cx);
+                        }),
+                    ))
                     .child(ignored_chip)
                     .child(self.render_mask_button(t, cx)),
             )
@@ -687,14 +722,24 @@ impl FileFinderView {
                 let accent_hover = t.accent_hover;
                 move |el| el.bg(accent).hover(move |s| s.bg(accent_hover))
             })
-            .when(self.mask.is_none(), move |el| el.hover(move |s| s.bg(hover_bg)))
-            .text_color(if self.mask.is_some() { t.text_on_accent } else { t.text_subtle })
+            .when(self.mask.is_none(), move |el| {
+                el.hover(move |s| s.bg(hover_bg))
+            })
+            .text_color(if self.mask.is_some() {
+                t.text_on_accent
+            } else {
+                t.text_subtle
+            })
             .child(label)
             .child(
                 svg()
                     .path(IconName::ExpandMore.path())
                     .size(px(12.))
-                    .text_color(if self.mask.is_some() { t.text_on_accent } else { t.text_subtle }),
+                    .text_color(if self.mask.is_some() {
+                        t.text_on_accent
+                    } else {
+                        t.text_subtle
+                    }),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -734,12 +779,18 @@ impl FileFinderView {
         };
 
         items.push(
-            row(0, t!("file_finder.mask_all").to_string(), None, self.mask.is_none(), t)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|view, _, _, cx| view.set_mask(None, cx)),
-                )
-                .into_any(),
+            row(
+                0,
+                t!("file_finder.mask_all").to_string(),
+                None,
+                self.mask.is_none(),
+                t,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _, _, cx| view.set_mask(None, cx)),
+            )
+            .into_any(),
         );
         for (i, (ext, count)) in extensions.into_iter().enumerate() {
             let active = self.mask.as_deref() == Some(ext.as_str());
@@ -774,7 +825,13 @@ impl FileFinderView {
 
     /// `fill_h`: when true the list stretches to its parent's height (used in
     /// side-by-side preview layout). When false, `max_h` caps the height.
-    fn render_list(&self, fill_h: bool, max_h: f32, t: &RuntimeTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_list(
+        &self,
+        fill_h: bool,
+        max_h: f32,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let empty_state = |msg: String, t: &RuntimeTheme| {
             div()
                 .flex_1()
@@ -855,7 +912,10 @@ impl FileFinderView {
         if fill_h {
             list.h_full().children(entries).into_any()
         } else {
-            list.min_h(px(160.)).max_h(px(max_h)).children(entries).into_any()
+            list.min_h(px(160.))
+                .max_h(px(max_h))
+                .children(entries)
+                .into_any()
         }
     }
 
@@ -863,12 +923,21 @@ impl FileFinderView {
     ///
     /// `row_divider`: `true` = horizontal line (bottom layout, drag up/down);
     ///               `false` = vertical line (right/left layout, drag left/right).
-    fn render_divider(&self, row_divider: bool, t: &RuntimeTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_divider(
+        &self,
+        row_divider: bool,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let is_dragging = self.divider_drag.is_some();
         let sep = t.separator;
         let accent = t.accent;
         let accent_dim = gpui::hsla(accent.h, accent.s, accent.l, 0.35);
-        let size = if row_divider { self.list_height } else { self.list_width };
+        let size = if row_divider {
+            self.list_height
+        } else {
+            self.list_width
+        };
 
         div()
             .id("ff-divider")
@@ -876,27 +945,31 @@ impl FileFinderView {
             .when(!row_divider, |el| el.h_full().w(px(4.)).cursor_col_resize())
             .bg(if is_dragging { accent_dim } else { sep })
             .hover(move |el| el.bg(accent_dim))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |view, ev: &gpui::MouseDownEvent, _, cx| {
-                let pos = if row_divider { f32::from(ev.position.y) } else { f32::from(ev.position.x) };
-                view.divider_drag = Some((pos, size));
-                cx.stop_propagation();
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, ev: &gpui::MouseDownEvent, _, cx| {
+                    let pos = if row_divider {
+                        f32::from(ev.position.y)
+                    } else {
+                        f32::from(ev.position.x)
+                    };
+                    view.divider_drag = Some((pos, size));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .into_any()
     }
 
     fn render_footer(&self, t: &RuntimeTheme) -> AnyElement {
         let hint = |keys: &'static str, label: String, t: &RuntimeTheme| {
-            h_flex()
-                .gap_1()
-                .child(KeyHint::new(keys))
-                .child(
-                    div()
-                        .font_family(t.ui_family.clone())
-                        .text_size(px(t.font_size_caption - 1.))
-                        .text_color(t.text_muted)
-                        .child(label),
-                )
+            h_flex().gap_1().child(KeyHint::new(keys)).child(
+                div()
+                    .font_family(t.ui_family.clone())
+                    .text_size(px(t.font_size_caption - 1.))
+                    .text_color(t.text_muted)
+                    .child(label),
+            )
         };
         h_flex()
             .px_4()
@@ -994,7 +1067,11 @@ fn render_matched_text(
                 .into_any(),
         );
     }
-    h_flex().min_w(px(0.)).overflow_hidden().children(spans).into_any()
+    h_flex()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .children(spans)
+        .into_any()
 }
 
 impl Focusable for FileFinderView {
@@ -1017,11 +1094,27 @@ impl Render for FileFinderView {
         const DIV_PX: f32 = 4.;
 
         // expanded_w / expanded_body_h: dimensions when preview is ON.
-        let expanded_w: f32 = if is_bottom { MODAL_W_BOTTOM } else { MODAL_W_SIDE };
-        let expanded_body_h: f32 = if is_bottom { MODAL_BODY_H_BOTTOM } else { MODAL_BODY_H_SIDE };
+        let expanded_w: f32 = if is_bottom {
+            MODAL_W_BOTTOM
+        } else {
+            MODAL_W_SIDE
+        };
+        let expanded_body_h: f32 = if is_bottom {
+            MODAL_BODY_H_BOTTOM
+        } else {
+            MODAL_BODY_H_SIDE
+        };
 
-        let final_w: f32 = if show_preview { expanded_w } else { MODAL_W_COLLAPSED };
-        let final_body_h: f32 = if show_preview { expanded_body_h } else { MODAL_BODY_H_COLLAPSED };
+        let final_w: f32 = if show_preview {
+            expanded_w
+        } else {
+            MODAL_W_COLLAPSED
+        };
+        let final_body_h: f32 = if show_preview {
+            expanded_body_h
+        } else {
+            MODAL_BODY_H_COLLAPSED
+        };
 
         // Animation start values. On the very first render (count==0) from_* ==
         // final_* so the animation is a no-op and no flicker occurs.
@@ -1035,7 +1128,9 @@ impl Render for FileFinderView {
 
         // ── user-controlled sizes (clamped to reasonable bounds) ───────────────
         let list_w = self.list_width.clamp(180., expanded_w - 180. - DIV_PX);
-        let list_h = self.list_height.clamp(100., expanded_body_h - 100. - DIV_PX);
+        let list_h = self
+            .list_height
+            .clamp(100., expanded_body_h - 100. - DIV_PX);
 
         // ── list ───────────────────────────────────────────────────────────────
         // Right/left: list fills its fixed-height column (fill_h=true).
@@ -1127,9 +1222,7 @@ impl Render for FileFinderView {
             .with_animation(
                 ("ff-body-h", toggle_count),
                 Animation::new(std::time::Duration::from_millis(220)).with_easing(ease_in_out),
-                move |el, p| {
-                    el.max_h(px(from_body_h + (final_body_h - from_body_h) * p))
-                },
+                move |el, p| el.max_h(px(from_body_h + (final_body_h - from_body_h) * p)),
             );
 
         // ── modal ──────────────────────────────────────────────────────────────
@@ -1223,21 +1316,23 @@ impl Render for FileFinderView {
                             .inset_0()
                             .when(drag_is_bottom, |el| el.cursor_row_resize())
                             .when(!drag_is_bottom, |el| el.cursor_col_resize())
-                            .on_mouse_move(cx.listener(move |view, ev: &gpui::MouseMoveEvent, _, cx| {
-                                let Some((start_pos, start_size)) = view.divider_drag else {
-                                    return;
-                                };
-                                if drag_is_bottom {
-                                    let delta = f32::from(ev.position.y) - start_pos;
-                                    view.list_height =
-                                        (start_size + delta).clamp(list_h_min, list_h_max);
-                                } else {
-                                    let delta = f32::from(ev.position.x) - start_pos;
-                                    view.list_width =
-                                        (start_size + delta).clamp(list_w_min, list_w_max);
-                                }
-                                cx.notify();
-                            }))
+                            .on_mouse_move(cx.listener(
+                                move |view, ev: &gpui::MouseMoveEvent, _, cx| {
+                                    let Some((start_pos, start_size)) = view.divider_drag else {
+                                        return;
+                                    };
+                                    if drag_is_bottom {
+                                        let delta = f32::from(ev.position.y) - start_pos;
+                                        view.list_height =
+                                            (start_size + delta).clamp(list_h_min, list_h_max);
+                                    } else {
+                                        let delta = f32::from(ev.position.x) - start_pos;
+                                        view.list_width =
+                                            (start_size + delta).clamp(list_w_min, list_w_max);
+                                    }
+                                    cx.notify();
+                                },
+                            ))
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(|view, _, _, cx| {

@@ -13,7 +13,11 @@ pub struct Selection {
 
 impl Selection {
     pub fn collapsed(pos: usize, rope: &Rope) -> Self {
-        Self { anchor: pos, head: pos, goal_col: crate::movement::col_of(rope, pos) }
+        Self {
+            anchor: pos,
+            head: pos,
+            goal_col: crate::movement::col_of(rope, pos),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -48,7 +52,10 @@ pub struct SelectionSet {
 
 impl SelectionSet {
     pub fn single(sel: Selection) -> Self {
-        Self { ranges: vec![sel], primary: 0 }
+        Self {
+            ranges: vec![sel],
+            primary: 0,
+        }
     }
 
     /// Read-only view of the ranges (sorted, non-overlapping after `normalize`).
@@ -143,7 +150,11 @@ mod tests {
 
     #[test]
     fn selection_range() {
-        let s = Selection { anchor: 5, head: 2, goal_col: 0 };
+        let s = Selection {
+            anchor: 5,
+            head: 2,
+            goal_col: 0,
+        };
         assert_eq!(s.start(), 2);
         assert_eq!(s.end(), 5);
         assert_eq!(s.range(), 2..5);
@@ -160,9 +171,21 @@ mod tests {
 
     #[test]
     fn normalize_sorts_and_merges() {
-        let mut set = SelectionSet::single(Selection { anchor: 10, head: 10, goal_col: 0 });
-        set.push(Selection { anchor: 2, head: 5, goal_col: 0 });
-        set.push(Selection { anchor: 3, head: 7, goal_col: 0 }); // overlaps with previous
+        let mut set = SelectionSet::single(Selection {
+            anchor: 10,
+            head: 10,
+            goal_col: 0,
+        });
+        set.push(Selection {
+            anchor: 2,
+            head: 5,
+            goal_col: 0,
+        });
+        set.push(Selection {
+            anchor: 3,
+            head: 7,
+            goal_col: 0,
+        }); // overlaps with previous
         // After normalize: should be sorted and [2..7] merged, then [10]
         assert_eq!(set.ranges().len(), 2);
         assert_eq!(set.ranges()[0].start(), 2);

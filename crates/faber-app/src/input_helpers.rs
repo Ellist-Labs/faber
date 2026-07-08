@@ -15,8 +15,14 @@ pub fn delete_char_before(s: &str, char_idx: usize) -> String {
         return s.to_string();
     }
     let chars: Vec<char> = s.chars().collect();
-    let idx = char_idx.saturating_sub(1).min(chars.len().saturating_sub(1));
-    chars[..idx].iter().chain(chars[char_idx..].iter()).copied().collect()
+    let idx = char_idx
+        .saturating_sub(1)
+        .min(chars.len().saturating_sub(1));
+    chars[..idx]
+        .iter()
+        .chain(chars[char_idx..].iter())
+        .copied()
+        .collect()
 }
 
 pub fn split_at_char(s: &str, char_idx: usize) -> (String, String) {
@@ -90,17 +96,26 @@ mod tests {
 
     #[test]
     fn split_at_char_start() {
-        assert_eq!(split_at_char("hello", 0), ("".to_string(), "hello".to_string()));
+        assert_eq!(
+            split_at_char("hello", 0),
+            ("".to_string(), "hello".to_string())
+        );
     }
 
     #[test]
     fn split_at_char_end() {
-        assert_eq!(split_at_char("hello", 5), ("hello".to_string(), "".to_string()));
+        assert_eq!(
+            split_at_char("hello", 5),
+            ("hello".to_string(), "".to_string())
+        );
     }
 
     #[test]
     fn split_at_char_middle() {
-        assert_eq!(split_at_char("hello", 3), ("hel".to_string(), "lo".to_string()));
+        assert_eq!(
+            split_at_char("hello", 3),
+            ("hel".to_string(), "lo".to_string())
+        );
     }
 
     #[test]
@@ -110,7 +125,10 @@ mod tests {
 
     #[test]
     fn split_at_char_multibyte() {
-        assert_eq!(split_at_char("café", 3), ("caf".to_string(), "é".to_string()));
+        assert_eq!(
+            split_at_char("café", 3),
+            ("caf".to_string(), "é".to_string())
+        );
     }
 
     #[test]

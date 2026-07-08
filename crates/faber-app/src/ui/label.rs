@@ -23,7 +23,11 @@ pub struct Label {
 
 impl Label {
     pub fn new(text: impl Into<SharedString>) -> Self {
-        Self { text: text.into(), size: LabelSize::Body, color: LabelColor::Default }
+        Self {
+            text: text.into(),
+            size: LabelSize::Body,
+            color: LabelColor::Default,
+        }
     }
 
     pub fn caption(mut self) -> Self {

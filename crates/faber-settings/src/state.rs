@@ -22,12 +22,19 @@ pub struct ProjectHistory {
 
 impl AppState {
     pub fn history_for(&self, root: &str) -> &[String] {
-        self.finder_history.get(root).map(|h| h.files.as_slice()).unwrap_or(&[])
+        self.finder_history
+            .get(root)
+            .map(|h| h.files.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Move `rel_path` to the front of the project's history.
     pub fn record_finder_file(&mut self, root: &str, rel_path: &str) {
-        let files = &mut self.finder_history.entry(root.to_string()).or_default().files;
+        let files = &mut self
+            .finder_history
+            .entry(root.to_string())
+            .or_default()
+            .files;
         files.retain(|p| p != rel_path);
         files.insert(0, rel_path.to_string());
     }
@@ -47,7 +54,10 @@ pub fn load() -> AppState {
 fn load_from(path: &PathBuf) -> AppState {
     match std::fs::read_to_string(path) {
         Ok(text) => toml::from_str(&text).unwrap_or_else(|err| {
-            eprintln!("faber: invalid {}: {err}; using empty state", path.display());
+            eprintln!(
+                "faber: invalid {}: {err}; using empty state",
+                path.display()
+            );
             AppState::default()
         }),
         Err(_) => AppState::default(),

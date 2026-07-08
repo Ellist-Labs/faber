@@ -51,14 +51,14 @@ fn palette() -> Palette {
 fn semantic() -> SemanticColors {
     SemanticColors {
         // Surface hierarchy
-        bg: 0x1e1e2e,         // base
+        bg: 0x1e1e2e,          // base
         bg_elevated: 0x181825, // mantle (chrome, title bar)
         bg_overlay: 0x313244,  // surface0 (popovers, dropdowns)
         bg_sunken: 0x11111b,   // crust (inset areas)
         // Text
-        text: 0xcdd6f4,          // text
-        text_muted: 0xbac2de,    // subtext1
-        text_subtle: 0xa6adc8,   // subtext0
+        text: 0xcdd6f4,           // text
+        text_muted: 0xbac2de,     // subtext1
+        text_subtle: 0xa6adc8,    // subtext0
         text_on_accent: 0x1e1e2e, // base (text on mauve accent)
         text_disabled: 0x6c7086,  // overlay0
         // Border
@@ -70,15 +70,15 @@ fn semantic() -> SemanticColors {
         accent_hover: 0xb4befe, // lavender (lighter on hover)
         accent_muted: 0x45475a, // surface1 (subtle accent bg)
         // Editor
-        cursor: 0xcdd6f4,          // text (bar cursor)
-        selection: 0x45475a,       // surface1
-        word_highlight: 0x3d3f58,  // between surface0 and selection — more prominent than line highlight
-        line_highlight: 0x313244,  // surface0
-        gutter: 0x6c7086,          // overlay0
-        gutter_active: 0xcdd6f4,   // text
-        match_bg: 0x4a4f6a,        // mid-tone blue-grey (search match)
-        match_active: 0x7f849c,    // overlay1 (active match)
-        dirty: 0xf38ba8,           // red (unsaved indicator)
+        cursor: 0xcdd6f4,         // text (bar cursor)
+        selection: 0x45475a,      // surface1
+        word_highlight: 0x3d3f58, // between surface0 and selection — more prominent than line highlight
+        line_highlight: 0x313244, // surface0
+        gutter: 0x6c7086,         // overlay0
+        gutter_active: 0xcdd6f4,  // text
+        match_bg: 0x4a4f6a,       // mid-tone blue-grey (search match)
+        match_active: 0x7f849c,   // overlay1 (active match)
+        dirty: 0xf38ba8,          // red (unsaved indicator)
         // Status
         success: 0xa6e3a1, // green
         warning: 0xf9e2af, // yellow
@@ -89,21 +89,21 @@ fn semantic() -> SemanticColors {
 
 fn syntax() -> SyntaxTheme {
     SyntaxTheme {
-        keyword: HighlightStyle::italic(0xcba6f7),  // mauve, italic
-        function: HighlightStyle::color(0x89b4fa),  // blue
-        r#type: HighlightStyle::color(0xf9e2af),    // yellow
-        string: HighlightStyle::color(0xa6e3a1),    // green
-        number: HighlightStyle::color(0xfab387),    // peach
-        comment: HighlightStyle::italic(0x6c7086),  // overlay0, italic
-        constant: HighlightStyle::color(0xfab387),  // peach
-        operator: HighlightStyle::color(0x89dceb),  // sky
+        keyword: HighlightStyle::italic(0xcba6f7), // mauve, italic
+        function: HighlightStyle::color(0x89b4fa), // blue
+        r#type: HighlightStyle::color(0xf9e2af),   // yellow
+        string: HighlightStyle::color(0xa6e3a1),   // green
+        number: HighlightStyle::color(0xfab387),   // peach
+        comment: HighlightStyle::italic(0x6c7086), // overlay0, italic
+        constant: HighlightStyle::color(0xfab387), // peach
+        operator: HighlightStyle::color(0x89dceb), // sky
         punctuation: HighlightStyle::color(0xcdd6f4), // text (neutral)
-        variable: HighlightStyle::color(0xcdd6f4),  // text
-        property: HighlightStyle::color(0x89dceb),  // sky
+        variable: HighlightStyle::color(0xcdd6f4), // text
+        property: HighlightStyle::color(0x89dceb), // sky
         attribute: HighlightStyle::color(0xf5c2e7), // pink
         namespace: HighlightStyle::color(0xf9e2af), // yellow
-        tag: HighlightStyle::color(0xcba6f7),       // mauve
-        label: HighlightStyle::color(0x89dceb),     // sky
+        tag: HighlightStyle::color(0xcba6f7),      // mauve
+        label: HighlightStyle::color(0x89dceb),    // sky
     }
 }
 
@@ -111,11 +111,31 @@ fn typography() -> Typography {
     Typography {
         ui_family: String::from(".SystemUIFont"),
         mono_family: String::from("Menlo"),
-        display: TypographyRole { size_px: 20.0, weight: 600, line_height_px: 28.0 },
-        heading: TypographyRole { size_px: 14.0, weight: 600, line_height_px: 20.0 },
-        body: TypographyRole { size_px: 13.0, weight: 400, line_height_px: 18.0 },
-        caption: TypographyRole { size_px: 11.0, weight: 400, line_height_px: 16.0 },
-        code: TypographyRole { size_px: 13.0, weight: 400, line_height_px: 20.0 },
+        display: TypographyRole {
+            size_px: 20.0,
+            weight: 600,
+            line_height_px: 28.0,
+        },
+        heading: TypographyRole {
+            size_px: 14.0,
+            weight: 600,
+            line_height_px: 20.0,
+        },
+        body: TypographyRole {
+            size_px: 13.0,
+            weight: 400,
+            line_height_px: 18.0,
+        },
+        caption: TypographyRole {
+            size_px: 11.0,
+            weight: 400,
+            line_height_px: 16.0,
+        },
+        code: TypographyRole {
+            size_px: 13.0,
+            weight: 400,
+            line_height_px: 20.0,
+        },
     }
 }
 
@@ -142,7 +162,7 @@ fn radii() -> Radii {
 
 fn material() -> MaterialOpacity {
     MaterialOpacity {
-        chrome: 1.0,  // opaque now; reduce to ~0.85 when blur lands
+        chrome: 1.0, // opaque now; reduce to ~0.85 when blur lands
         overlay: 1.0,
         scrim: 0.5,
     }

@@ -59,7 +59,8 @@ impl Document {
         highlight_cache.setup(grammar.as_ref());
         let mut outline_cache = OutlineCache::default();
         outline_cache.setup(grammar.as_ref());
-        let outline = syntax.as_ref()
+        let outline = syntax
+            .as_ref()
             .map(|syn| outline_cache.compute(&syn.tree, &source))
             .unwrap_or_default();
         if let Some(ref syn) = syntax {
@@ -93,7 +94,8 @@ impl Document {
         highlight_cache.setup(grammar.as_ref());
         let mut outline_cache = OutlineCache::default();
         outline_cache.setup(grammar.as_ref());
-        let outline = syntax.as_ref()
+        let outline = syntax
+            .as_ref()
             .map(|syn| outline_cache.compute(&syn.tree, source))
             .unwrap_or_default();
         if let Some(ref syn) = syntax {
@@ -169,7 +171,11 @@ impl Document {
 
     /// Syntax-highlight spans for the given display line (empty when none).
     pub fn highlight_spans(&self, line_idx: usize) -> &[HighlightSpan] {
-        self.highlight_cache.lines.get(line_idx).map(|v| v.as_slice()).unwrap_or(&[])
+        self.highlight_cache
+            .lines
+            .get(line_idx)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Find the innermost enclosing bracket pair `() [] {}` around `caret_char`.
@@ -179,7 +185,9 @@ impl Document {
     pub fn enclosing_brackets(&self, caret_char: usize) -> Option<(usize, usize)> {
         let syn = self.syntax.as_ref()?;
         let root = syn.tree.root_node();
-        let caret_byte = self.rope.char_to_byte(caret_char.min(self.rope.len_chars()));
+        let caret_byte = self
+            .rope
+            .char_to_byte(caret_char.min(self.rope.len_chars()));
         let mut node = root.descendant_for_byte_range(caret_byte, caret_byte)?;
         loop {
             let count = node.child_count();
@@ -314,9 +322,17 @@ mod tests {
         let reg = test_registry();
         let lang = reg.language_for_path(Path::new("foo.rs")).unwrap();
         let mut doc = Document::from_str("fn main() {}", Some(&lang));
-        let before = doc.syntax.as_ref().map(|s| node_count(&s.tree)).unwrap_or(0);
+        let before = doc
+            .syntax
+            .as_ref()
+            .map(|s| node_count(&s.tree))
+            .unwrap_or(0);
         doc.insert(11, " let x = 1;");
-        let after = doc.syntax.as_ref().map(|s| node_count(&s.tree)).unwrap_or(0);
+        let after = doc
+            .syntax
+            .as_ref()
+            .map(|s| node_count(&s.tree))
+            .unwrap_or(0);
         assert!(after >= before, "tree should grow after insert");
     }
 

@@ -199,8 +199,13 @@ pub fn apply_settings(cx: &mut App) {
     let settings = cx.global::<crate::settings_view::SettingsStore>().0.clone();
     let scale = settings.font_size / faber_settings::DEFAULT_FONT_SIZE;
     let mut rt = RuntimeTheme::from_scaled(faber_theme::default::faber_dark(), scale);
-    let font_id = cx.text_system().resolve_font(&gpui::font(rt.mono_family.clone()));
-    if let Ok(em) = cx.text_system().em_advance(font_id, gpui::px(rt.font_size_code)) {
+    let font_id = cx
+        .text_system()
+        .resolve_font(&gpui::font(rt.mono_family.clone()));
+    if let Ok(em) = cx
+        .text_system()
+        .em_advance(font_id, gpui::px(rt.font_size_code))
+    {
         rt.char_w_code = f32::from(em);
     }
     cx.set_global(rt);
