@@ -541,6 +541,11 @@ impl Workspace {
         let existing =
             self.tabs.iter().position(|t| matches!(t.content, TabContent::ProjectSearch(_)));
         if let Some(ix) = existing {
+            // Toggle closed if already the active tab (mirrors Cmd+F in-file behaviour).
+            if self.active == Some(ix) {
+                self.close_tab(ix, window, cx);
+                return;
+            }
             self.activate_tab(ix, window, cx);
             if !prefill.is_empty() {
                 if let TabContent::ProjectSearch(view) = &self.tabs[ix].content {

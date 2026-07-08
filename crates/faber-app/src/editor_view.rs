@@ -2423,9 +2423,19 @@ impl EditorView {
             .child(div().w(px(6.)).flex_shrink_0());
 
         // Mirror search bar: show placeholder only when NOT focused and query is empty.
+        // The placeholder uses the same flex_1 + fixed height as the canvas so the row
+        // never changes size when toggling between placeholder and caret states.
         let search_input: gpui::AnyElement = if !outline_focused && is_query_empty {
             search_input_base
-                .child(div().text_color(t.text_muted).child(t!("outline_overlay.placeholder").to_string()))
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(caret_h))
+                        .flex()
+                        .items_center()
+                        .text_color(t.text_muted)
+                        .child(t!("outline_overlay.placeholder").to_string()),
+                )
                 .into_any()
         } else {
             let cur_on = outline_focused && caret_visible;
