@@ -9,10 +9,11 @@ use tree_sitter::{Parser, Tree};
 
 use crate::{
     highlight::{HighlightCache, HighlightSpan},
+    outline::{Outline, OutlineCache},
     parse_source,
 };
 use faber_core::transaction::{ChangeSet, Transaction};
-use faber_lang::{Language, LanguageRegistry};
+use faber_lang::{Grammar, Language, LanguageRegistry};
 
 /// Syntax layer for a document: the tree-sitter parser and its current tree.
 /// Present only when the document has a resolved language; `None` for plain text.
@@ -29,9 +30,16 @@ pub struct Document {
     pub dirty: bool,
     /// The resolved language for this file; None for plain text.
     pub language: Option<Arc<Language>>,
+    /// Compiled grammar (highlights + outline queries). Built once at open time
+    /// and shared across caches via `Arc`. `None` for plain-text documents.
+    pub(crate) grammar: Option<Arc<Grammar>>,
     /// Syntax parsing state; `None` for plain-text documents.
     syntax: Option<SyntaxState>,
     pub(crate) highlight_cache: HighlightCache,
+    outline_cache: OutlineCache,
+    /// Current symbol outline — updated on every `apply()`. Empty for
+    /// plain-text and markdown (markdown outline lives on EditorView).
+    pub outline: Arc<Outline>,
 }
 
 impl Document {
@@ -41,30 +49,53 @@ impl Document {
         let rope = Rope::from_str(&source);
         let pb = PathBuf::from(path);
         let language = registry.language_for_path(&pb);
+        let grammar = language.as_ref().map(|l| Arc::new(l.build_grammar()));
         let syntax = language.as_ref().map(|lang| {
             let mut parser = lang.make_parser();
             let tree = parse_source(&mut parser, &source);
             SyntaxState { parser, tree }
         });
         let mut highlight_cache = HighlightCache::default();
-        highlight_cache.setup(language.as_ref());
+        highlight_cache.setup(grammar.as_ref());
+        let mut outline_cache = OutlineCache::default();
+        outline_cache.setup(grammar.as_ref());
+        let outline = syntax.as_ref()
+            .map(|syn| outline_cache.compute(&syn.tree, &source))
+            .unwrap_or_default();
         if let Some(ref syn) = syntax {
             highlight_cache.compute(&syn.tree, &source);
         }
-        Ok(Self { saved_rope: rope.clone(), rope, path: pb, dirty: false, language, syntax, highlight_cache })
+        Ok(Self {
+            saved_rope: rope.clone(),
+            rope,
+            path: pb,
+            dirty: false,
+            language,
+            grammar,
+            syntax,
+            highlight_cache,
+            outline_cache,
+            outline: Arc::new(outline),
+        })
     }
 
     /// In-memory document (for tests / benches). `language` selects the syntax
     /// layer; pass `None` for plain text.
     pub fn from_str(source: &str, language: Option<&Arc<Language>>) -> Self {
         let rope = Rope::from_str(source);
+        let grammar = language.map(|l| Arc::new(l.build_grammar()));
         let syntax = language.map(|lang| {
             let mut parser = lang.make_parser();
             let tree = parse_source(&mut parser, source);
             SyntaxState { parser, tree }
         });
         let mut highlight_cache = HighlightCache::default();
-        highlight_cache.setup(language);
+        highlight_cache.setup(grammar.as_ref());
+        let mut outline_cache = OutlineCache::default();
+        outline_cache.setup(grammar.as_ref());
+        let outline = syntax.as_ref()
+            .map(|syn| outline_cache.compute(&syn.tree, source))
+            .unwrap_or_default();
         if let Some(ref syn) = syntax {
             highlight_cache.compute(&syn.tree, source);
         }
@@ -74,23 +105,27 @@ impl Document {
             path: PathBuf::from("<memory>"),
             dirty: false,
             language: language.cloned(),
+            grammar,
             syntax,
             highlight_cache,
+            outline_cache,
+            outline: Arc::new(outline),
         }
     }
 
     /// Empty in-memory document with no path yet (File > New).
     pub fn empty_untitled() -> Self {
-        let mut highlight_cache = HighlightCache::default();
-        highlight_cache.setup(None);
         Self {
             saved_rope: Rope::new(),
             rope: Rope::new(),
             path: PathBuf::new(),
             dirty: false,
             language: None,
+            grammar: None,
             syntax: None,
-            highlight_cache,
+            highlight_cache: HighlightCache::default(),
+            outline_cache: OutlineCache::default(),
+            outline: Arc::new(Outline::default()),
         }
     }
 
@@ -113,6 +148,7 @@ impl Document {
     pub fn assign_path(&mut self, path: PathBuf, registry: &LanguageRegistry) {
         self.path = path;
         self.language = registry.language_for_path(&self.path);
+        self.grammar = self.language.as_ref().map(|l| Arc::new(l.build_grammar()));
         let src = self.rope.to_string();
         self.syntax = self.language.as_ref().map(|lang| {
             let mut parser = lang.make_parser();
@@ -120,9 +156,14 @@ impl Document {
             SyntaxState { parser, tree }
         });
         self.highlight_cache = HighlightCache::default();
-        self.highlight_cache.setup(self.language.as_ref());
+        self.highlight_cache.setup(self.grammar.as_ref());
+        self.outline_cache = OutlineCache::default();
+        self.outline_cache.setup(self.grammar.as_ref());
         if let Some(ref syn) = self.syntax {
             self.highlight_cache.compute(&syn.tree, &src);
+            self.outline = Arc::new(self.outline_cache.compute(&syn.tree, &src));
+        } else {
+            self.outline = Arc::new(Outline::default());
         }
     }
 
@@ -153,6 +194,7 @@ impl Document {
                 .or_else(|| syn.parser.parse(&src, None))
                 .expect("parse must succeed");
             self.highlight_cache.compute(&syn.tree, &src);
+            self.outline = Arc::new(self.outline_cache.compute(&syn.tree, &src));
         }
 
         self.dirty = self.rope != self.saved_rope;

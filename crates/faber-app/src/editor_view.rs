@@ -6,7 +6,8 @@ use faber_editor::{
     cursor,
     edit_history::History,
     highlight::{HighlightSpan, char_col_to_byte_col},
-    markdown::{OutlineEntry, parse_markdown, edit::{EnterAction, enter_action, smart_wrap, looks_like_url, toggle_checkbox}},
+    markdown::{parse_markdown, edit::{EnterAction, enter_action, smart_wrap, looks_like_url, toggle_checkbox}},
+    outline::{Outline, OutlineItem},
     search::Query,
     Selection,
 };
@@ -85,7 +86,9 @@ pub struct EditorView {
     // Markdown preview
     pub preview: Option<gpui::Entity<MarkdownPreviewView>>,
     pub show_preview: bool,
-    pub outline: Arc<Vec<OutlineEntry>>,
+    /// Current document outline (headings for markdown, symbols for code).
+    /// Updated per-edit via `after_edit`; drives the breadcrumb + overlay.
+    pub outline: Arc<Outline>,
     outline_gen: u64,
 
     // Search / replace
@@ -155,7 +158,7 @@ impl EditorView {
             select_anchor: 0..0,
             preview: None,
             show_preview: false,
-            outline: Arc::new(vec![]),
+            outline: Arc::new(Outline::default()),
             outline_gen: 0,
             show_search: false,
             show_replace: false,
@@ -185,7 +188,9 @@ impl EditorView {
         if view.is_markdown() {
             let source = view.doc.rope.to_string();
             let md = parse_markdown(&source, &view.doc.rope, &registry);
-            view.outline = Arc::new(md.outline);
+            view.outline = Arc::new(Outline { items: md.outline });
+        } else {
+            view.outline = Arc::clone(&view.doc.outline);
         }
         view
     }
@@ -230,18 +235,29 @@ impl EditorView {
         (-y / t.line_height_code).floor().max(0.0) as usize
     }
 
-    /// Build a breadcrumb heading stack from the outline and the current top line.
-    /// Returns only the `text` fields of headings whose source_line ≤ top_line,
-    /// maintaining a stack that drops shallower entries when a deeper one arrives.
-    fn breadcrumb_stack(outline: &[OutlineEntry], top_line: usize) -> Vec<String> {
-        let mut stack: Vec<(u8, String)> = Vec::new();
-        for e in outline.iter().take_while(|e| e.source_line <= top_line) {
-            while stack.last().is_some_and(|(lvl, _)| *lvl >= e.level) {
+    /// Build a breadcrumb stack from the outline at the current top visible line.
+    /// Returns references to each enclosing item (outermost → innermost) — no clones.
+    fn breadcrumb_stack<'a>(outline: &'a Outline, top_line: usize) -> Vec<&'a OutlineItem> {
+        let mut stack: Vec<&'a OutlineItem> = Vec::new();
+        for e in outline.items.iter().take_while(|e| e.source_line <= top_line) {
+            while stack.last().is_some_and(|last| last.depth >= e.depth) {
                 stack.pop();
             }
-            stack.push((e.level, e.text.clone()));
+            stack.push(e);
         }
-        stack.into_iter().map(|(_, t)| t).collect()
+        stack
+    }
+
+    /// Map an `@context` keyword string to the appropriate `SyntaxToken` for coloring.
+    /// Delegates to the existing `token_color` helper — single source of truth for colors.
+    fn context_to_token(context: Option<&str>) -> Option<SyntaxToken> {
+        Some(match context? {
+            "fn" => SyntaxToken::Function,
+            "struct" | "enum" | "trait" | "type" | "impl" => SyntaxToken::Type,
+            "mod" => SyntaxToken::Namespace,
+            "const" => SyntaxToken::Constant,
+            _ => return None,
+        })
     }
 
     /// Post-mutation bookkeeping — every document edit funnels through here.
@@ -249,6 +265,10 @@ impl EditorView {
         self.update_matches();
         if self.is_markdown() {
             self.schedule_markdown_update(cx);
+        } else {
+            // Code outline is recomputed synchronously inside Document::apply;
+            // pull the fresh Arc here (cheap clone).
+            self.outline = Arc::clone(&self.doc.outline);
         }
         self.reset_blink(cx);
         cx.emit(EditorEvent::Edited);
@@ -266,7 +286,7 @@ impl EditorView {
             cx.background_executor().timer(Duration::from_millis(75)).await;
             let source = rope.to_string();
             let md = Arc::new(parse_markdown(&source, &rope, &registry));
-            let outline = Arc::new(md.outline.clone());
+            let outline = Arc::new(Outline { items: md.outline.clone() });
             let _ = view.update(cx, |this, cx| {
                 if this.outline_gen != current_gen { return; }
                 this.outline = outline;
@@ -1256,8 +1276,8 @@ impl EditorView {
                     }
                     "enter" => {
                         let q = self.outline_query.to_lowercase();
-                        let first_line = self.outline.iter().find(|e| {
-                            q.is_empty() || e.text.to_lowercase().contains(&q)
+                        let first_line = self.outline.items.iter().find(|e| {
+                            q.is_empty() || e.name.to_lowercase().contains(&q)
                         }).map(|e| e.source_line);
                         if let Some(line) = first_line {
                             self.scroll_to_line(line);
@@ -2014,25 +2034,44 @@ impl Render for EditorView {
             }
         };
 
-        // Breadcrumb: compute the heading stack at the current top visible line.
+        // Breadcrumb: compute the symbol/heading stack at the current top visible line.
         let top_line = self.top_visible_line(&t);
-        let crumb_stack = if is_md && !self.outline.is_empty() {
+        let crumb_stack = if !self.outline.is_empty() {
             Self::breadcrumb_stack(&self.outline, top_line)
         } else {
             vec![]
         };
 
-        // Build the full breadcrumb label: "path/to/file.md › H1 › H2"
-        let breadcrumb_text = if crumb_stack.is_empty() {
-            path_label.clone()
-        } else {
-            format!("{} › {}", path_label, crumb_stack.join(" › "))
-        };
-
-        let can_open_outline = is_md && !self.outline.is_empty();
-        let crumb_color = if can_open_outline { t.text } else { t.text_subtle };
+        let can_open_outline = !self.outline.is_empty();
         let crumb_hover_bg = t.line_highlight;
         let outline_active = self.outline_open;
+        let sep_color = t.text_subtle;
+        let path_color = if can_open_outline { t.text } else { t.text_subtle };
+
+        // Build breadcrumb content as individual colored elements so each segment
+        // can carry syntax-appropriate color (fn→function, struct→type, mod→namespace).
+        let crumb_content = {
+            let mut inner = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .gap(px(2.));
+            // File path segment
+            inner = inner.child(
+                div().text_color(path_color).text_ellipsis().overflow_hidden().child(path_label.clone())
+            );
+            for item in &crumb_stack {
+                let seg_color = Self::context_to_token(item.context.as_deref())
+                    .map(|tok| Self::token_color(tok, &t))
+                    .unwrap_or(t.text);
+                inner = inner
+                    .child(div().text_color(sep_color).flex_shrink_0().child(" ›"))
+                    .child(div().text_color(seg_color).text_ellipsis().overflow_hidden().child(item.name.clone()));
+            }
+            inner
+        };
 
         let breadcrumb_label = div()
             .id("editor-breadcrumb")
@@ -2046,7 +2085,6 @@ impl Render for EditorView {
             .rounded(px(t.radius_sm))
             .font_family(t.ui_family.clone())
             .text_size(px(t.font_size_caption))
-            .text_color(crumb_color)
             .when(outline_active, |el| el.bg(crumb_hover_bg))
             .when(can_open_outline, |el| {
                 el.cursor_pointer().hover(move |s| s.bg(crumb_hover_bg))
@@ -2065,14 +2103,7 @@ impl Render for EditorView {
                     cx.notify();
                 }))
             })
-            .child(
-                div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .pr_2()
-                    .child(breadcrumb_text),
-            );
+            .child(crumb_content);
 
         let search_icon_color = if self.show_search { t.accent } else { t.text_subtle };
         let search_btn = div()
@@ -2393,38 +2424,38 @@ impl EditorView {
         let caret_visible = self.cursor_blink_on;
         let outline_focused = self.outline_handle.is_focused(window);
 
-        // Filter entries by query substring.
-        let filtered: Vec<(usize, OutlineEntry)> = outline
+        // Filter items by query substring.
+        let filtered: Vec<(usize, &OutlineItem)> = outline
+            .items
             .iter()
             .enumerate()
-            .filter(|(_, e)| query.is_empty() || e.text.to_lowercase().contains(&query))
-            .map(|(i, e)| (i, e.clone()))
+            .filter(|(_, e)| query.is_empty() || e.name.to_lowercase().contains(&query))
             .collect();
 
         // ── search input ──────────────────────────────────────────────────────
         let (q_before, q_after) = split_at_char(&self.outline_query, self.outline_cursor);
         let is_query_empty = self.outline_query.is_empty();
-        let caret_h = t.font_size_code + 2.;
+        // Input uses code font so typed text is readable; height gives comfortable touch target.
+        let caret_h = t.font_size_code + 4.;
 
         let search_input_base = div()
             .id("outline-search-input")
             .flex()
             .flex_row()
             .items_center()
-            .px_3()
-            .py(px(6.))
+            .px_4()
+            .py(px(10.))
             .border_b_1()
             .border_color(t.separator)
             .track_focus(&self.outline_handle)
             .font_family(t.mono_family.clone())
             .text_size(px(t.font_size_code))
             .text_color(t.text)
-            .child(svg().path(IconName::Search.path()).size(px(14.)).text_color(t.text_subtle).flex_shrink_0())
-            .child(div().w(px(6.)).flex_shrink_0());
+            .child(svg().path(IconName::Search.path()).size(px(15.)).text_color(t.text_muted).flex_shrink_0())
+            .child(div().w(px(8.)).flex_shrink_0());
 
         // Mirror search bar: show placeholder only when NOT focused and query is empty.
-        // The placeholder uses the same flex_1 + fixed height as the canvas so the row
-        // never changes size when toggling between placeholder and caret states.
+        // Placeholder uses caption size and a more subdued color to distinguish from typed text.
         let search_input: gpui::AnyElement = if !outline_focused && is_query_empty {
             search_input_base
                 .child(
@@ -2433,7 +2464,9 @@ impl EditorView {
                         .h(px(caret_h))
                         .flex()
                         .items_center()
-                        .text_color(t.text_muted)
+                        .font_family(t.ui_family.clone())
+                        .text_size(px(t.font_size_caption))
+                        .text_color(t.text_subtle)
                         .child(t!("outline_overlay.placeholder").to_string()),
                 )
                 .into_any()
@@ -2474,14 +2507,14 @@ impl EditorView {
             }
         };
 
-        // ── heading list ──────────────────────────────────────────────────────
+        // ── symbol list ───────────────────────────────────────────────────────
         let hover_idx = self.outline_hover;
 
-        let list_body: AnyElement = if outline.is_empty() {
+        let list_body: AnyElement = if outline.items.is_empty() {
             div()
                 .flex_1()
                 .flex()
-                .min_h(px(200.))
+                .min_h(px(160.))
                 .items_center()
                 .justify_center()
                 .py(px(24.))
@@ -2494,7 +2527,7 @@ impl EditorView {
             div()
                 .flex_1()
                 .flex()
-                .min_h(px(200.))
+                .min_h(px(160.))
                 .items_center()
                 .justify_center()
                 .py(px(24.))
@@ -2508,18 +2541,27 @@ impl EditorView {
                 .iter()
                 .enumerate()
                 .map(|(list_idx, (_orig_idx, entry))| {
-                    let level = entry.level;
+                    let depth = entry.depth;
                     let source_line = entry.source_line;
+                    let end_line = entry.end_line;
+                    let is_markdown = entry.block_ix.is_some();
                     let is_hovered = hover_idx == Some(list_idx);
-                    let indent = (level.saturating_sub(1) as f32) * 12.0;
+                    let indent = (depth as f32) * 14.0;
 
-                    // Compute section end for highlight: next entry at same or higher level.
-                    let section_end = filtered
-                        .iter()
-                        .skip(list_idx + 1)
-                        .find(|(_, e)| e.level <= level)
-                        .map(|(_, e)| e.source_line)
-                        .unwrap_or(usize::MAX);
+                    // Highlight range:
+                    // • Code items: use the exact node body (source_line..=end_line).
+                    // • Markdown items: extend to the next heading at same/higher level
+                    //   in the FULL outline (not just the filtered view) so the section
+                    //   highlight is correct even when a search filter is active.
+                    let hl_end = if is_markdown {
+                        outline.items.iter()
+                            .skip_while(|e| e.source_line <= source_line)
+                            .find(|e| e.depth <= depth)
+                            .map(|e| e.source_line)
+                            .unwrap_or(usize::MAX)
+                    } else {
+                        end_line + 1
+                    };
 
                     let t_clone = t.clone();
                     div()
@@ -2527,8 +2569,8 @@ impl EditorView {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .px(px(8. + indent))
-                        .py(px(5.))
+                        .px(px(12. + indent))
+                        .py(px(6.))
                         .gap_2()
                         .font_family(t.ui_family.clone())
                         .text_size(px(t.font_size_caption))
@@ -2539,9 +2581,7 @@ impl EditorView {
                         .on_mouse_move(cx.listener(move |view, _, _, cx| {
                             if view.outline_hover != Some(list_idx) {
                                 view.outline_hover = Some(list_idx);
-                                // Highlight section in editor
-                                view.outline_highlight = Some((source_line, section_end));
-                                // Scroll editor to heading
+                                view.outline_highlight = Some((source_line, hl_end));
                                 view.scroll_to_line(source_line);
                                 cx.notify();
                             }
@@ -2554,18 +2594,20 @@ impl EditorView {
                             window.focus(&view.focus_handle);
                             cx.notify();
                         }))
-                        .child(
-                            div()
-                                .text_color(t.text_muted)
-                                .text_size(px(t.font_size_caption - 1.))
-                                .child("#".repeat(level as usize))
-                                .flex_shrink_0()
-                        )
+                        .when_some(entry.context.clone(), |el, ctx| {
+                            el.child(
+                                div()
+                                    .text_color(t.text_muted)
+                                    .text_size(px(t.font_size_caption - 1.))
+                                    .child(ctx)
+                                    .flex_shrink_0()
+                            )
+                        })
                         .child(
                             div()
                                 .flex_1()
                                 .overflow_hidden()
-                                .child(SharedString::from(entry.text.clone()))
+                                .child(SharedString::from(entry.name.clone()))
                         )
                         .into_any()
                 })
@@ -2575,8 +2617,8 @@ impl EditorView {
                 .id("outline-list")
                 .flex_col()
                 .overflow_y_scroll()
-                .min_h(px(200.))
-                .max_h(px(320.))
+                .min_h(px(160.))
+                .max_h(px(440.))
                 .children(entries)
                 .into_any()
         };
@@ -2587,7 +2629,7 @@ impl EditorView {
         let modal = div()
             .id("outline-modal")
             .occlude()
-            .w(px(520.))
+            .w(px(600.))
             .bg(t.bg_elevated)
             .rounded_lg()
             .border_1()

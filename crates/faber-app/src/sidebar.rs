@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use faber_editor::markdown::OutlineEntry;
+use faber_editor::outline::Outline;
 use gpui::{
     AnyElement, Context, Div, Entity, IntoElement, ListHorizontalSizingBehavior, MouseButton,
     SharedString, Stateful, div, img, prelude::*, px, svg, uniform_list,
@@ -316,7 +316,7 @@ impl Workspace {
         let t2 = t.clone();
         let entity = cx.entity();
 
-        if outline.is_empty() {
+        if outline.items.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -331,7 +331,7 @@ impl Workspace {
 
         uniform_list(
             "outline",
-            outline.len(),
+            outline.items.len(),
             move |range, _window, cx| {
                 let ws = entity.read(cx);
                 range
@@ -346,14 +346,14 @@ impl Workspace {
     fn render_outline_row(
         &self,
         ix: usize,
-        outline: &Arc<Vec<OutlineEntry>>,
+        outline: &Arc<Outline>,
         entity: &Entity<Workspace>,
         t: &RuntimeTheme,
     ) -> impl IntoElement {
-        let entry = &outline[ix];
+        let entry = &outline.items[ix];
         let line = entry.source_line;
         let entity = entity.clone();
-        let indent = (entry.level.saturating_sub(1)) as f32 * TREE_INDENT_W;
+        let indent = (entry.depth as f32) * TREE_INDENT_W;
 
         h_flex()
             .id(ix)
@@ -363,7 +363,7 @@ impl Workspace {
             .gap_1()
             .font_family(t.ui_family.clone())
             .text_size(px(t.font_size_caption))
-            .text_color(if entry.level == 1 { t.text } else { t.text_muted })
+            .text_color(if entry.depth == 0 { t.text } else { t.text_muted })
             .cursor_pointer()
             .hover(|el| el.bg(t.line_highlight))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -373,15 +373,15 @@ impl Workspace {
                 div()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .child(SharedString::from(entry.text.clone())),
+                    .child(SharedString::from(entry.name.clone())),
             )
     }
 
-    /// Returns the outline of the active markdown editor, or empty.
-    fn active_outline(&self, cx: &Context<Self>) -> Arc<Vec<OutlineEntry>> {
-        let Some(i) = self.active else { return Arc::new(vec![]); };
-        let Some(tab) = self.tabs.get(i) else { return Arc::new(vec![]); };
-        let Some(editor) = tab.editor() else { return Arc::new(vec![]); };
+    /// Returns the outline of the active editor, or empty.
+    fn active_outline(&self, cx: &Context<Self>) -> Arc<Outline> {
+        let Some(i) = self.active else { return Arc::new(Outline::default()); };
+        let Some(tab) = self.tabs.get(i) else { return Arc::new(Outline::default()); };
+        let Some(editor) = tab.editor() else { return Arc::new(Outline::default()); };
         Arc::clone(&editor.read(cx).outline)
     }
 

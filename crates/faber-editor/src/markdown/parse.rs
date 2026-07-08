@@ -6,8 +6,9 @@ use ropey::Rope;
 use faber_lang::LanguageRegistry;
 
 use crate::highlight::{HighlightCache, HighlightSpan};
+use crate::outline::OutlineItem;
 use super::{
-    Block, BlockKind, InlineRun, InlineStyle, ListItem, MarkdownDoc, OutlineEntry,
+    Block, BlockKind, InlineRun, InlineStyle, ListItem, MarkdownDoc,
 };
 
 /// Parse a markdown string into a `MarkdownDoc`.
@@ -43,7 +44,7 @@ struct ParseCtx<'a> {
     source: &'a str,
     rope: &'a Rope,
     registry: &'a LanguageRegistry,
-    outline: Vec<OutlineEntry>,
+    outline: Vec<OutlineItem>,
     block_ix_counter: usize,
 }
 
@@ -80,11 +81,18 @@ fn collect_blocks(
                 let text = inline_text(&inlines);
                 let block_ix = ctx.block_ix_counter;
                 ctx.block_ix_counter += 1;
-                ctx.outline.push(OutlineEntry {
-                    level: level_u8,
-                    text: text.clone(),
+                // depth = level - 1: H1→0, H2→1, …
+                // context = "#" repeated level times, matching the markdown visual style.
+                // end_line = source_line: heading is a single line; section extent is
+                // computed at overlay-hover time using the full outline.
+                ctx.outline.push(OutlineItem {
+                    depth: (level_u8 - 1) as u32,
+                    name: text.clone(),
+                    context: Some("#".repeat(level_u8 as usize)),
                     source_line: source_lines.start,
-                    block_ix,
+                    end_line: source_lines.start,
+                    byte_range: range.clone(),
+                    block_ix: Some(block_ix),
                 });
                 blocks.push(Block {
                     kind: BlockKind::Heading { level: level_u8, inlines },
@@ -493,8 +501,9 @@ fn highlight_code(
         None => return empty_line_vecs(text),
     };
 
+    let grammar = std::sync::Arc::new(lang.build_grammar());
     let mut cache = HighlightCache::default();
-    cache.setup(Some(&lang));
+    cache.setup(Some(&grammar));
     cache.compute(&tree, text);
 
     if cache.lines.is_empty() {

@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod edit_history;
 pub mod highlight;
 pub mod markdown;
+pub mod outline;
 pub mod project;
 pub mod project_search;
 pub mod save;

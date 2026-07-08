@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use faber_lang::{Language, SyntaxToken};
-use tree_sitter::{Query, QueryCursor, StreamingIterator, Tree};
+use faber_lang::{Grammar, SyntaxToken};
+use tree_sitter::{QueryCursor, StreamingIterator, Tree};
 
 /// A single syntax-highlighted span on one line (byte columns, 0-indexed).
 /// Columns are bytes relative to line start, as returned by tree-sitter.
@@ -12,26 +12,19 @@ pub struct HighlightSpan {
     pub token: SyntaxToken,
 }
 
-struct Inner {
-    query: Query,
-    cap_tokens: Vec<Option<SyntaxToken>>,
-}
-
 /// Per-document syntax highlight cache.
 /// Rebuilt on every edit; not recomputed per frame.
 #[derive(Default)]
 pub struct HighlightCache {
     /// Spans indexed by line. Empty Vec for lines with no highlighted spans.
     pub lines: Vec<Vec<HighlightSpan>>,
-    inner: Option<Inner>,
+    grammar: Option<Arc<Grammar>>,
 }
 
 impl HighlightCache {
-    /// Build the query from `language`. Call once after Document is opened.
-    pub fn setup(&mut self, language: Option<&Arc<Language>>) {
-        self.inner = language
-            .and_then(|l| l.make_highlight_query())
-            .map(|(query, cap_tokens)| Inner { query, cap_tokens });
+    /// Attach the compiled grammar. Call once after Document is opened.
+    pub fn setup(&mut self, grammar: Option<&Arc<Grammar>>) {
+        self.grammar = grammar.cloned();
     }
 
     /// Run the highlight query over the current tree+source.
@@ -41,7 +34,8 @@ impl HighlightCache {
         self.lines.clear();
         self.lines.resize_with(line_count, Vec::new);
 
-        let Some(ref inner) = self.inner else { return };
+        let Some(ref g) = self.grammar else { return };
+        let Some(ref inner) = g.highlight else { return };
         let src_bytes = source.as_bytes();
         let root = tree.root_node();
 

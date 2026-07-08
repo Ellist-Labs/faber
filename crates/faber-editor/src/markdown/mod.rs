@@ -4,17 +4,7 @@ pub mod parse;
 pub use parse::parse_markdown;
 
 use crate::highlight::HighlightSpan;
-
-/// A heading entry for the outline panel.
-#[derive(Debug, Clone)]
-pub struct OutlineEntry {
-    pub level: u8,
-    pub text: String,
-    /// Rope line index for cursor / scroll navigation.
-    pub source_line: usize,
-    /// Index into `MarkdownDoc::blocks` for preview scroll sync.
-    pub block_ix: usize,
-}
+pub use crate::outline::OutlineItem;
 
 /// Top-level block (corresponds roughly to a CommonMark block-level element).
 #[derive(Debug, Clone)]
@@ -93,5 +83,5 @@ pub enum InlineRun {
 #[derive(Debug, Clone)]
 pub struct MarkdownDoc {
     pub blocks: Vec<Block>,
-    pub outline: Vec<OutlineEntry>,
+    pub outline: Vec<OutlineItem>,
 }
