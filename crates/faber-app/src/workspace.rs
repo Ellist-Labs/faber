@@ -16,6 +16,7 @@ use gpui::{
 };
 
 use crate::editor_view::{EditorEvent, EditorView};
+use crate::project_search_view::ProjectSearchView;
 use crate::settings_view::{SettingsStore, SettingsView};
 use crate::sidebar::{SidebarItem, SidebarItemKind, SidebarState, default_items};
 use crate::theme::{ActiveTheme, RuntimeTheme};
@@ -23,13 +24,15 @@ use crate::ui::{IconName, ScrollbarDrag, h_flex, v_flex};
 use crate::ui::scrollbar::update_drag;
 use crate::welcome_view::render_welcome;
 use crate::{
-    CloseFile, CloseFolder, CloseTab, NewFile, NextTab, OpenFile, OpenFolder, OpenSettings,
-    PrevTab, ProjectRoot, Quit, SaveFile, ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
+    CloseFile, CloseFolder, CloseTab, NewFile, NextTab, OpenFile, OpenFolder, OpenProjectSearch,
+    OpenSettings, PrevTab, ProjectRoot, Quit, SaveFile, ToggleBottomPanel, ToggleRightPanel,
+    ToggleSidebar,
 };
 
 pub enum TabContent {
     Editor(Entity<EditorView>),
     Settings(Entity<SettingsView>),
+    ProjectSearch(Entity<ProjectSearchView>),
 }
 
 struct TabMenu {
@@ -79,7 +82,7 @@ impl Tab {
     pub(crate) fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.content {
             TabContent::Editor(e) => Some(e),
-            TabContent::Settings(_) => None,
+            TabContent::Settings(_) | TabContent::ProjectSearch(_) => None,
         }
     }
 
@@ -91,6 +94,7 @@ impl Tab {
                 (Workspace::doc_display_name(doc), doc.dirty)
             }
             TabContent::Settings(_) => (rust_i18n::t!("tab.settings").to_string(), false),
+            TabContent::ProjectSearch(_) => (rust_i18n::t!("tab.search").to_string(), false),
         }
     }
 
@@ -98,6 +102,7 @@ impl Tab {
         match &self.content {
             TabContent::Editor(e) => e.read(cx).focus_handle.clone(),
             TabContent::Settings(s) => s.read(cx).focus_handle.clone(),
+            TabContent::ProjectSearch(p) => p.read(cx).focus_handle.clone(),
         }
     }
 }
@@ -509,6 +514,116 @@ impl Workspace {
         self.activate_tab(self.tabs.len() - 1, window, cx);
     }
 
+    pub(crate) fn on_open_project_search(
+        &mut self,
+        _: &OpenProjectSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Prefill with active editor selection text if any.
+        let prefill = self
+            .active
+            .and_then(|ix| self.tabs.get(ix))
+            .and_then(|t| t.editor())
+            .and_then(|e| {
+                let ev = e.read(cx);
+                let sel = &ev.sel;
+                if sel.anchor == sel.head {
+                    None
+                } else {
+                    let start = sel.anchor.min(sel.head);
+                    let end = sel.anchor.max(sel.head);
+                    Some(ev.doc.rope.slice(start..end).to_string())
+                }
+            })
+            .unwrap_or_default();
+
+        let existing =
+            self.tabs.iter().position(|t| matches!(t.content, TabContent::ProjectSearch(_)));
+        if let Some(ix) = existing {
+            self.activate_tab(ix, window, cx);
+            if !prefill.is_empty() {
+                if let TabContent::ProjectSearch(view) = &self.tabs[ix].content {
+                    view.update(cx, |psv, cx| {
+                        psv.set_query(prefill, cx);
+                    });
+                }
+            }
+            if let TabContent::ProjectSearch(view) = &self.tabs[ix].content {
+                let qh = view.read(cx).query_handle.clone();
+                window.focus(&qh);
+            }
+            return;
+        }
+        let ws_entity = cx.entity();
+        let view = cx.new(|cx| ProjectSearchView::new(ws_entity.downgrade(), prefill, cx));
+        self.tabs.push(Tab { id: self.next_tab_id, content: TabContent::ProjectSearch(view.clone()) });
+        self.next_tab_id += 1;
+        self.activate_tab(self.tabs.len() - 1, window, cx);
+        let qh = view.read(cx).query_handle.clone();
+        window.focus(&qh);
+    }
+
+    /// Open `path` at `line`/`col` (0-based). Re-uses an existing editor tab
+    /// if the file is already open; otherwise opens it first.
+    pub(crate) fn navigate_to(
+        &mut self,
+        path: &Path,
+        line: usize,
+        col: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_path(path, window, cx);
+        if let Some(editor) =
+            self.active.and_then(|i| self.tabs.get(i)).and_then(|t| t.editor()).cloned()
+        {
+            editor.update(cx, |ev, cx| {
+                let char_idx = ev
+                    .line_starts
+                    .get(line)
+                    .map(|&ls| ls + col)
+                    .unwrap_or(ev.doc.rope.len_chars().saturating_sub(1));
+                ev.sel.head = char_idx;
+                ev.sel.anchor = char_idx;
+                ev.scroll_handle.scroll_to_item(line, gpui::ScrollStrategy::Center);
+                ev.flash_line = Some(line);
+                cx.spawn(async move |view, cx| {
+                    cx.background_executor().timer(Duration::from_millis(800)).await;
+                    view.update(cx, |ev, cx| {
+                        ev.flash_line = None;
+                        cx.notify();
+                    }).ok();
+                }).detach();
+                cx.notify();
+            });
+        }
+    }
+
+    pub(crate) fn collapse_tree_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(tree) = &mut self.tree {
+            tree.collapse_all();
+            self.visible_rows = tree.visible();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn expand_tree_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(tree) = &mut self.tree {
+            let _ = tree.expand_all();
+            self.visible_rows = tree.visible();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn refresh_tree(&mut self, cx: &mut Context<Self>) {
+        if let Some(tree) = &mut self.tree {
+            let _ = tree.refresh();
+            self.visible_rows = tree.visible();
+        }
+        cx.notify();
+    }
+
     fn on_close_file(&mut self, _: &CloseFile, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.active {
             self.request_close_tab(ix, window, cx);
@@ -664,6 +779,12 @@ impl Workspace {
                 .into_any_element(),
             TabContent::Settings(_) => svg()
                 .path(IconName::Settings.path())
+                .size(px(14.0))
+                .flex_shrink_0()
+                .text_color(t.text_muted)
+                .into_any_element(),
+            TabContent::ProjectSearch(_) => svg()
+                .path(IconName::Search.path())
                 .size(px(14.0))
                 .flex_shrink_0()
                 .text_color(t.text_muted)
@@ -1079,6 +1200,7 @@ impl Render for Workspace {
             self.active.and_then(|ix| self.tabs.get(ix)).map(|tab| match &tab.content {
                 TabContent::Editor(e) => e.clone().into_any_element(),
                 TabContent::Settings(s) => s.clone().into_any_element(),
+                TabContent::ProjectSearch(p) => p.clone().into_any_element(),
             });
 
         let base = div()
@@ -1099,6 +1221,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_bottom_panel))
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_open_project_search))
             .on_action(cx.listener(Self::on_quit))
             .when(self.sidebar_resizing, |el| {
                 el.on_mouse_move(cx.listener(|ws, event: &MouseMoveEvent, _, cx| {

@@ -110,6 +110,9 @@ pub struct EditorView {
     // Cursor blink
     pub cursor_blink_on: bool,
     cursor_blink_epoch: u64,
+
+    // Flash highlight — set by navigate_to, cleared after ~800ms
+    pub flash_line: Option<usize>,
 }
 
 impl EditorView {
@@ -169,6 +172,7 @@ impl EditorView {
             outline_handle: cx.focus_handle(),
             cursor_blink_on: true,
             cursor_blink_epoch: 0,
+            flash_line: None,
         };
         view.rebuild_line_cache();
         if view.is_markdown() {
@@ -1150,6 +1154,42 @@ impl EditorView {
                 _ => {}
             }
         }
+        // opt+backspace: delete word backward in search / replace / outline inputs
+        if ks.modifiers.alt && !ks.modifiers.platform && !ks.modifiers.control && !ks.modifiers.shift
+            && ks.key.as_str() == "backspace"
+        {
+            if self.outline_open && self.outline_handle.is_focused(window) {
+                let ws = word_start_before(&self.outline_query, self.outline_cursor);
+                if ws < self.outline_cursor {
+                    self.outline_query = delete_char_range(&self.outline_query, ws, self.outline_cursor);
+                    self.outline_cursor = ws;
+                    self.outline_hover = None;
+                    cx.notify();
+                }
+                return;
+            }
+            if self.show_search && self.search_handle.is_focused(window) {
+                let ws = word_start_before(&self.search_query, self.search_cursor);
+                if ws < self.search_cursor {
+                    self.search_query = delete_char_range(&self.search_query, ws, self.search_cursor);
+                    self.search_cursor = ws;
+                    self.update_matches();
+                    self.reset_blink(cx);
+                    cx.notify();
+                }
+                return;
+            }
+            if self.show_replace && self.replace_handle.is_focused(window) {
+                let ws = word_start_before(&self.replace_query, self.replace_cursor);
+                if ws < self.replace_cursor {
+                    self.replace_query = delete_char_range(&self.replace_query, ws, self.replace_cursor);
+                    self.replace_cursor = ws;
+                    self.reset_blink(cx);
+                    cx.notify();
+                }
+                return;
+            }
+        }
         // Outline overlay key handling — escape first (regardless of which child has focus)
         if self.outline_open && ks.key_char.is_none() && ks.key.as_str() == "escape" {
             self.outline_open = false;
@@ -1259,6 +1299,7 @@ impl EditorView {
         cursor_visible: bool,
         wrap: bool,
         outline_hl: Option<(usize, usize)>,
+        flash_line: Option<usize>,
     ) -> AnyElement {
         let line_char_start = self.line_starts[line_idx];
         let next_line_start = self
@@ -1281,15 +1322,17 @@ impl EditorView {
         let has_spans = !raw_spans.is_empty();
 
         let hl_this_line = outline_hl.is_some_and(|(s, e)| line_idx >= s && line_idx < e);
+        let is_flash = flash_line == Some(line_idx);
 
         // ── Fast path: no decoration at all ───────────────────────────────────
-        if !cursor_on_line && !has_sel && !has_match && !has_spans {
+        if !cursor_on_line && !has_sel && !has_match && !has_spans && !is_flash {
             let row = div()
                 .flex()
                 .flex_row()
                 .when(!wrap, |r| r.h(px(t.line_height_code)))
                 .when(wrap, |r| r.w_full().px_2().min_h(px(t.line_height_code)).flex_wrap())
                 .when(hl_this_line, |r| r.bg(t.line_highlight))
+                .when(is_flash, |r| r.bg(t.match_bg))
                 .font_family(t.mono_family.clone())
                 .text_size(px(t.font_size_code))
                 .text_color(t.text);
@@ -1433,6 +1476,7 @@ impl EditorView {
             .when(!wrap, |r| r.h(px(t.line_height_code)))
             .when(wrap, |r| r.w_full().px_2().min_h(px(t.line_height_code)).flex_wrap())
             .when(hl_this_line, |r| r.bg(t.line_highlight))
+            .when(is_flash, |r| r.bg(t.match_bg))
             .font_family(t.mono_family.clone())
             .text_size(px(t.font_size_code));
         let row = if show_line_numbers {
@@ -1499,9 +1543,6 @@ impl EditorView {
         let radius = t.radius_sm;
         let radius_md = t.radius_md;
 
-        // Cursor color: visible or transparent (no layout shift, same as editor cursor).
-        let search_cursor_color = if search_focused && caret_visible { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
-        let replace_cursor_color = if replace_focused && caret_visible { t.cursor } else { gpui::hsla(0., 0., 0., 0.) };
         let cursor_h = t.font_size_code + 2.;
 
         // ── icon button helper ─────────────────────────────────────────────────
@@ -1724,10 +1765,23 @@ impl EditorView {
                     .child(if !search_focused && self.search_query.is_empty() {
                         div().text_color(t.text_subtle).child(t!("search.placeholder").to_string()).into_any()
                     } else {
+                        let at_ch: String = s_after.chars().take(1).collect();
+                        let after_rest: String = s_after.chars().skip(1).collect();
+                        let cur_on = search_focused && caret_visible;
                         div().flex().flex_row().items_center()
                             .child(div().text_color(t.text).child(SharedString::from(s_before)))
-                            .child(div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0().bg(search_cursor_color))
-                            .child(div().text_color(t.text).child(SharedString::from(s_after)))
+                            .child(if at_ch.is_empty() {
+                                div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0()
+                                    .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
+                                    .into_any()
+                            } else {
+                                div().flex_shrink_0()
+                                    .text_color(if cur_on { t.bg } else { t.text })
+                                    .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
+                                    .child(SharedString::from(at_ch))
+                                    .into_any()
+                            })
+                            .child(div().text_color(t.text).child(SharedString::from(after_rest)))
                             .into_any()
                     }),
             )
@@ -1755,10 +1809,23 @@ impl EditorView {
                     .child(if !replace_focused && self.replace_query.is_empty() {
                         div().text_color(t.text_subtle).child(t!("search.replace_placeholder").to_string()).into_any()
                     } else {
+                        let at_ch: String = r_after.chars().take(1).collect();
+                        let after_rest: String = r_after.chars().skip(1).collect();
+                        let cur_on = replace_focused && caret_visible;
                         div().flex().flex_row().items_center()
                             .child(div().text_color(t.text).child(SharedString::from(r_before)))
-                            .child(div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0().bg(replace_cursor_color))
-                            .child(div().text_color(t.text).child(SharedString::from(r_after)))
+                            .child(if at_ch.is_empty() {
+                                div().w(px(1.5)).h(px(cursor_h)).flex_shrink_0()
+                                    .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
+                                    .into_any()
+                            } else {
+                                div().flex_shrink_0()
+                                    .text_color(if cur_on { t.bg } else { t.text })
+                                    .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
+                                    .child(SharedString::from(at_ch))
+                                    .into_any()
+                            })
+                            .child(div().text_color(t.text).child(SharedString::from(after_rest)))
                             .into_any()
                     }),
             )
@@ -2003,8 +2070,9 @@ impl Render for EditorView {
             let md_scroll = self.md_scroll.clone();
             let md_scroll_ref = self.md_scroll.clone();
             let t_wrap = t.clone();
+            let flash = self.flash_line;
             let all_lines: Vec<AnyElement> = (0..line_count)
-                .map(|i| self.render_line(i, &t_wrap, show_line_numbers, cursor_visible, true, outline_hl))
+                .map(|i| self.render_line(i, &t_wrap, show_line_numbers, cursor_visible, true, outline_hl, flash))
                 .collect();
             let wrapped = div()
                 .id("md-wrap-scroll")
@@ -2062,12 +2130,13 @@ impl Render for EditorView {
             let entity = cx.entity();
             let t2 = t.clone();
             let widest = self.widest_line;
+            let flash = self.flash_line;
             let content = uniform_list(
                 "editor-lines",
                 line_count,
                 move |range: std::ops::Range<usize>, _window, cx| {
                     let view = entity.read(cx);
-                    range.map(|i| view.render_line(i, &t2, show_line_numbers, cursor_visible, false, outline_hl)).collect::<Vec<AnyElement>>()
+                    range.map(|i| view.render_line(i, &t2, show_line_numbers, cursor_visible, false, outline_hl, flash)).collect::<Vec<AnyElement>>()
                 },
             )
             .flex_1()
@@ -2325,11 +2394,6 @@ impl EditorView {
         // ── search input ──────────────────────────────────────────────────────
         let (q_before, q_after) = split_at_char(&self.outline_query, self.outline_cursor);
         let is_query_empty = self.outline_query.is_empty();
-        let caret_color = if outline_focused && caret_visible {
-            t.cursor
-        } else {
-            gpui::hsla(0., 0., 0., 0.)
-        };
         let caret_h = t.font_size_code + 2.;
 
         let search_input_base = div()
@@ -2354,10 +2418,23 @@ impl EditorView {
                 .child(div().text_color(t.text_muted).child(t!("outline_overlay.placeholder").to_string()))
                 .into_any()
         } else {
+            let at_ch: String = q_after.chars().take(1).collect();
+            let after_rest: String = q_after.chars().skip(1).collect();
+            let cur_on = outline_focused && caret_visible;
             search_input_base
                 .child(div().flex_shrink_0().child(q_before))
-                .child(div().flex_shrink_0().w(px(1.5)).h(px(caret_h)).bg(caret_color))
-                .child(div().flex_shrink_0().child(q_after))
+                .child(if at_ch.is_empty() {
+                    div().flex_shrink_0().w(px(1.5)).h(px(caret_h))
+                        .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
+                        .into_any()
+                } else {
+                    div().flex_shrink_0()
+                        .text_color(if cur_on { t.bg } else { t.text })
+                        .bg(if cur_on { t.cursor } else { gpui::hsla(0., 0., 0., 0.) })
+                        .child(SharedString::from(at_ch))
+                        .into_any()
+                })
+                .child(div().flex_shrink_0().child(after_rest))
                 .into_any()
         };
 
@@ -2558,4 +2635,19 @@ fn split_at_char(s: &str, char_idx: usize) -> (String, String) {
     let chars: Vec<char> = s.chars().collect();
     let idx = char_idx.min(chars.len());
     (chars[..idx].iter().collect(), chars[idx..].iter().collect())
+}
+
+fn word_start_before(s: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = s.chars().collect();
+    let mut pos = cursor.min(chars.len());
+    while pos > 0 && chars[pos - 1].is_whitespace() { pos -= 1; }
+    while pos > 0 && !chars[pos - 1].is_whitespace() { pos -= 1; }
+    pos
+}
+
+fn delete_char_range(s: &str, start: usize, end: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let start = start.min(chars.len());
+    let end = end.min(chars.len());
+    chars[..start].iter().chain(chars[end..].iter()).collect()
 }

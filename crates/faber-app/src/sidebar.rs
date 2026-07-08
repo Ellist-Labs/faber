@@ -9,8 +9,9 @@ use gpui::{
 
 use crate::file_icons;
 use crate::theme::RuntimeTheme;
-use crate::ui::{IconName, h_flex, v_flex};
+use crate::ui::{Icon, IconName, h_flex, v_flex};
 use crate::workspace::Workspace;
+use crate::OpenProjectSearch;
 
 pub const ACTIVITY_BAR_W: f32 = 44.0;
 pub const SIDEBAR_PANEL_W: f32 = 240.0;
@@ -85,7 +86,7 @@ impl Workspace {
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |ws, _, _, cx| ws.on_activity_click(kind, cx)),
+                        cx.listener(move |ws, _, window, cx| ws.on_activity_click(kind, window, cx)),
                     )
                     .child(
                         svg()
@@ -108,18 +109,22 @@ impl Workspace {
             SidebarItemKind::Outline => rust_i18n::t!("sidebar.outline").to_string(),
         };
 
-        let header = h_flex()
-            .px_3()
-            .h(px(30.0))
-            .flex_shrink_0()
-            .text_size(px(t.font_size_caption))
-            .text_color(t.text_muted)
-            .font_family(t.ui_family.clone())
-            .child(title);
+        let header: AnyElement = match self.sidebar.active {
+            SidebarItemKind::Explorer => self.render_explorer_header(t, cx),
+            _ => h_flex()
+                .px_3()
+                .h(px(30.0))
+                .flex_shrink_0()
+                .text_size(px(t.font_size_caption))
+                .text_color(t.text_muted)
+                .font_family(t.ui_family.clone())
+                .child(title)
+                .into_any_element(),
+        };
 
         let body: AnyElement = match self.sidebar.active {
             SidebarItemKind::Explorer => self.render_explorer(t, cx),
-            SidebarItemKind::Search => self.render_search_placeholder(t),
+            SidebarItemKind::Search => div().into_any_element(), // Search opens a tab
             SidebarItemKind::Outline => self.render_outline(t, cx),
         };
 
@@ -380,16 +385,58 @@ impl Workspace {
         Arc::clone(&editor.read(cx).outline)
     }
 
-    fn render_search_placeholder(&self, t: &RuntimeTheme) -> AnyElement {
-        v_flex()
-            .flex_1()
-            .items_center()
-            .justify_center()
+    fn render_explorer_header(
+        &self,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let icon_btn = |id: &'static str, _icon: IconName, t: &RuntimeTheme| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(22.0))
+                .rounded(px(t.radius_sm))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.line_highlight))
+        };
+
+        h_flex()
             .px_3()
-            .font_family(t.ui_family.clone())
+            .h(px(30.0))
+            .flex_shrink_0()
+            .items_center()
+            .justify_between()
             .text_size(px(t.font_size_caption))
             .text_color(t.text_muted)
-            .child(rust_i18n::t!("sidebar.search_coming_soon").to_string())
+            .font_family(t.ui_family.clone())
+            .child(rust_i18n::t!("sidebar.explorer").to_string())
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        icon_btn("explorer-refresh", IconName::Refresh, t)
+                            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, _, cx| {
+                                ws.refresh_tree(cx);
+                            }))
+                            .child(Icon::new(IconName::Refresh).size(px(14.0)).color(t.text_subtle)),
+                    )
+                    .child(
+                        icon_btn("explorer-collapse", IconName::UnfoldLess, t)
+                            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, _, cx| {
+                                ws.collapse_tree_all(cx);
+                            }))
+                            .child(Icon::new(IconName::UnfoldLess).size(px(14.0)).color(t.text_subtle)),
+                    )
+                    .child(
+                        icon_btn("explorer-expand", IconName::UnfoldMore, t)
+                            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, _, cx| {
+                                ws.expand_tree_all(cx);
+                            }))
+                            .child(Icon::new(IconName::UnfoldMore).size(px(14.0)).color(t.text_subtle)),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -415,7 +462,12 @@ impl Workspace {
             )
     }
 
-    fn on_activity_click(&mut self, kind: SidebarItemKind, cx: &mut Context<Self>) {
+    fn on_activity_click(&mut self, kind: SidebarItemKind, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if kind == SidebarItemKind::Search {
+            // Search opens a full tab rather than a sidebar panel.
+            window.dispatch_action(Box::new(OpenProjectSearch), cx);
+            return;
+        }
         if self.sidebar.open && self.sidebar.active == kind {
             self.sidebar.open = false;
         } else {

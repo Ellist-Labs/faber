@@ -1652,9 +1652,12 @@ dependencies = [
  "divan",
  "faber-core",
  "faber-lang",
+ "globset",
+ "ignore",
  "proptest",
  "pulldown-cmark",
  "ropey",
+ "tempfile",
  "tree-sitter",
  "tree-sitter-rust",
 ]

@@ -104,6 +104,23 @@ impl FileTree {
         Ok(())
     }
 
+    /// Collapse every expanded directory in the tree.
+    pub fn collapse_all(&mut self) {
+        collapse_nodes(&mut self.nodes);
+    }
+
+    /// Expand every directory in the tree, loading children lazily.
+    pub fn expand_all(&mut self) -> io::Result<()> {
+        expand_nodes(&mut self.nodes)
+    }
+
+    /// Reload the root level and every currently-expanded directory,
+    /// preserving `expanded` flags for dirs that still exist.
+    pub fn refresh(&mut self) -> io::Result<()> {
+        self.nodes = refresh_nodes(&self.root, &self.nodes)?;
+        Ok(())
+    }
+
     /// Index of `path` in the current visible row list, or `None` if not visible.
     pub fn visible_index_of(&self, path: &Path) -> Option<usize> {
         self.visible().iter().position(|r| r.path == path)
@@ -116,6 +133,49 @@ impl FileTree {
         collect_visible(&self.nodes, 0, &mut rows);
         rows
     }
+}
+
+fn collapse_nodes(nodes: &mut Vec<FileNode>) {
+    for n in nodes {
+        if n.is_dir && n.expanded {
+            n.expanded = false;
+        }
+        if let Some(children) = &mut n.children {
+            collapse_nodes(children);
+        }
+    }
+}
+
+fn expand_nodes(nodes: &mut Vec<FileNode>) -> io::Result<()> {
+    for n in nodes {
+        if n.is_dir {
+            if n.children.is_none() {
+                n.children = Some(read_dir_sorted(&n.path)?);
+            }
+            n.expanded = true;
+            if let Some(children) = &mut n.children {
+                expand_nodes(children)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn refresh_nodes(dir: &Path, existing: &[FileNode]) -> io::Result<Vec<FileNode>> {
+    let fresh = read_dir_sorted(dir)?;
+    let mut result = Vec::with_capacity(fresh.len());
+    for mut node in fresh {
+        if let Some(old) = existing.iter().find(|n| n.path == node.path) {
+            // Preserve expanded state and recurse into expanded dirs.
+            if node.is_dir && old.expanded {
+                node.expanded = true;
+                let old_children = old.children.as_deref().unwrap_or(&[]);
+                node.children = Some(refresh_nodes(&node.path, old_children)?);
+            }
+        }
+        result.push(node);
+    }
+    Ok(result)
 }
 
 fn read_dir_sorted(dir: &Path) -> io::Result<Vec<FileNode>> {

@@ -29,6 +29,10 @@ harness = false
 name = "markdown"
 harness = false
 
+[[bench]]
+name = "project_search"
+harness = false
+
 [dependencies]
 faber-core = { path = "../faber-core" }
 faber-lang = { path = "../faber-lang" }
@@ -36,7 +40,10 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 ropey = "1"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
+ignore = "0.4"
+globset = "0.4"
 
 [dev-dependencies]
 divan = "0.1"
 proptest = "1"
+tempfile = "3"

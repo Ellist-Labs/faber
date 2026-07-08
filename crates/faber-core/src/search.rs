@@ -34,26 +34,27 @@ impl Query {
         self.text.is_empty()
     }
 
-    /// All non-overlapping matches as char-offset ranges.
-    pub fn all_matches(&self, rope: &Rope) -> Vec<Range<usize>> {
+    /// All non-overlapping matches in `text` as char-offset ranges.
+    /// This is the core matcher; `all_matches` delegates here.
+    pub fn all_matches_str(&self, text: &str) -> Vec<Range<usize>> {
         if self.is_empty() {
             return Vec::new();
         }
 
         // Fast path: literal substring with optional case folding, no word boundaries.
         if !self.regex && !self.whole_word {
-            let src = rope.to_string();
-            let (haystack, needle) = if self.case_sensitive {
-                (src.clone(), self.text.clone())
-            } else {
-                (src.to_lowercase(), self.text.to_lowercase())
-            };
+            let (haystack, needle): (std::borrow::Cow<str>, std::borrow::Cow<str>) =
+                if self.case_sensitive {
+                    (text.into(), self.text.as_str().into())
+                } else {
+                    (text.to_lowercase().into(), self.text.to_lowercase().into())
+                };
             let mut results = Vec::new();
             let mut byte_start = 0;
-            while let Some(rel) = haystack[byte_start..].find(&needle) {
+            while let Some(rel) = haystack[byte_start..].find(needle.as_ref()) {
                 let abs_byte = byte_start + rel;
-                let char_start = rope.byte_to_char(abs_byte);
-                let char_end = rope.byte_to_char(abs_byte + needle.len());
+                let char_start = haystack[..abs_byte].chars().count();
+                let char_end = char_start + needle.chars().count();
                 results.push(char_start..char_end);
                 byte_start = abs_byte + needle.len().max(1);
             }
@@ -76,14 +77,19 @@ impl Query {
             Err(_) => return Vec::new(), // invalid user regex → no matches, no panic
         };
 
-        let src = rope.to_string();
-        re.find_iter(&src)
+        re.find_iter(text)
             .map(|m| {
-                let char_start = rope.byte_to_char(m.start());
-                let char_end = rope.byte_to_char(m.end());
+                let char_start = text[..m.start()].chars().count();
+                let char_end = char_start + text[m.start()..m.end()].chars().count();
                 char_start..char_end
             })
             .collect()
+    }
+
+    /// All non-overlapping matches as char-offset ranges.
+    pub fn all_matches(&self, rope: &Rope) -> Vec<Range<usize>> {
+        let src = rope.to_string();
+        self.all_matches_str(&src)
     }
 }
 

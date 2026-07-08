@@ -4,6 +4,7 @@ mod file_icon_data;
 mod file_icons;
 mod i18n;
 mod markdown_preview;
+mod project_search_view;
 mod settings_view;
 mod sidebar;
 mod theme;
@@ -79,8 +80,16 @@ actions!(
         NewFile, OpenFile, OpenFolder,
         SaveFile, CloseFile, CloseFolder,
         ToggleSidebar, ToggleBottomPanel, ToggleRightPanel,
-        OpenSettings,
+        OpenSettings, OpenProjectSearch,
         Quit,
+    ]
+);
+
+actions!(
+    project_search,
+    [
+        PsInputBackspace,
+        PsInputMoveLeft, PsInputMoveRight, PsInputMoveStart, PsInputMoveEnd,
     ]
 );
 
@@ -193,6 +202,8 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-b", BoldSelection, Some("Editor && markdown")),
         KeyBinding::new("cmd-i", ItalicSelection, Some("Editor && markdown")),
         KeyBinding::new("cmd-shift-x", ToggleCheckbox, Some("Editor && markdown")),
+        // Project search
+        KeyBinding::new("cmd-shift-f", OpenProjectSearch, Some("Workspace")),
         // Search
         KeyBinding::new("cmd-f", OpenSearch, Some("Editor")),
         KeyBinding::new("cmd-alt-f", OpenReplace, Some("Editor")),
@@ -213,6 +224,14 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-alt-w", ToggleSearchWholeWord, Some("SearchBar")),
         KeyBinding::new("cmd-alt-x", ToggleSearchRegex, Some("SearchBar")),
         KeyBinding::new("cmd-alt-f", ToggleReplace, Some("SearchBar")),
+        // Project search inputs
+        KeyBinding::new("backspace", PsInputBackspace, Some("ProjectSearch")),
+        KeyBinding::new("left", PsInputMoveLeft, Some("ProjectSearch")),
+        KeyBinding::new("right", PsInputMoveRight, Some("ProjectSearch")),
+        KeyBinding::new("cmd-left", PsInputMoveStart, Some("ProjectSearch")),
+        KeyBinding::new("cmd-right", PsInputMoveEnd, Some("ProjectSearch")),
+        KeyBinding::new("home", PsInputMoveStart, Some("ProjectSearch")),
+        KeyBinding::new("end", PsInputMoveEnd, Some("ProjectSearch")),
         // Replace bar
         KeyBinding::new("escape", CloseSearch, Some("ReplaceBar")),
         KeyBinding::new("enter", ReplaceOne, Some("ReplaceBar")),
