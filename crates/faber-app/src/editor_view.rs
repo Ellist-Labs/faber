@@ -244,31 +244,6 @@ impl EditorView {
         (-y / t.line_height_code).floor().max(0.0) as usize
     }
 
-    /// Build a breadcrumb stack from the outline at the current top visible line.
-    /// Returns references to each enclosing item (outermost → innermost) — no clones.
-    fn breadcrumb_stack<'a>(outline: &'a Outline, top_line: usize) -> Vec<&'a OutlineItem> {
-        let mut stack: Vec<&'a OutlineItem> = Vec::new();
-        for e in outline.items.iter().take_while(|e| e.source_line <= top_line) {
-            while stack.last().is_some_and(|last| last.depth >= e.depth) {
-                stack.pop();
-            }
-            stack.push(e);
-        }
-        stack
-    }
-
-    /// Map an `@context` keyword string to the appropriate `SyntaxToken` for coloring.
-    /// Delegates to the existing `token_color` helper — single source of truth for colors.
-    fn context_to_token(context: Option<&str>) -> Option<SyntaxToken> {
-        Some(match context? {
-            "fn" => SyntaxToken::Function,
-            "struct" | "enum" | "trait" | "type" | "impl" => SyntaxToken::Type,
-            "mod" => SyntaxToken::Namespace,
-            "const" => SyntaxToken::Constant,
-            _ => return None,
-        })
-    }
-
     fn clear_word_occ(&mut self) {
         self.word_occ.clear();
         self.word_occ_key = None;
@@ -2097,7 +2072,7 @@ impl Render for EditorView {
         // Breadcrumb: compute the symbol/heading stack at the current top visible line.
         let top_line = self.top_visible_line(&t);
         let crumb_stack = if !self.outline.is_empty() {
-            Self::breadcrumb_stack(&self.outline, top_line)
+            crate::editor_logic::breadcrumb_stack(&self.outline, top_line)
         } else {
             vec![]
         };
@@ -2123,7 +2098,7 @@ impl Render for EditorView {
                 div().text_color(path_color).text_ellipsis().overflow_hidden().child(path_label.clone())
             );
             for item in &crumb_stack {
-                let seg_color = Self::context_to_token(item.context.as_deref())
+                let seg_color = crate::editor_logic::context_to_token(item.context.as_deref())
                     .map(|tok| Self::token_color(tok, &t))
                     .unwrap_or(t.text);
                 inner = inner

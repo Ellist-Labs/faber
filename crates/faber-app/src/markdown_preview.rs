@@ -231,23 +231,11 @@ fn render_inlines(inlines: &[InlineRun], t: &RuntimeTheme, base_dir: &std::path:
     // Split at HardBreak boundaries → stacked lines.
     let has_hard_break = inlines.iter().any(|i| matches!(i, InlineRun::HardBreak));
     if has_hard_break {
-        let lines = split_at_hard_breaks(inlines);
+        let lines = crate::editor_logic::split_at_hard_breaks(inlines);
         let els: Vec<AnyElement> = lines.iter().map(|seg| render_inline_line(seg, t, base_dir)).collect();
         return div().flex().flex_col().w_full().children(els).into_any_element();
     }
     render_inline_line(inlines, t, base_dir)
-}
-
-fn split_at_hard_breaks(inlines: &[InlineRun]) -> Vec<Vec<InlineRun>> {
-    let mut lines: Vec<Vec<InlineRun>> = vec![vec![]];
-    for inline in inlines {
-        if matches!(inline, InlineRun::HardBreak) {
-            lines.push(vec![]);
-        } else {
-            lines.last_mut().unwrap().push(inline.clone());
-        }
-    }
-    lines
 }
 
 /// Render a single line of inlines (no HardBreaks), splitting on Image nodes.

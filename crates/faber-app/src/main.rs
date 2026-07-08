@@ -1,4 +1,5 @@
 mod assets;
+mod editor_logic;
 mod editor_view;
 mod file_finder;
 mod file_icon_data;
@@ -21,7 +22,7 @@ use gpui::{
     App, Application, Bounds, Global, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
     WindowOptions, actions, point, prelude::*, px, size,
 };
-use std::{env, path::PathBuf, sync::Arc, time::Instant};
+use std::{env, path::PathBuf, sync::Arc};
 
 use faber_editor::LanguageRegistry;
 
@@ -112,7 +113,6 @@ actions!(
 // ── main ───────────────────────────────────────────────────────────────────────
 
 fn main() {
-    let start = Instant::now();
     let paths: Vec<String> = env::args().skip(1).collect();
 
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
@@ -146,8 +146,6 @@ fn main() {
                 cx.activate(true);
             })
             .unwrap();
-
-        println!("FABER_READY startup_ms={}", start.elapsed().as_millis());
     });
 }
 

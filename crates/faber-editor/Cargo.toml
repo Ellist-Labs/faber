@@ -9,34 +9,6 @@ license = "MIT"
 name = "faber_editor"
 path = "src/lib.rs"
 
-[[bench]]
-name = "rope_ops"
-harness = false
-
-[[bench]]
-name = "parse"
-harness = false
-
-[[bench]]
-name = "edit_ops"
-harness = false
-
-[[bench]]
-name = "highlight"
-harness = false
-
-[[bench]]
-name = "markdown"
-harness = false
-
-[[bench]]
-name = "project_search"
-harness = false
-
-[[bench]]
-name = "file_index"
-harness = false
-
 [dependencies]
 faber-core = { path = "../faber-core" }
 faber-lang = { path = "../faber-lang" }
@@ -50,6 +22,5 @@ nucleo-matcher = "0.3.1"
 regex = "1.12.4"
 
 [dev-dependencies]
-divan = "0.1"
 proptest = "1"
 tempfile = "3"
