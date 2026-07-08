@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use faber_editor::outline::Outline;
 use gpui::{
-    AnyElement, Context, Div, Entity, IntoElement, ListHorizontalSizingBehavior, MouseButton,
+    AnyElement, App, Context, Div, Entity, IntoElement, ListHorizontalSizingBehavior, MouseButton,
     SharedString, Stateful, div, img, prelude::*, px, svg, uniform_list,
 };
 
@@ -22,7 +22,6 @@ const TREE_INDENT_W: f32 = 12.0;
 pub enum SidebarItemKind {
     Explorer,
     Search,
-    Outline,
 }
 
 /// One activity-bar icon. Adding an entry to `default_items` is the whole
@@ -46,11 +45,6 @@ pub fn default_items() -> Vec<SidebarItem> {
             kind: SidebarItemKind::Search,
             icon: IconName::Search,
             id: "Search",
-        },
-        SidebarItem {
-            kind: SidebarItemKind::Outline,
-            icon: IconName::Toc,
-            id: "Outline",
         },
     ]
 }
@@ -124,7 +118,6 @@ impl Workspace {
         let title = match self.sidebar.active {
             SidebarItemKind::Explorer => rust_i18n::t!("sidebar.explorer").to_string(),
             SidebarItemKind::Search => rust_i18n::t!("sidebar.search").to_string(),
-            SidebarItemKind::Outline => rust_i18n::t!("sidebar.outline").to_string(),
         };
 
         let header: AnyElement = match self.sidebar.active {
@@ -143,7 +136,6 @@ impl Workspace {
         let body: AnyElement = match self.sidebar.active {
             SidebarItemKind::Explorer => self.render_explorer(t, cx),
             SidebarItemKind::Search => div().into_any_element(), // Search opens a tab
-            SidebarItemKind::Outline => self.render_outline(t, cx),
         };
 
         v_flex()
@@ -433,6 +425,55 @@ impl Workspace {
             return Arc::new(Outline::default());
         };
         Arc::clone(&editor.read(cx).outline)
+    }
+
+    pub(crate) fn active_is_markdown(&self, cx: &App) -> bool {
+        self.active
+            .and_then(|ix| self.tabs.get(ix))
+            .and_then(|t| t.editor())
+            .is_some_and(|e| e.read(cx).is_markdown())
+    }
+
+    pub(crate) fn render_right_panel(
+        &self,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let body: AnyElement = if self.active_is_markdown(cx) {
+            self.render_outline(t, cx)
+        } else {
+            v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .px_3()
+                .font_family(t.ui_family.clone())
+                .text_size(px(t.font_size_caption))
+                .text_color(t.text_muted)
+                .child(rust_i18n::t!("sidebar.no_headings").to_string())
+                .into_any_element()
+        };
+
+        v_flex()
+            .w(px(240.))
+            .flex_shrink_0()
+            .h_full()
+            .bg(t.bg_elevated)
+            .border_l_1()
+            .border_color(t.separator)
+            .child(
+                div()
+                    .px_3()
+                    .h(px(30.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .text_size(px(t.font_size_caption))
+                    .text_color(t.text_muted)
+                    .font_family(t.ui_family.clone())
+                    .child(rust_i18n::t!("panel.headings").to_string()),
+            )
+            .child(body)
     }
 
     fn render_explorer_header(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> AnyElement {

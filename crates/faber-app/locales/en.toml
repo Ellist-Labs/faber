@@ -10,6 +10,9 @@ open_file = "Open File…"
 open_folder = "Open Folder…"
 configure = "CONFIGURE"
 open_settings = "Open Settings"
+recent = "RECENT"
+recent_projects = "Projects"
+recent_files = "Files"
 
 [settings]
 title = "Settings"
@@ -54,6 +57,10 @@ after_delay = "After Delay"
 on_focus_change = "On Focus Change"
 on_window_change = "On Window Change"
 
+[settings.reopen_last_session]
+title = "Reopen Last Session"
+desc = "Automatically reopen the last project and files when Faber starts."
+
 [settings.finder_preview]
 title = "File Finder Preview"
 desc = "Where the file finder preview pane appears (⌥⌘P)."
@@ -75,6 +82,9 @@ new_file = "New File"
 open_file = "Open File…"
 open_folder = "Open Folder…"
 save = "Save"
+save_as = "Save As…"
+save_all = "Save All"
+close_window = "Close Window"
 close_file = "Close File"
 close_folder = "Close Folder"
 exit = "Exit"
@@ -102,7 +112,6 @@ quit_without_saving = "Quit Without Saving"
 [sidebar]
 explorer = "Explorer"
 search = "Search"
-outline = "Outline"
 no_folder = "No folder open"
 open_folder_hint = "Use File › Open Folder…"
 no_headings = "No headings"
@@ -116,6 +125,7 @@ expand_all = "Expand All"
 panel = "Panel"
 terminal = "Terminal"
 coming_soon = "Coming soon"
+headings = "Headings"
 
 [editor]
 untitled = "Untitled"

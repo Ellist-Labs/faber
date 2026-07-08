@@ -4,6 +4,21 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+const RECENT_CAP: usize = 5;
+
+fn push_recent(list: &mut Vec<String>, abs: &str) {
+    list.retain(|p| p != abs);
+    list.insert(0, abs.to_string());
+    list.truncate(RECENT_CAP);
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LastSession {
+    pub root: Option<String>,
+    pub files: Vec<String>,
+}
+
 /// Per-project persisted app state (not user preferences). Lives in its own
 /// file so settings.toml stays hand-editable.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -11,6 +26,9 @@ use serde::{Deserialize, Serialize};
 pub struct AppState {
     /// Keyed by absolute project root path.
     pub finder_history: HashMap<String, ProjectHistory>,
+    pub recent_projects: Vec<String>,
+    pub recent_files: Vec<String>,
+    pub last_session: Option<LastSession>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -37,6 +55,18 @@ impl AppState {
             .files;
         files.retain(|p| p != rel_path);
         files.insert(0, rel_path.to_string());
+    }
+
+    pub fn record_recent_project(&mut self, abs: &str) {
+        push_recent(&mut self.recent_projects, abs);
+    }
+
+    pub fn record_recent_file(&mut self, abs: &str) {
+        push_recent(&mut self.recent_files, abs);
+    }
+
+    pub fn set_last_session(&mut self, root: Option<String>, files: Vec<String>) {
+        self.last_session = Some(LastSession { root, files });
     }
 }
 
@@ -95,6 +125,45 @@ mod tests {
         s.record_finder_file("/p", "a.rs");
         assert_eq!(s.history_for("/p"), ["a.rs", "b.rs"]);
         assert!(s.history_for("/other").is_empty());
+    }
+
+    #[test]
+    fn recent_projects_cap_and_dedup() {
+        let mut s = AppState::default();
+        for i in 0..7usize {
+            s.record_recent_project(&format!("/p{i}"));
+        }
+        assert_eq!(s.recent_projects.len(), RECENT_CAP);
+        assert_eq!(s.recent_projects[0], "/p6");
+        s.record_recent_project("/p5");
+        assert_eq!(s.recent_projects[0], "/p5");
+        assert_eq!(s.recent_projects.len(), RECENT_CAP);
+    }
+
+    #[test]
+    fn recent_files_cap_and_dedup() {
+        let mut s = AppState::default();
+        for i in 0..6usize {
+            s.record_recent_file(&format!("/f{i}.rs"));
+        }
+        assert_eq!(s.recent_files.len(), RECENT_CAP);
+        assert_eq!(s.recent_files[0], "/f5.rs");
+        s.record_recent_file("/f3.rs");
+        assert_eq!(s.recent_files[0], "/f3.rs");
+    }
+
+    #[test]
+    fn last_session_roundtrip() {
+        let path = tmp_path("session");
+        let mut s = AppState::default();
+        s.set_last_session(
+            Some("/my/project".to_string()),
+            vec!["src/main.rs".to_string()],
+        );
+        save_to(&s, &path).unwrap();
+        let loaded = load_from(&path);
+        assert_eq!(loaded.last_session, s.last_session);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

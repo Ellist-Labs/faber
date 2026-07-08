@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use faber_editor::file_index::{FileIndexSnapshot, FinderQuery, filter};
 use faber_settings::PreviewPosition;
-use faber_settings::state as app_state;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, Context, FocusHandle, Focusable,
     IntoElement, KeyDownEvent, MouseButton, Render, ScrollHandle, SharedString, Task, TextRun,
@@ -88,7 +87,6 @@ pub struct FileFinderView {
     cursor_blink_on: bool,
     blink_epoch: u64,
     blink_task: Option<Task<()>>,
-    state: app_state::AppState,
 }
 
 impl FileFinderView {
@@ -120,7 +118,6 @@ impl FileFinderView {
             cursor_blink_on: true,
             blink_epoch: 0,
             blink_task: None,
-            state: app_state::load(),
         };
         // The view is constructed inside a Workspace update; reading the
         // workspace back (for the index snapshot) must wait until it returns.
@@ -149,7 +146,11 @@ impl FileFinderView {
 
     fn history(&self, cx: &App) -> Vec<String> {
         match self.root(cx) {
-            Some(root) => self.state.history_for(&root.to_string_lossy()).to_vec(),
+            Some(root) => cx
+                .global::<crate::AppStateStore>()
+                .0
+                .history_for(&root.to_string_lossy())
+                .to_vec(),
             None => Vec::new(),
         }
     }
@@ -305,11 +306,14 @@ impl FileFinderView {
         let rel = row.rel_path.to_string();
         let abs = root.join(&rel);
 
-        self.state.record_finder_file(&root.to_string_lossy(), &rel);
-        let state = self.state.clone();
+        let root_str = root.to_string_lossy().to_string();
+        let mut state = cx.global::<crate::AppStateStore>().0.clone();
+        state.record_finder_file(&root_str, &rel);
+        let state_to_save = state.clone();
+        cx.set_global(crate::AppStateStore(state));
         cx.background_executor()
             .spawn(async move {
-                if let Err(err) = app_state::save(&state) {
+                if let Err(err) = faber_settings::state::save(&state_to_save) {
                     eprintln!("faber: can't save state: {err}");
                 }
             })
