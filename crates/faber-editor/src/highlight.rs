@@ -122,6 +122,20 @@ pub fn byte_col_to_char_col(line_str: &str, byte_col: u32) -> usize {
     line_str[..byte_col].chars().count()
 }
 
+/// Convert a char column offset on a line to a UTF-8 byte offset.
+/// Inverse of `byte_col_to_char_col`. Clamps to `line_str.len()`.
+#[inline]
+pub fn char_col_to_byte_col(line_str: &str, char_col: usize) -> usize {
+    if line_str.is_ascii() {
+        return char_col.min(line_str.len());
+    }
+    line_str
+        .char_indices()
+        .nth(char_col)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(line_str.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

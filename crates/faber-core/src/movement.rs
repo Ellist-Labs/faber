@@ -201,6 +201,43 @@ fn word_boundary_right(rope: &Rope, mut pos: usize, is_word: WordClassifier) -> 
     pos
 }
 
+// ── click helpers ─────────────────────────────────────────────────────────────
+
+/// Returns a Selection spanning the word at `pos` (double-click word select).
+/// Expands left/right from `pos` to the boundaries of the same character class.
+pub fn word_at(rope: &Rope, pos: usize) -> Selection {
+    let len = rope.len_chars();
+    if len == 0 {
+        return Selection { anchor: 0, head: 0, goal_col: 0 };
+    }
+    let pos = pos.min(len.saturating_sub(1));
+    let ch = rope.char(pos);
+    let is_word = default_word_classifier(ch);
+    let mut start = pos;
+    while start > 0 && default_word_classifier(rope.char(start - 1)) == is_word {
+        start -= 1;
+    }
+    let mut end = pos + 1;
+    while end < len && default_word_classifier(rope.char(end)) == is_word {
+        end += 1;
+    }
+    Selection { anchor: start, head: end, goal_col: col_of(rope, end) }
+}
+
+/// Returns a Selection spanning the entire content of the line containing `pos`
+/// (triple-click line select).
+pub fn line_selection(rope: &Rope, pos: usize) -> Selection {
+    let len = rope.len_chars();
+    if len == 0 {
+        return Selection { anchor: 0, head: 0, goal_col: 0 };
+    }
+    let line = rope.char_to_line(pos.min(len.saturating_sub(1)));
+    let start = rope.line_to_char(line);
+    let content = line_content_len(rope, line);
+    let end = start + content;
+    Selection { anchor: start, head: end, goal_col: content }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
