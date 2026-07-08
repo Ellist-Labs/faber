@@ -75,7 +75,8 @@ impl OutlineCache {
 
         // Collect raw (byte_range, start_line, end_line, name, context) tuples via query matches.
         // Each match groups @item + @name + optional @context from one pattern.
-        let mut raw: Vec<(Range<usize>, usize, usize, String, Option<String>)> = Vec::new();
+        type RawItem = (Range<usize>, usize, usize, String, Option<String>);
+        let mut raw: Vec<RawItem> = Vec::new();
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&config.query, root, src_bytes);
@@ -124,7 +125,7 @@ impl OutlineCache {
         let mut items: Vec<OutlineItem> = Vec::with_capacity(raw.len());
 
         for (range, source_line, end_line, name, context) in raw {
-            while stack_ends.last().map_or(false, |&end| end <= range.start) {
+            while stack_ends.last().is_some_and(|&end| end <= range.start) {
                 stack_ends.pop();
             }
             let depth = stack_ends.len() as u32;

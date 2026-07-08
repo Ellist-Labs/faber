@@ -175,15 +175,14 @@ pub fn filter(
             if let Ok(ix) = snap
                 .entries
                 .binary_search_by(|e| e.rel_path.as_str().cmp(rel))
+                && mask_ok(&snap.entries[ix])
             {
-                if mask_ok(&snap.entries[ix]) {
-                    out.push(FinderMatch {
-                        entry_ix: ix as u32,
-                        score: 0,
-                        from_history: true,
-                        positions: Vec::new(),
-                    });
-                }
+                out.push(FinderMatch {
+                    entry_ix: ix as u32,
+                    score: 0,
+                    from_history: true,
+                    positions: Vec::new(),
+                });
             }
         }
         return out;
