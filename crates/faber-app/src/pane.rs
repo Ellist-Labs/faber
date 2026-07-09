@@ -39,13 +39,10 @@ impl Tab {
         match &self.content {
             TabContent::Editor(e) => {
                 let doc = &e.read(cx).doc;
-                let name = doc
-                    .path
-                    .file_name()
-                    .map_or_else(
-                        || rust_i18n::t!("editor.untitled").to_string(),
-                        |n| n.to_string_lossy().to_string(),
-                    );
+                let name = doc.path.file_name().map_or_else(
+                    || rust_i18n::t!("editor.untitled").to_string(),
+                    |n| n.to_string_lossy().to_string(),
+                );
                 (name, doc.dirty)
             }
             TabContent::Settings(_) => (rust_i18n::t!("tab.settings").to_string(), false),
@@ -170,9 +167,9 @@ impl Pane {
     // ── Search helpers ────────────────────────────────────────────────────────
 
     pub(crate) fn find_editor_by_path(&self, path: &Path, cx: &App) -> Option<usize> {
-        self.tabs.iter().position(|t| {
-            t.editor().is_some_and(|e| e.read(cx).doc.path == path)
-        })
+        self.tabs
+            .iter()
+            .position(|t| t.editor().is_some_and(|e| e.read(cx).doc.path == path))
     }
 
     pub(crate) fn find_settings_tab(&self) -> Option<usize> {

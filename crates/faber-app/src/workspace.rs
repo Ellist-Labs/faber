@@ -240,11 +240,7 @@ impl Workspace {
 
     /// Find an open editor by its file path (across all panes). Returns the
     /// pane id and tab index if found.
-    pub(crate) fn find_open_editor(
-        &self,
-        path: &Path,
-        cx: &App,
-    ) -> Option<Entity<EditorView>> {
+    pub(crate) fn find_open_editor(&self, path: &Path, cx: &App) -> Option<Entity<EditorView>> {
         for p in self.panes.values() {
             let pane = p.read(cx);
             if let Some(ix) = pane.find_editor_by_path(path, cx) {
@@ -288,7 +284,12 @@ impl Workspace {
 
     /// Navigate the active editor to `line`, moving the cursor and scrolling.
     pub(crate) fn outline_navigate(&mut self, line: usize, cx: &mut Context<Self>) {
-        let editor = self.pane().read(cx).active_tab().and_then(|t| t.editor()).cloned();
+        let editor = self
+            .pane()
+            .read(cx)
+            .active_tab()
+            .and_then(|t| t.editor())
+            .cloned();
         if let Some(editor) = editor {
             editor.update(cx, |ev, _cx| {
                 let char_idx = ev.line_starts.get(line).copied().unwrap_or(0);
@@ -343,9 +344,9 @@ impl Workspace {
         // Leaving a tab counts as a focus change for auto-save purposes.
         let prev_editor = {
             let pane = self.pane().read(cx);
-            pane.active.filter(|&prev| prev != ix).and_then(|prev| {
-                pane.tab_at(prev).and_then(|t| t.editor()).cloned()
-            })
+            pane.active
+                .filter(|&prev| prev != ix)
+                .and_then(|prev| pane.tab_at(prev).and_then(|t| t.editor()).cloned())
         };
         if cx.global::<SettingsStore>().0.auto_save == AutoSave::OnFocusChange
             && let Some(editor) = prev_editor
@@ -365,7 +366,9 @@ impl Workspace {
 
     pub fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let pane_id = self.focused_pane;
-        self.panes[&pane_id].update(cx, |p: &mut Pane, _| { p.remove_tab(ix); });
+        self.panes[&pane_id].update(cx, |p: &mut Pane, _| {
+            p.remove_tab(ix);
+        });
         // Collapse the pane if this emptied it (a no-op for the last remaining pane,
         // which stays to show the welcome screen).
         if self.panes[&pane_id].read(cx).is_empty() {
@@ -430,7 +433,11 @@ impl Workspace {
         let pane = self.pane().read(cx);
         let editor = pane.active_tab()?.editor()?;
         let path = editor.read(cx).doc.path.clone();
-        if path.as_os_str().is_empty() { None } else { Some(path) }
+        if path.as_os_str().is_empty() {
+            None
+        } else {
+            Some(path)
+        }
     }
 
     /// Expand the tree so `path` is visible, scroll the explorer to it, and notify.
@@ -827,14 +834,24 @@ impl Workspace {
     }
 
     fn on_save_file(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
-        let editor = self.pane().read(cx).active_tab().and_then(|t| t.editor()).cloned();
+        let editor = self
+            .pane()
+            .read(cx)
+            .active_tab()
+            .and_then(|t| t.editor())
+            .cloned();
         if let Some(editor) = editor {
             self.save_editor(&editor, window, cx).detach();
         }
     }
 
     fn on_save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
-        let editor = self.pane().read(cx).active_tab().and_then(|t| t.editor()).cloned();
+        let editor = self
+            .pane()
+            .read(cx)
+            .active_tab()
+            .and_then(|t| t.editor())
+            .cloned();
         if let Some(editor) = editor {
             self.save_editor_as(&editor, window, cx).detach();
         }
@@ -900,7 +917,11 @@ impl Workspace {
             let ps_view = {
                 let pane = self.pane().read(cx);
                 pane.tab_at(ix).and_then(|t| {
-                    if let TabContent::ProjectSearch(v) = &t.content { Some(v.clone()) } else { None }
+                    if let TabContent::ProjectSearch(v) = &t.content {
+                        Some(v.clone())
+                    } else {
+                        None
+                    }
                 })
             };
             if let Some(view) = ps_view {
@@ -934,7 +955,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.open_path(path, window, cx);
-        if let Some(editor) = self.pane().read(cx).active_tab().and_then(|t| t.editor()).cloned() {
+        if let Some(editor) = self
+            .pane()
+            .read(cx)
+            .active_tab()
+            .and_then(|t| t.editor())
+            .cloned()
+        {
             editor.update(cx, |ev, cx| {
                 let char_idx = ev
                     .line_starts
@@ -1126,7 +1153,11 @@ impl Workspace {
     ) {
         let ids: Vec<usize> = {
             let pane = self.pane().read(cx);
-            let anchor_ix = pane.tabs.iter().position(|t| t.id == anchor_id).unwrap_or(0);
+            let anchor_ix = pane
+                .tabs
+                .iter()
+                .position(|t| t.id == anchor_id)
+                .unwrap_or(0);
             pane.tabs[..anchor_ix].iter().map(|t| t.id).collect()
         };
         for id in ids {
@@ -1146,7 +1177,11 @@ impl Workspace {
     ) {
         let ids: Vec<usize> = {
             let pane = self.pane().read(cx);
-            let anchor_ix = pane.tabs.iter().position(|t| t.id == anchor_id).unwrap_or(0);
+            let anchor_ix = pane
+                .tabs
+                .iter()
+                .position(|t| t.id == anchor_id)
+                .unwrap_or(0);
             pane.tabs[anchor_ix + 1..].iter().map(|t| t.id).collect()
         };
         for id in ids {
@@ -1563,21 +1598,22 @@ impl Workspace {
 
     // ── Split / pane management ───────────────────────────────────────────────
 
-    fn split_focused(
-        &mut self,
-        dir: SplitDirection,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn split_focused(&mut self, dir: SplitDirection, window: &mut Window, cx: &mut Context<Self>) {
         let new_pane_id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
         let new_pane = cx.new(|cx| Pane::new(new_pane_id, cx));
         let registry = cx.global::<crate::Registry>().0.clone();
         let editor = cx.new(|cx| {
-            EditorView::from_doc(faber_editor::buffer::Document::empty_untitled(), registry, cx)
+            EditorView::from_doc(
+                faber_editor::buffer::Document::empty_untitled(),
+                registry,
+                cx,
+            )
         });
-        cx.subscribe(&editor, |ws, _, _: &EditorEvent, cx| ws.on_editor_edited(cx))
-            .detach();
+        cx.subscribe(&editor, |ws, _, _: &EditorEvent, cx| {
+            ws.on_editor_edited(cx)
+        })
+        .detach();
         new_pane.update(cx, |p: &mut Pane, _| {
             p.push_tab(TabContent::Editor(editor));
         });
@@ -1598,7 +1634,9 @@ impl Workspace {
     ) {
         let ix = {
             let pane = self.panes[&source_pane].read(cx);
-            let Some((ix, _)) = pane.tab_by_id(tab_id) else { return };
+            let Some((ix, _)) = pane.tab_by_id(tab_id) else {
+                return;
+            };
             ix
         };
         let mut removed_tab = None;
@@ -1607,7 +1645,8 @@ impl Workspace {
         });
         let Some(tab) = removed_tab else { return };
         if let TabContent::Editor(ref e) = tab.content {
-            cx.subscribe(e, |ws, _, _: &EditorEvent, cx| ws.on_editor_edited(cx)).detach();
+            cx.subscribe(e, |ws, _, _: &EditorEvent, cx| ws.on_editor_edited(cx))
+                .detach();
         }
         self.panes[&target_pane].update(cx, |p: &mut Pane, _| {
             p.push_tab(tab.content);
@@ -1615,9 +1654,7 @@ impl Workspace {
         self.focused_pane = target_pane;
         let new_ix = self.panes[&target_pane].read(cx).tab_count() - 1;
         self.activate_tab_in(target_pane, new_ix, window, cx);
-        if self.panes.contains_key(&source_pane)
-            && self.panes[&source_pane].read(cx).is_empty()
-        {
+        if self.panes.contains_key(&source_pane) && self.panes[&source_pane].read(cx).is_empty() {
             self.collapse_pane(source_pane, window, cx);
         }
     }
@@ -1733,7 +1770,11 @@ impl Workspace {
             .text_color(if is_active { t.text } else { t.text_muted })
             .cursor_pointer()
             .on_drag(
-                DraggedTab { source_pane: pane_id, tab_id, title: title.clone() },
+                DraggedTab {
+                    source_pane: pane_id,
+                    tab_id,
+                    title: title.clone(),
+                },
                 |dragged: &DraggedTab, _point, _window, cx| {
                     let title = dragged.title.clone();
                     cx.new(|_| TabGhost { title })
@@ -1747,7 +1788,10 @@ impl Workspace {
                 MouseButton::Right,
                 cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
                     ws.panes[&pane_id].update(cx, |p: &mut Pane, _| {
-                        p.tab_menu = Some(TabMenu { tab_id, pos: ev.position });
+                        p.tab_menu = Some(TabMenu {
+                            tab_id,
+                            pos: ev.position,
+                        });
                     });
                     ws.focused_pane = pane_id;
                     cx.notify();
@@ -1835,7 +1879,11 @@ impl Workspace {
         let is_h = matches!(axis, Axis::Horizontal);
         let sash_id = SharedString::from(format!(
             "sash-{}-{}",
-            axis_path.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("-"),
+            axis_path
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("-"),
             divider_ix
         ));
         let accent = t.accent;
@@ -1965,15 +2013,9 @@ impl Workspace {
             .border_color(t.accent);
         el = match zone {
             DropZone::Center => el.top_0().left_0().w_full().h_full(),
-            DropZone::Edge(SplitDirection::Left) => {
-                el.top_0().left_0().h_full().w(relative(0.5))
-            }
-            DropZone::Edge(SplitDirection::Right) => {
-                el.top_0().right_0().h_full().w(relative(0.5))
-            }
-            DropZone::Edge(SplitDirection::Up) => {
-                el.top_0().left_0().w_full().h(relative(0.5))
-            }
+            DropZone::Edge(SplitDirection::Left) => el.top_0().left_0().h_full().w(relative(0.5)),
+            DropZone::Edge(SplitDirection::Right) => el.top_0().right_0().h_full().w(relative(0.5)),
+            DropZone::Edge(SplitDirection::Up) => el.top_0().left_0().w_full().h(relative(0.5)),
             DropZone::Edge(SplitDirection::Down) => {
                 el.bottom_0().left_0().w_full().h(relative(0.5))
             }
@@ -2008,8 +2050,7 @@ impl Workspace {
                     .enumerate()
                 {
                     if i > 0 {
-                        let sash =
-                            self.render_sash(axis_path.clone(), i - 1, axis, t, cx);
+                        let sash = self.render_sash(axis_path.clone(), i - 1, axis, t, cx);
                         container = container.child(sash);
                     }
                     let mut child_path = axis_path.clone();
@@ -2035,7 +2076,11 @@ impl Workspace {
         fn convert(m: SerializedMember<SerializedPane>) -> SerializedNode {
             match m {
                 SerializedMember::Pane(p) => SerializedNode::Pane(p),
-                SerializedMember::Axis { axis, members, flexes } => SerializedNode::Axis {
+                SerializedMember::Axis {
+                    axis,
+                    members,
+                    flexes,
+                } => SerializedNode::Axis {
                     axis: match axis {
                         Axis::Horizontal => "horizontal".to_string(),
                         Axis::Vertical => "vertical".to_string(),
@@ -2058,7 +2103,9 @@ impl Workspace {
             let active = pane.active.unwrap_or(0);
             SerializedPane { files, active }
         });
-        SerializedLayout { root: convert(root_member) }
+        SerializedLayout {
+            root: convert(root_member),
+        }
     }
 }
 
@@ -2109,7 +2156,11 @@ impl Render for Workspace {
                         if let Some(ref resize) = ws.pane_resize {
                             let delta = ev.position - resize.start_cursor;
                             let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
-                            let shift = if resize.axis == Axis::Horizontal { dx } else { dy };
+                            let shift = if resize.axis == Axis::Horizontal {
+                                dx
+                            } else {
+                                dy
+                            };
                             let vp = window.viewport_size();
                             let container_px = if resize.axis == Axis::Horizontal {
                                 f32::from(vp.width)

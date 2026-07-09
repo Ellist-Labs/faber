@@ -93,7 +93,11 @@ impl AppState {
 
     pub fn set_last_session(&mut self, root: Option<String>, files: Vec<String>) {
         let layout = self.last_session.as_ref().and_then(|s| s.layout.clone());
-        self.last_session = Some(LastSession { root, files, layout });
+        self.last_session = Some(LastSession {
+            root,
+            files,
+            layout,
+        });
     }
 
     pub fn set_last_session_layout(&mut self, layout: Option<SerializedLayout>) {

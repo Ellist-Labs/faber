@@ -157,7 +157,9 @@ impl<Id: Copy + Eq> PaneAxis<Id> {
                     let current_sum: f32 = self.flexes.iter().sum();
                     if current_sum > 0.0 {
                         let scale = new_n / current_sum;
-                        for f in &mut self.flexes { *f *= scale; }
+                        for f in &mut self.flexes {
+                            *f *= scale;
+                        }
                     }
                     return Some(neighbour);
                 }
@@ -167,15 +169,31 @@ impl<Id: Copy + Eq> PaneAxis<Id> {
                     let child_members_len = child_axis.members.len();
                     // Check if the target is a direct child of the nested axis.
                     let found_in_child = child_axis.members.iter().any(|m| {
-                        if let Member::Pane(pid) = m { *pid == id } else { false }
+                        if let Member::Pane(pid) = m {
+                            *pid == id
+                        } else {
+                            false
+                        }
                     });
 
                     if found_in_child && child_members_len == 2 {
                         // Nested axis will collapse to 1 member — splice up.
-                        let child_axis_clone = if let Member::Axis(a) = &self.members[i] { a.clone() } else { unreachable!() };
-                        let survivor_idx = child_axis_clone.members.iter().position(|m| {
-                            if let Member::Pane(pid) = m { *pid != id } else { true }
-                        }).unwrap();
+                        let child_axis_clone = if let Member::Axis(a) = &self.members[i] {
+                            a.clone()
+                        } else {
+                            unreachable!()
+                        };
+                        let survivor_idx = child_axis_clone
+                            .members
+                            .iter()
+                            .position(|m| {
+                                if let Member::Pane(pid) = m {
+                                    *pid != id
+                                } else {
+                                    true
+                                }
+                            })
+                            .unwrap();
                         let neighbour = self.first_pane_id(&child_axis_clone.members[survivor_idx]);
                         let survivor = child_axis_clone.members[survivor_idx].clone();
                         // Replace the child axis slot with the survivor.
@@ -183,7 +201,11 @@ impl<Id: Copy + Eq> PaneAxis<Id> {
                         // flex of slot i stays the same.
                         return Some(neighbour);
                     } else {
-                        let child_axis = if let Member::Axis(a) = &mut self.members[i] { a } else { unreachable!() };
+                        let child_axis = if let Member::Axis(a) = &mut self.members[i] {
+                            a
+                        } else {
+                            unreachable!()
+                        };
                         if let Some(neighbour) = child_axis.remove_pane(id) {
                             return Some(neighbour);
                         }
@@ -225,7 +247,9 @@ pub struct PaneGroup<Id> {
 
 impl<Id: Copy + Eq> PaneGroup<Id> {
     pub fn single(id: Id) -> Self {
-        Self { root: Member::Pane(id) }
+        Self {
+            root: Member::Pane(id),
+        }
     }
 
     /// Split the pane `target` by adding `new_id` on the `dir` side.
@@ -233,7 +257,11 @@ impl<Id: Copy + Eq> PaneGroup<Id> {
     pub fn split(&mut self, target: Id, new_id: Id, dir: SplitDirection) -> bool {
         match &mut self.root {
             Member::Pane(id) if *id == target => {
-                let (a, b) = if dir.places_before() { (new_id, target) } else { (target, new_id) };
+                let (a, b) = if dir.places_before() {
+                    (new_id, target)
+                } else {
+                    (target, new_id)
+                };
                 self.root = Member::Axis(PaneAxis {
                     axis: dir.axis(),
                     members: vec![Member::Pane(a), Member::Pane(b)],
@@ -258,9 +286,16 @@ impl<Id: Copy + Eq> PaneGroup<Id> {
             Member::Axis(axis) => {
                 // Handle the case where root axis has the pane as a direct child.
                 if axis.members.len() == 2 {
-                    let has_direct = axis.members.iter().any(|m| matches!(m, Member::Pane(pid) if *pid == id));
+                    let has_direct = axis
+                        .members
+                        .iter()
+                        .any(|m| matches!(m, Member::Pane(pid) if *pid == id));
                     if has_direct {
-                        let survivor_idx = axis.members.iter().position(|m| !matches!(m, Member::Pane(pid) if *pid == id)).unwrap();
+                        let survivor_idx = axis
+                            .members
+                            .iter()
+                            .position(|m| !matches!(m, Member::Pane(pid) if *pid == id))
+                            .unwrap();
                         let neighbour = first_pane_in(&axis.members[survivor_idx]);
                         let survivor = axis.members[survivor_idx].clone();
                         self.root = survivor;
@@ -304,17 +339,23 @@ impl<Id: Copy + Eq> PaneGroup<Id> {
         container_len_px: f32,
         min_frac: f32,
     ) {
-        if container_len_px <= 0.0 { return; }
+        if container_len_px <= 0.0 {
+            return;
+        }
         let axis = find_axis_mut(&mut self.root, axis_path);
         let n = axis.members.len() as f32;
         // Convert delta from pixels to flex units.
         let delta_flex = delta_px / container_len_px * n;
         let left = divider_ix;
         let right = divider_ix + 1;
-        if right >= axis.flexes.len() { return; }
+        if right >= axis.flexes.len() {
+            return;
+        }
         // Clamp so neither member drops below min_frac * n.
-        let actual_delta = delta_flex
-            .clamp(-(axis.flexes[left] - min_frac * n), axis.flexes[right] - min_frac * n);
+        let actual_delta = delta_flex.clamp(
+            -(axis.flexes[left] - min_frac * n),
+            axis.flexes[right] - min_frac * n,
+        );
         axis.flexes[left] += actual_delta;
         axis.flexes[right] -= actual_delta;
     }
@@ -330,7 +371,9 @@ impl<Id: Copy + Eq> PaneGroup<Id> {
     where
         F: FnMut(&P) -> Id,
     {
-        Self { root: member_from_serialized(m, mk_id) }
+        Self {
+            root: member_from_serialized(m, mk_id),
+        }
     }
 }
 
@@ -343,7 +386,9 @@ fn first_pane_in<Id: Copy>(m: &Member<Id>) -> Id {
 
 fn find_axis_mut<'a, Id>(root: &'a mut Member<Id>, path: &[usize]) -> &'a mut PaneAxis<Id> {
     if path.is_empty() {
-        if let Member::Axis(a) = root { return a; }
+        if let Member::Axis(a) = root {
+            return a;
+        }
         panic!("find_axis_mut: empty path but root is not an Axis");
     }
     if let Member::Axis(a) = root {
@@ -378,8 +423,18 @@ fn layout_member<Id: Copy>(m: &Member<Id>, rect: Rect, sash: f32, out: &mut Vec<
             for (i, (member, flex)) in a.members.iter().zip(a.flexes.iter()).enumerate() {
                 let size = available * flex / total_flex;
                 let child_rect = match a.axis {
-                    Axis::Horizontal => Rect { x: rect.x + offset, y: rect.y, w: size, h: rect.h },
-                    Axis::Vertical => Rect { x: rect.x, y: rect.y + offset, w: rect.w, h: size },
+                    Axis::Horizontal => Rect {
+                        x: rect.x + offset,
+                        y: rect.y,
+                        w: size,
+                        h: rect.h,
+                    },
+                    Axis::Vertical => Rect {
+                        x: rect.x,
+                        y: rect.y + offset,
+                        w: rect.w,
+                        h: size,
+                    },
                 };
                 layout_member(member, child_rect, sash, out);
                 offset += size + if i + 1 < n { sash } else { 0.0 };
@@ -390,7 +445,10 @@ fn layout_member<Id: Copy>(m: &Member<Id>, rect: Rect, sash: f32, out: &mut Vec<
 
 /// Which leaf pane contains point `p` in the pre-computed layout?
 pub fn pane_at<Id: Copy>(layout: &[(Id, Rect)], p: Vec2) -> Option<Id> {
-    layout.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id)
+    layout
+        .iter()
+        .find(|(_, r)| r.contains(p))
+        .map(|(id, _)| *id)
 }
 
 /// Classify cursor `cursor` inside pane body `body` into a `DropZone`.
@@ -402,15 +460,15 @@ pub fn drop_zone(body: Rect, cursor: Vec2, edge_frac: f32) -> DropZone {
     let rx = body.w - lx;
     let ry = body.h - ly;
 
-    let left_t  = lx / body.w;
+    let left_t = lx / body.w;
     let right_t = rx / body.w;
-    let top_t   = ly / body.h;
-    let bot_t   = ry / body.h;
+    let top_t = ly / body.h;
+    let bot_t = ry / body.h;
 
-    let in_left  = left_t  < edge_frac;
+    let in_left = left_t < edge_frac;
     let in_right = right_t < edge_frac;
-    let in_top   = top_t   < edge_frac;
-    let in_bot   = bot_t   < edge_frac;
+    let in_top = top_t < edge_frac;
+    let in_bot = bot_t < edge_frac;
 
     if !in_left && !in_right && !in_top && !in_bot {
         return DropZone::Center;
@@ -420,10 +478,10 @@ pub fn drop_zone(body: Rect, cursor: Vec2, edge_frac: f32) -> DropZone {
     let mut best_frac = f32::MAX;
     let mut best = DropZone::Center;
     for (flag, frac, zone) in [
-        (in_left,  left_t,  DropZone::Edge(SplitDirection::Left)),
+        (in_left, left_t, DropZone::Edge(SplitDirection::Left)),
         (in_right, right_t, DropZone::Edge(SplitDirection::Right)),
-        (in_top,   top_t,   DropZone::Edge(SplitDirection::Up)),
-        (in_bot,   bot_t,   DropZone::Edge(SplitDirection::Down)),
+        (in_top, top_t, DropZone::Edge(SplitDirection::Up)),
+        (in_bot, bot_t, DropZone::Edge(SplitDirection::Down)),
     ] {
         if flag && frac < best_frac {
             best_frac = frac;
@@ -439,15 +497,26 @@ pub fn drop_zone(body: Rect, cursor: Vec2, edge_frac: f32) -> DropZone {
 #[serde(rename_all = "snake_case")]
 pub enum SerializedMember<P> {
     Pane(P),
-    Axis { axis: Axis, members: Vec<SerializedMember<P>>, flexes: Vec<f32> },
+    Axis {
+        axis: Axis,
+        members: Vec<SerializedMember<P>>,
+        flexes: Vec<f32>,
+    },
 }
 
-fn member_to_serialized<Id: Copy, P>(m: &Member<Id>, leaf: &impl Fn(Id) -> P) -> SerializedMember<P> {
+fn member_to_serialized<Id: Copy, P>(
+    m: &Member<Id>,
+    leaf: &impl Fn(Id) -> P,
+) -> SerializedMember<P> {
     match m {
         Member::Pane(id) => SerializedMember::Pane(leaf(*id)),
         Member::Axis(a) => SerializedMember::Axis {
             axis: a.axis,
-            members: a.members.iter().map(|m| member_to_serialized(m, leaf)).collect(),
+            members: a
+                .members
+                .iter()
+                .map(|m| member_to_serialized(m, leaf))
+                .collect(),
             flexes: a.flexes.clone(),
         },
     }
@@ -459,9 +528,16 @@ fn member_from_serialized<P, Id: Copy, F: FnMut(&P) -> Id>(
 ) -> Member<Id> {
     match m {
         SerializedMember::Pane(p) => Member::Pane(mk_id(p)),
-        SerializedMember::Axis { axis, members, flexes } => Member::Axis(PaneAxis {
+        SerializedMember::Axis {
+            axis,
+            members,
+            flexes,
+        } => Member::Axis(PaneAxis {
             axis: *axis,
-            members: members.iter().map(|m| member_from_serialized(m, mk_id)).collect(),
+            members: members
+                .iter()
+                .map(|m| member_from_serialized(m, mk_id))
+                .collect(),
             flexes: flexes.clone(),
         }),
     }
@@ -473,7 +549,9 @@ fn member_from_serialized<P, Id: Copy, F: FnMut(&P) -> Id>(
 mod tests {
     use super::*;
 
-    fn ids(g: &PaneGroup<u32>) -> Vec<u32> { g.pane_ids() }
+    fn ids(g: &PaneGroup<u32>) -> Vec<u32> {
+        g.pane_ids()
+    }
 
     fn flex_sum_ok(g: &PaneGroup<u32>) -> bool {
         fn check<Id>(m: &Member<Id>) -> bool {
@@ -525,7 +603,9 @@ mod tests {
         assert_eq!(ids(&g), vec![1, 2]);
         if let Member::Axis(a) = &g.root {
             assert_eq!(a.axis, Axis::Vertical);
-        } else { panic!("expected axis") }
+        } else {
+            panic!("expected axis")
+        }
         assert!(flex_sum_ok(&g));
     }
 
@@ -553,7 +633,9 @@ mod tests {
         assert_eq!(ids(&g), vec![1, 2, 3]);
         if let Member::Axis(a) = &g.root {
             assert_eq!(a.members.len(), 3); // flat, not nested
-        } else { panic!() }
+        } else {
+            panic!()
+        }
         assert!(flex_sum_ok(&g));
         assert!(all_axes_ge2(&g));
     }
@@ -577,8 +659,12 @@ mod tests {
         g.split(2, 3, SplitDirection::Down);
         g.split(3, 4, SplitDirection::Right);
         let found_ids = ids(&g);
-        assert!(found_ids.contains(&1) && found_ids.contains(&2)
-            && found_ids.contains(&3) && found_ids.contains(&4));
+        assert!(
+            found_ids.contains(&1)
+                && found_ids.contains(&2)
+                && found_ids.contains(&3)
+                && found_ids.contains(&4)
+        );
         assert!(flex_sum_ok(&g));
         assert!(all_axes_ge2(&g));
     }
@@ -623,8 +709,12 @@ mod tests {
         if let Member::Axis(a) = &g.root {
             let sum: f32 = a.flexes.iter().sum();
             assert!((sum - 2.0).abs() < 1e-4); // sum == member count
-            for f in &a.flexes { assert!(*f > 0.0); }
-        } else { panic!() }
+            for f in &a.flexes {
+                assert!(*f > 0.0);
+            }
+        } else {
+            panic!()
+        }
     }
 
     #[test]
@@ -695,7 +785,9 @@ mod tests {
                 assert!((ns - 2.0).abs() < 1e-4);
                 // After +5px on 50px: left grows.
                 assert!(nested.flexes[0] > 1.0);
-            } else { panic!("expected nested axis") }
+            } else {
+                panic!("expected nested axis")
+            }
         }
     }
 
@@ -704,7 +796,12 @@ mod tests {
     #[test]
     fn layout_single_equals_root() {
         let g = PaneGroup::single(1u32);
-        let root = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
+        let root = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 600.0,
+        };
         let l = layout(&g, root, 4.0);
         assert_eq!(l, vec![(1, root)]);
     }
@@ -713,11 +810,16 @@ mod tests {
     fn layout_horizontal_halves() {
         let mut g = PaneGroup::single(1u32);
         g.split(1, 2, SplitDirection::Right);
-        let root = Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 };
+        let root = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+        };
         let l = layout(&g, root, 4.0);
         assert_eq!(l.len(), 2);
-        let r1 = l.iter().find(|(id,_)| *id == 1).unwrap().1;
-        let r2 = l.iter().find(|(id,_)| *id == 2).unwrap().1;
+        let r1 = l.iter().find(|(id, _)| *id == 1).unwrap().1;
+        let r2 = l.iter().find(|(id, _)| *id == 2).unwrap().1;
         // Each pane gets (100 - 4) / 2 = 48px wide.
         assert!((r1.w - 48.0).abs() < 1e-3);
         assert!((r2.w - 48.0).abs() < 1e-3);
@@ -731,10 +833,15 @@ mod tests {
     fn layout_vertical_halves() {
         let mut g = PaneGroup::single(1u32);
         g.split(1, 2, SplitDirection::Down);
-        let root = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let root = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        };
         let l = layout(&g, root, 4.0);
-        let r1 = l.iter().find(|(id,_)| *id == 1).unwrap().1;
-        let r2 = l.iter().find(|(id,_)| *id == 2).unwrap().1;
+        let r1 = l.iter().find(|(id, _)| *id == 1).unwrap().1;
+        let r2 = l.iter().find(|(id, _)| *id == 2).unwrap().1;
         assert!((r1.h - 48.0).abs() < 1e-3);
         assert!((r2.h - 48.0).abs() < 1e-3);
     }
@@ -744,7 +851,12 @@ mod tests {
         let mut g = PaneGroup::single(1u32);
         g.split(1, 2, SplitDirection::Right);
         g.split(2, 3, SplitDirection::Down);
-        let root = Rect { x: 10.0, y: 20.0, w: 200.0, h: 150.0 };
+        let root = Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 200.0,
+            h: 150.0,
+        };
         let l = layout(&g, root, 4.0);
         assert_eq!(l.len(), 3);
         // All rects within root bounds.
@@ -760,7 +872,12 @@ mod tests {
     fn pane_at_finds_correct_leaf() {
         let mut g = PaneGroup::single(1u32);
         g.split(1, 2, SplitDirection::Right);
-        let root = Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 };
+        let root = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+        };
         let l = layout(&g, root, 4.0);
         assert_eq!(pane_at(&l, Vec2 { x: 10.0, y: 10.0 }), Some(1));
         assert_eq!(pane_at(&l, Vec2 { x: 90.0, y: 10.0 }), Some(2));
@@ -769,31 +886,53 @@ mod tests {
 
     // ── drop_zone ─────────────────────────────────────────────────────────────
 
-    fn body() -> Rect { Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 } }
+    fn body() -> Rect {
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        }
+    }
 
     #[test]
     fn drop_zone_center() {
-        assert_eq!(drop_zone(body(), Vec2 { x: 50.0, y: 50.0 }, 0.25), DropZone::Center);
+        assert_eq!(
+            drop_zone(body(), Vec2 { x: 50.0, y: 50.0 }, 0.25),
+            DropZone::Center
+        );
     }
 
     #[test]
     fn drop_zone_left_quarter() {
-        assert_eq!(drop_zone(body(), Vec2 { x: 10.0, y: 50.0 }, 0.25), DropZone::Edge(SplitDirection::Left));
+        assert_eq!(
+            drop_zone(body(), Vec2 { x: 10.0, y: 50.0 }, 0.25),
+            DropZone::Edge(SplitDirection::Left)
+        );
     }
 
     #[test]
     fn drop_zone_right_quarter() {
-        assert_eq!(drop_zone(body(), Vec2 { x: 90.0, y: 50.0 }, 0.25), DropZone::Edge(SplitDirection::Right));
+        assert_eq!(
+            drop_zone(body(), Vec2 { x: 90.0, y: 50.0 }, 0.25),
+            DropZone::Edge(SplitDirection::Right)
+        );
     }
 
     #[test]
     fn drop_zone_top_quarter() {
-        assert_eq!(drop_zone(body(), Vec2 { x: 50.0, y: 10.0 }, 0.25), DropZone::Edge(SplitDirection::Up));
+        assert_eq!(
+            drop_zone(body(), Vec2 { x: 50.0, y: 10.0 }, 0.25),
+            DropZone::Edge(SplitDirection::Up)
+        );
     }
 
     #[test]
     fn drop_zone_bottom_quarter() {
-        assert_eq!(drop_zone(body(), Vec2 { x: 50.0, y: 90.0 }, 0.25), DropZone::Edge(SplitDirection::Down));
+        assert_eq!(
+            drop_zone(body(), Vec2 { x: 50.0, y: 90.0 }, 0.25),
+            DropZone::Edge(SplitDirection::Down)
+        );
     }
 
     #[test]
@@ -806,9 +945,15 @@ mod tests {
     #[test]
     fn drop_zone_edge_frac_boundary() {
         // Exactly at the 0.25 boundary from left: x=25.0 → left_t=0.25, not < 0.25, so Center.
-        assert_eq!(drop_zone(body(), Vec2 { x: 25.0, y: 50.0 }, 0.25), DropZone::Center);
+        assert_eq!(
+            drop_zone(body(), Vec2 { x: 25.0, y: 50.0 }, 0.25),
+            DropZone::Center
+        );
         // Just inside: x=24.9 → left_t < 0.25 → Left.
-        assert_eq!(drop_zone(body(), Vec2 { x: 24.9, y: 50.0 }, 0.25), DropZone::Edge(SplitDirection::Left));
+        assert_eq!(
+            drop_zone(body(), Vec2 { x: 24.9, y: 50.0 }, 0.25),
+            DropZone::Edge(SplitDirection::Left)
+        );
     }
 
     // ── serialisation ─────────────────────────────────────────────────────────
@@ -822,7 +967,10 @@ mod tests {
         let ser = g.to_serialized(&|id: u32| id);
         // Deserialize back.
         let mut counter = 0u32;
-        let g2: PaneGroup<u32> = PaneGroup::from_serialized(&ser, &mut |id: &u32| { counter += 1; *id });
+        let g2: PaneGroup<u32> = PaneGroup::from_serialized(&ser, &mut |id: &u32| {
+            counter += 1;
+            *id
+        });
         assert_eq!(g.pane_ids(), g2.pane_ids());
         assert_eq!(counter, 3);
     }

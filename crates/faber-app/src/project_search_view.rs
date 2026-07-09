@@ -201,7 +201,11 @@ impl ProjectSearchView {
                     .into_iter()
                     .filter_map(|e| {
                         let p = e.read(cx).doc.path.clone();
-                        if p.as_os_str().is_empty() { None } else { Some(p) }
+                        if p.as_os_str().is_empty() {
+                            None
+                        } else {
+                            Some(p)
+                        }
                     })
                     .collect()
             })
@@ -429,8 +433,7 @@ impl ProjectSearchView {
         for file_result in &self.results {
             let path = &file_result.path;
 
-            let editor_entity: Option<Entity<EditorView>> =
-                ws.read(cx).find_open_editor(path, cx);
+            let editor_entity: Option<Entity<EditorView>> = ws.read(cx).find_open_editor(path, cx);
 
             if let Some(editor) = editor_entity {
                 let rep = replacement.clone();
@@ -512,8 +515,7 @@ impl ProjectSearchView {
         let Some(ws) = self.workspace.upgrade() else {
             return;
         };
-        let editor_entity: Option<Entity<EditorView>> =
-            ws.read(cx).find_open_editor(&path, cx);
+        let editor_entity: Option<Entity<EditorView>> = ws.read(cx).find_open_editor(&path, cx);
 
         if let Some(editor) = editor_entity {
             let rep = replacement.clone();
