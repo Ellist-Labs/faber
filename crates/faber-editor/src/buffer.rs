@@ -28,6 +28,7 @@ pub struct Document {
     saved_rope: Rope,
     pub path: PathBuf,
     pub dirty: bool,
+    pub version: u32,
     /// The resolved language for this file; None for plain text.
     pub language: Option<Arc<Language>>,
     /// Compiled grammar (highlights + outline queries). Built once at open time
@@ -71,6 +72,7 @@ impl Document {
             rope,
             path: pb,
             dirty: false,
+            version: 1,
             language,
             grammar,
             syntax,
@@ -106,6 +108,7 @@ impl Document {
             rope,
             path: PathBuf::from("<memory>"),
             dirty: false,
+            version: 1,
             language: language.cloned(),
             grammar,
             syntax,
@@ -122,6 +125,7 @@ impl Document {
             rope: Rope::new(),
             path: PathBuf::new(),
             dirty: false,
+            version: 1,
             language: None,
             grammar: None,
             syntax: None,
@@ -240,6 +244,7 @@ impl Document {
     /// Single mutation choke-point. Applies `tx` to the rope, reparses any syntax
     /// layer, updates the dirty flag, and returns the inverse ChangeSet for undo.
     pub fn apply(&mut self, tx: Transaction) -> ChangeSet {
+        self.version += 1;
         let inverse = tx.changes.invert(&self.rope); // capture before applying
         tx.changes.apply(&mut self.rope);
 
@@ -274,6 +279,10 @@ impl Document {
     pub fn mark_saved(&mut self) {
         self.saved_rope = self.rope.clone();
         self.dirty = false;
+    }
+
+    pub fn lsp_sync_info(&self) -> (u32, std::path::PathBuf, String) {
+        (self.version, self.path.clone(), self.rope.to_string())
     }
 }
 

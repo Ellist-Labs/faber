@@ -5,15 +5,18 @@ use gpui::{App, Context, Entity, FocusHandle, Render, Window, div, prelude::*};
 use faber_core::pane_tree::PaneId;
 
 use crate::editor_view::EditorView;
+use crate::panels::diagnostics_panel::DiagnosticsPanel;
 use crate::project_search_view::ProjectSearchView;
 use crate::settings_view::SettingsView;
 
 // ── Tab types (moved from workspace.rs) ──────────────────────────────────────
 
+#[allow(dead_code)]
 pub enum TabContent {
     Editor(Entity<EditorView>),
     Settings(Entity<SettingsView>),
     ProjectSearch(Entity<ProjectSearchView>),
+    Problems(Entity<DiagnosticsPanel>),
 }
 
 pub(crate) struct TabMenu {
@@ -30,7 +33,9 @@ impl Tab {
     pub(crate) fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.content {
             TabContent::Editor(e) => Some(e),
-            TabContent::Settings(_) | TabContent::ProjectSearch(_) => None,
+            TabContent::Settings(_) | TabContent::ProjectSearch(_) | TabContent::Problems(_) => {
+                None
+            }
         }
     }
 
@@ -47,6 +52,7 @@ impl Tab {
             }
             TabContent::Settings(_) => (rust_i18n::t!("tab.settings").to_string(), false),
             TabContent::ProjectSearch(_) => (rust_i18n::t!("tab.search").to_string(), false),
+            TabContent::Problems(_) => (rust_i18n::t!("tab.problems").to_string(), false),
         }
     }
 
@@ -55,6 +61,7 @@ impl Tab {
             TabContent::Editor(e) => e.read(cx).focus_handle.clone(),
             TabContent::Settings(s) => s.read(cx).focus_handle.clone(),
             TabContent::ProjectSearch(p) => p.read(cx).focus_handle.clone(),
+            TabContent::Problems(p) => p.read(cx).focus_handle.clone(),
         }
     }
 }
@@ -182,6 +189,13 @@ impl Pane {
         self.tabs
             .iter()
             .position(|t| matches!(t.content, TabContent::ProjectSearch(_)))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn find_problems_tab(&self) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|t| matches!(t.content, TabContent::Problems(_)))
     }
 
     /// All editor entities in this pane (in order).

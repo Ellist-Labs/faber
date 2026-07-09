@@ -3,9 +3,11 @@ use std::time::{Duration, Instant};
 use gpui::{AnyView, Context, Entity, IntoElement, Render, Window, div, prelude::*, px};
 use rust_i18n::t;
 
+use crate::lsp_status::LspStatus;
 use crate::theme::RuntimeTheme;
 use crate::ui::h_flex;
 use crate::workspace::IndexStatus;
+use faber_lsp::server::ServerState;
 
 // ── StatusBar ─────────────────────────────────────────────────────────────────
 
@@ -283,6 +285,66 @@ impl Render for IndexingStatusItem {
                     .text_color(t.text_muted)
                     .child(label_text),
             )
+            .into_any_element()
+    }
+}
+
+// ── LspStatusItem ─────────────────────────────────────────────────────────────
+
+pub struct LspStatusItem {
+    lsp_status: gpui::Entity<LspStatus>,
+}
+
+impl LspStatusItem {
+    pub fn new(lsp_status: gpui::Entity<LspStatus>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&lsp_status, |_, _, cx| cx.notify()).detach();
+        Self { lsp_status }
+    }
+}
+
+impl Render for LspStatusItem {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.global::<RuntimeTheme>().clone();
+        let lsp = self.lsp_status.read(cx);
+
+        let (state_label, text_color) = if lsp.statuses.is_empty() {
+            (t!("status_bar.lsp_idle").to_string(), t.text_subtle)
+        } else {
+            let total_errors: usize = lsp.statuses.iter().map(|s| s.error_count).sum();
+            let total_warnings: usize = lsp.statuses.iter().map(|s| s.warning_count).sum();
+            let label = match &lsp.statuses[0].state {
+                ServerState::Downloading => t!("status_bar.lsp_downloading").to_string(),
+                ServerState::Starting | ServerState::Initializing => {
+                    t!("status_bar.lsp_starting").to_string()
+                }
+                ServerState::Running => {
+                    if total_errors > 0 {
+                        format!("{} {}", total_errors, t!("status_bar.lsp_errors"))
+                    } else if total_warnings > 0 {
+                        format!("{} {}", total_warnings, t!("status_bar.lsp_warnings"))
+                    } else {
+                        t!("status_bar.lsp_ready").to_string()
+                    }
+                }
+                ServerState::Restarting { attempt } => {
+                    format!("{} ({})", t!("status_bar.lsp_restarting"), attempt)
+                }
+                ServerState::Error(msg) => format!("{}: {}", t!("status_bar.lsp_error"), msg),
+                ServerState::Stopped => t!("status_bar.lsp_idle").to_string(),
+            };
+            let color = if total_errors > 0 {
+                t.error
+            } else {
+                t.text_muted
+            };
+            (label, color)
+        };
+
+        div()
+            .text_color(text_color)
+            .text_size(px(t.font_size_caption))
+            .font_family(t.ui_family.clone())
+            .child(state_label)
             .into_any_element()
     }
 }

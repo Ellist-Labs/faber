@@ -1,0 +1,40 @@
+[package]
+name = "faber-lsp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+faber-core = { path = "../faber-core" }
+faber-lang = { path = "../faber-lang" }
+faber-settings = { path = "../faber-settings" }
+
+# LSP protocol types
+lsp-types = "0.97"
+
+# JSON serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Concurrency / threading (shared with faber-index)
+crossbeam-channel = "0.5"
+arc-swap = "1"
+
+# HTTP download (synchronous, no tokio)
+ureq = { version = "3", features = ["_tls"] }
+
+# Decompression (.gz single-file format)
+flate2 = "1"
+
+# Checksum verification
+sha2 = "0.10"
+
+# Rope buffer (shared with faber-core / faber-editor)
+ropey = "1"
+
+# Utilities
+anyhow = "1"
+log = "0.4"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"

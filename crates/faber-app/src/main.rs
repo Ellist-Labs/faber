@@ -7,8 +7,10 @@ mod file_icons;
 mod file_preview;
 mod i18n;
 mod input_helpers;
+mod lsp_status;
 mod markdown_preview;
 mod pane;
+mod panels;
 mod project_search_view;
 mod settings_view;
 mod sidebar;
@@ -139,6 +141,7 @@ actions!(
         OpenFileFinder,
         OpenFileFinderPreview,
         OpenSymbolFinder,
+        OpenProblems,
         Quit,
         SplitLeft,
         SplitRight,
@@ -325,6 +328,8 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-shift-f", OpenProjectSearch, Some("Workspace")),
         // Symbol finder
         KeyBinding::new("cmd-t", OpenSymbolFinder, Some("Workspace")),
+        // Problems panel
+        KeyBinding::new("cmd-shift-m", OpenProblems, Some("Workspace")),
         KeyBinding::new("escape", SfDismiss, Some("SymbolFinder")),
         KeyBinding::new("enter", SfConfirm, Some("SymbolFinder")),
         KeyBinding::new("down", SfSelectNext, Some("SymbolFinder")),
@@ -428,6 +433,8 @@ pub(crate) fn register_menus(cx: &mut App) {
                 MenuItem::action(t!("menu.save_all").to_string(), SaveAll),
                 MenuItem::separator(),
                 MenuItem::action(t!("menu.close_window").to_string(), CloseWindow),
+                MenuItem::separator(),
+                MenuItem::action(t!("menu.problems").to_string(), OpenProblems),
             ],
         },
     ]);

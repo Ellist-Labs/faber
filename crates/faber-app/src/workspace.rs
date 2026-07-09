@@ -22,6 +22,7 @@ use gpui::{
 
 use crate::editor_view::{EditorEvent, EditorView};
 use crate::file_finder::FileFinderView;
+use crate::lsp_status::LspStatus;
 use crate::pane::{Pane, TabContent, TabMenu};
 use crate::project_search_view::ProjectSearchView;
 use crate::settings_view::{SettingsStore, SettingsView};
@@ -34,10 +35,13 @@ use crate::ui::{
 use crate::welcome_view::render_welcome;
 use crate::{
     AppStateStore, CfConfirm, CfDismiss, CloseFile, CloseFolder, CloseTab, CloseWindow, NewFile,
-    NextTab, OpenFile, OpenFileFinder, OpenFileFinderPreview, OpenFolder, OpenProjectSearch,
-    OpenSettings, PrevTab, ProjectRoot, Quit, ReindexProject, SaveAll, SaveAs, SaveFile, SplitDown,
-    SplitLeft, SplitRight, SplitUp, ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
+    NextTab, OpenFile, OpenFileFinder, OpenFileFinderPreview, OpenFolder, OpenProblems,
+    OpenProjectSearch, OpenSettings, PrevTab, ProjectRoot, Quit, ReindexProject, SaveAll, SaveAs,
+    SaveFile, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleBottomPanel, ToggleRightPanel,
+    ToggleSidebar,
 };
+use faber_lsp::adapter::RustAnalyzerAdapter;
+use faber_lsp::manager::{LanguageId as LspLanguageId, LspManager};
 
 // ── Index status ──────────────────────────────────────────────────────────────
 
@@ -183,6 +187,8 @@ pub struct Workspace {
     /// Keeps the filesystem watcher threads alive for the current root folder.
     _fs_watcher: Option<faber_index::watcher::FsWatcher>,
     index_status: gpui::Entity<IndexStatus>,
+    lsp_manager: Option<Arc<LspManager>>,
+    lsp_status: gpui::Entity<LspStatus>,
     status_bar: Entity<crate::status_bar::StatusBar>,
     file_finder: Option<Entity<FileFinderView>>,
     symbol_finder: Option<Entity<crate::symbol_finder::SymbolFinderView>>,
@@ -204,10 +210,15 @@ impl Workspace {
         panes.insert(first_pane_id, first_pane);
 
         let index_status = cx.new(|_| IndexStatus::new());
+        let lsp_status = cx.new(|_| LspStatus::new());
         let status_bar = cx.new(|_| crate::status_bar::StatusBar::new());
         {
             let item =
                 cx.new(|cx| crate::status_bar::IndexingStatusItem::new(index_status.clone(), cx));
+            status_bar.update(cx, |bar, _| bar.push_right(item.into()));
+        }
+        {
+            let item = cx.new(|cx| crate::status_bar::LspStatusItem::new(lsp_status.clone(), cx));
             status_bar.update(cx, |bar, _| bar.push_right(item.into()));
         }
 
@@ -233,6 +244,8 @@ impl Workspace {
             symbols_handle: None,
             _fs_watcher: None,
             index_status,
+            lsp_manager: None,
+            lsp_status,
             status_bar,
             file_finder: None,
             symbol_finder: None,
@@ -308,14 +321,43 @@ impl Workspace {
             ws.on_editor_edited(cx)
         })
         .detach();
+        // Wire the shared diagnostic store so squiggles render for this editor.
+        if let Some(mgr) = &self.lsp_manager {
+            let store = mgr.diagnostic_store();
+            editor.update(cx, |ev, _cx| {
+                ev.diagnostic_store = Some(store);
+            });
+        }
         self.panes[&self.focused_pane].update(cx, |pane: &mut Pane, _| {
-            pane.push_tab(TabContent::Editor(editor));
+            pane.push_tab(TabContent::Editor(editor.clone()));
         });
+        if let Some(mgr) = &self.lsp_manager {
+            let (_version, path, text) = editor.read(cx).doc.lsp_sync_info();
+            if let Some((uri, lang_id)) = Self::doc_uri_and_lang(&path) {
+                mgr.on_document_opened(uri, lang_id, &text);
+            }
+        }
     }
 
     // ── auto-save ──────────────────────────────────────────────────────────────
 
     fn on_editor_edited(&mut self, cx: &mut Context<Self>) {
+        // Notify LSP of document change (unconditional).
+        if let Some(mgr) = &self.lsp_manager {
+            let editor = self
+                .pane()
+                .read(cx)
+                .active_tab()
+                .and_then(|t| t.editor())
+                .cloned();
+            if let Some(editor) = editor {
+                let (_version, path, text) = editor.read(cx).doc.lsp_sync_info();
+                if let Some((uri, _lang_id)) = Self::doc_uri_and_lang(&path) {
+                    mgr.on_document_changed(uri, &text);
+                }
+            }
+        }
+
         let settings = &cx.global::<SettingsStore>().0;
         if settings.auto_save != AutoSave::AfterDelay {
             return;
@@ -419,9 +461,32 @@ impl Workspace {
 
     pub fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let pane_id = self.focused_pane;
+        // Capture the closing editor's path before removal so we can decide
+        // whether to notify LSP afterwards.
+        let closing_path = {
+            let pane = self.panes[&pane_id].read(cx);
+            pane.tab_at(ix).and_then(|tab| {
+                if let TabContent::Editor(editor) = &tab.content {
+                    Some(editor.read(cx).doc.path.clone())
+                } else {
+                    None
+                }
+            })
+        };
         self.panes[&pane_id].update(cx, |p: &mut Pane, _| {
             p.remove_tab(ix);
         });
+        // Send didClose only when this was the last open editor for the path.
+        // The tab is already removed, so any remaining match means the file is
+        // still visible in another pane and the server must keep tracking it.
+        if let Some(path) = closing_path
+            && let Some(mgr) = &self.lsp_manager
+        {
+            let still_open_elsewhere = self.find_open_editor(&path, cx).is_some();
+            if !still_open_elsewhere && let Some((uri, _)) = Self::doc_uri_and_lang(&path) {
+                mgr.on_document_closed(uri);
+            }
+        }
         // Collapse the pane if this emptied it (a no-op for the last remaining pane,
         // which stays to show the welcome screen).
         if self.panes[&pane_id].read(cx).is_empty() {
@@ -652,6 +717,76 @@ impl Workspace {
             }
         })
         .detach();
+        self.start_lsp_manager(cx);
+    }
+
+    pub(crate) fn start_lsp_manager(&mut self, cx: &mut Context<Self>) {
+        let settings = cx.global::<SettingsStore>().0.lsp.clone();
+        let app_state = cx.global::<AppStateStore>().0.clone();
+        let trusted = self
+            .root_folder
+            .as_ref()
+            .map(|r| app_state.is_trusted(r))
+            .unwrap_or(false);
+
+        let manager = LspManager::new(vec![Box::new(RustAnalyzerAdapter)], settings, trusted);
+        self.lsp_manager = Some(Arc::clone(&manager));
+
+        let lsp_status = self.lsp_status.clone();
+        let manager_weak = Arc::downgrade(&manager);
+
+        cx.spawn(async move |this, cx| {
+            let mut last_diag_gen: u64 = 0;
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                let Some(mgr) = manager_weak.upgrade() else {
+                    break;
+                };
+                let statuses = mgr.server_states();
+                if lsp_status
+                    .update(cx, |s, cx| {
+                        s.statuses = statuses;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                // Notify EditorViews to repaint if diagnostics changed.
+                let diag_gen = mgr.diagnostic_store().generation();
+                if diag_gen != last_diag_gen {
+                    last_diag_gen = diag_gen;
+                    let _ = this.update(cx, |ws, cx| {
+                        let editors: Vec<_> = ws
+                            .panes
+                            .values()
+                            .flat_map(|pane| {
+                                pane.read(cx).all_editors().cloned().collect::<Vec<_>>()
+                            })
+                            .collect();
+                        for ev in editors {
+                            ev.update(cx, |_, cx| cx.notify());
+                        }
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn doc_uri_and_lang(path: &std::path::Path) -> Option<(url::Url, LspLanguageId)> {
+        let path_str = path.to_string_lossy();
+        if path_str == "<memory>" || path.as_os_str().is_empty() {
+            return None;
+        }
+        let uri = url::Url::from_file_path(path).ok()?;
+        let lang_id = match path.extension().and_then(|e| e.to_str()) {
+            Some("rs") => LspLanguageId::new("rust"),
+            _ => return None,
+        };
+        Some((uri, lang_id))
     }
 
     fn open_file_finder(&mut self, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1109,6 +1244,27 @@ impl Workspace {
         let view = cx.new(SettingsView::new);
         self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| {
             p.push_tab(TabContent::Settings(view));
+        });
+        let new_ix = self.pane().read(cx).tab_count() - 1;
+        self.activate_tab(new_ix, window, cx);
+    }
+
+    fn on_open_problems(&mut self, _: &OpenProblems, window: &mut Window, cx: &mut Context<Self>) {
+        let existing = self.pane().read(cx).find_problems_tab();
+        if let Some(ix) = existing {
+            self.activate_tab(ix, window, cx);
+            return;
+        }
+        let store = self.lsp_manager.as_ref().map(|m| m.diagnostic_store());
+        let panel = cx.new(|cx| {
+            let mut p = crate::panels::diagnostics_panel::DiagnosticsPanel::new(cx);
+            if let Some(s) = store {
+                p.set_store(s);
+            }
+            p
+        });
+        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| {
+            p.push_tab(TabContent::Problems(panel));
         });
         let new_ix = self.pane().read(cx).tab_count() - 1;
         self.activate_tab(new_ix, window, cx);
@@ -1988,6 +2144,12 @@ impl Workspace {
                     .flex_shrink_0()
                     .text_color(t.text_muted)
                     .into_any_element(),
+                TabContent::Problems(_) => svg()
+                    .path(IconName::Search.path())
+                    .size(px(14.0))
+                    .flex_shrink_0()
+                    .text_color(t.text_muted)
+                    .into_any_element(),
             };
             (title, dirty, is_active, tab.id, icon)
         };
@@ -2162,6 +2324,7 @@ impl Workspace {
                 TabContent::Editor(e) => e.clone().into_any_element(),
                 TabContent::Settings(s) => s.clone().into_any_element(),
                 TabContent::ProjectSearch(p) => p.clone().into_any_element(),
+                TabContent::Problems(p) => p.clone().into_any_element(),
             })
         };
 
@@ -2381,6 +2544,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_bottom_panel))
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_open_problems))
             .on_action(cx.listener(Self::on_reindex_project))
             .on_action(cx.listener(Self::on_open_project_search))
             .on_action(cx.listener(Self::on_open_file_finder))

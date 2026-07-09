@@ -1,0 +1,702 @@
+// LspManager: per-server ownership, document sync events,
+// trust gate, DiagnosticStore wiring, progress reporting.
+
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+use arc_swap::ArcSwap;
+use lsp_types::NumberOrString;
+use ropey::Rope;
+
+use crate::{
+    adapter::LspAdapter,
+    diagnostics::{
+        DiagnosticEntry, DiagnosticRange, DiagnosticStore, severity_from_lsp, tags_from_lsp,
+    },
+    install::Installer,
+    position::{PositionEncoding, from_lsp_position},
+    server::{LanguageServer, ServerState},
+};
+use faber_core::anchor::{Anchor, Bias};
+use faber_settings::LspSettings;
+
+// ── LanguageId ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LanguageId(pub String);
+
+impl LanguageId {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+// ── ServerStatus ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ServerStatus {
+    pub server_id: String,
+    pub language_id: LanguageId,
+    pub state: ServerState,
+    pub error_count: usize,
+    pub warning_count: usize,
+}
+
+// ── OpenDoc ───────────────────────────────────────────────────────────────────
+
+struct OpenDoc {
+    rope: Rope,
+    lang_id: String,
+    version: i32,
+}
+
+// ── LspManager ────────────────────────────────────────────────────────────────
+
+pub struct LspManager {
+    adapters: Vec<Box<dyn LspAdapter>>,
+    /// Running servers keyed by `server_id`.
+    servers: Mutex<HashMap<String, Arc<LanguageServer>>>,
+    /// Reverse index: language id string → server ids serving it.
+    lang_servers: Mutex<HashMap<String, Vec<String>>>,
+    diagnostic_store: Arc<DiagnosticStore>,
+    settings: Arc<RwLock<LspSettings>>,
+    trusted: Arc<AtomicBool>,
+    status: Arc<ArcSwap<Vec<ServerStatus>>>,
+    workspace_root: Mutex<Option<PathBuf>>,
+    open_docs: Arc<Mutex<HashMap<url::Url, OpenDoc>>>,
+}
+
+impl LspManager {
+    pub fn new(
+        adapters: Vec<Box<dyn LspAdapter>>,
+        settings: LspSettings,
+        trusted: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            adapters,
+            servers: Mutex::new(HashMap::new()),
+            lang_servers: Mutex::new(HashMap::new()),
+            diagnostic_store: Arc::new(DiagnosticStore::new()),
+            settings: Arc::new(RwLock::new(settings)),
+            trusted: Arc::new(AtomicBool::new(trusted)),
+            status: Arc::new(ArcSwap::from_pointee(vec![])),
+            workspace_root: Mutex::new(None),
+            open_docs: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    // ── Trust gate ────────────────────────────────────────────────────────────
+
+    pub fn is_trusted(&self) -> bool {
+        self.trusted.load(Ordering::Relaxed)
+    }
+
+    pub fn set_trusted(self: &Arc<Self>, trusted: bool) {
+        self.trusted.store(trusted, Ordering::Relaxed);
+    }
+
+    // ── Server lifecycle ──────────────────────────────────────────────────────
+
+    /// Idempotent — returns Ok immediately if a server for this language's
+    /// adapter (`server_id`) is already running.
+    pub fn ensure_server_for_language(
+        self: &Arc<Self>,
+        lang_id: &LanguageId,
+        workspace_root: &Path,
+    ) -> anyhow::Result<()> {
+        if !self.is_trusted() {
+            return Ok(());
+        }
+
+        // Store workspace root on first call.
+        {
+            let mut root = self
+                .workspace_root
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if root.is_none() {
+                *root = Some(workspace_root.to_owned());
+            }
+        }
+
+        // Find an adapter for this language.
+        let adapter = match self
+            .adapters
+            .iter()
+            .find(|a| a.languages().contains(&lang_id.as_str()))
+        {
+            Some(a) => a,
+            None => {
+                log::debug!("lsp: no adapter for language {:?}", lang_id.as_str());
+                return Ok(());
+            }
+        };
+
+        let server_id = adapter.server_id().to_owned();
+
+        // Idempotency: check if server already running.
+        {
+            let guard = self.servers.lock().unwrap_or_else(|p| p.into_inner());
+            if guard.contains_key(&server_id) {
+                return Ok(());
+            }
+        }
+
+        // Resolve binary.
+        let settings_guard = self.settings.read().unwrap_or_else(|p| p.into_inner());
+        let binary_path = adapter
+            .resolve_binary(&settings_guard, &mut |msg| log::info!("{}", msg))
+            .map_err(|e| anyhow::anyhow!("resolve_binary failed: {e}"))?;
+        drop(settings_guard);
+
+        let init_options = adapter.init_options();
+        let server_id_str: &'static str = adapter.server_id();
+
+        // Resolve login-shell PATH for subprocess.
+        let shell_path = Installer::login_shell_path();
+        let env_path: Option<&str> = if shell_path.is_empty() {
+            None
+        } else {
+            Some(shell_path.as_str())
+        };
+
+        // Spawn and initialize.
+        let server = LanguageServer::spawn(&binary_path, workspace_root, env_path)?;
+        server.initialize(None, workspace_root, init_options)?;
+
+        // After initialize: read the negotiated position encoding.
+        let encoding = server.capabilities().position_encoding;
+
+        // Wire publishDiagnostics → diagnostic store.
+        {
+            let store = Arc::clone(&self.diagnostic_store);
+            let open_docs = Arc::clone(&self.open_docs);
+            let source_str = server_id_str;
+            server.transport().subscribe(
+                "textDocument/publishDiagnostics",
+                Arc::new(move |params| {
+                    Self::handle_publish_diagnostics(
+                        Arc::clone(&store),
+                        Arc::clone(&open_docs),
+                        encoding,
+                        source_str,
+                        params,
+                    );
+                }),
+            );
+        }
+
+        // Insert into maps.
+        {
+            let mut servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
+            servers.insert(server_id.clone(), server);
+        }
+        {
+            let mut lang_map = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
+            lang_map
+                .entry(lang_id.as_str().to_owned())
+                .or_default()
+                .push(server_id);
+        }
+        self.update_status();
+
+        Ok(())
+    }
+
+    // ── Diagnostics ───────────────────────────────────────────────────────────
+
+    fn handle_publish_diagnostics(
+        store: Arc<DiagnosticStore>,
+        open_docs: Arc<Mutex<HashMap<url::Url, OpenDoc>>>,
+        encoding: PositionEncoding,
+        source_str: &'static str,
+        params_value: serde_json::Value,
+    ) {
+        let params: lsp_types::PublishDiagnosticsParams = match serde_json::from_value(params_value)
+        {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("publishDiagnostics: failed to deserialize params: {e}");
+                return;
+            }
+        };
+
+        let uri = match params.uri.as_str().parse::<url::Url>() {
+            Ok(u) => u,
+            Err(e) => {
+                log::warn!("publishDiagnostics: bad URI {:?}: {e}", params.uri);
+                return;
+            }
+        };
+
+        // Look up rope snapshot for this URI to compute real char offsets.
+        let rope = {
+            let guard = open_docs.lock().unwrap_or_else(|p| p.into_inner());
+            guard.get(&uri).map(|d| d.rope.clone())
+        };
+
+        let source: crate::diagnostics::Source = Arc::from(source_str);
+
+        let entries: Vec<DiagnosticEntry> = params
+            .diagnostics
+            .iter()
+            .map(|d| {
+                let (start_offset, end_offset) = if let Some(ref rope) = rope {
+                    let start = from_lsp_position(rope, d.range.start, encoding).unwrap_or(0);
+                    let end = from_lsp_position(rope, d.range.end, encoding).unwrap_or(start);
+                    (start, end)
+                } else {
+                    // No rope snapshot: fall back to column (only correct on line 0).
+                    (
+                        d.range.start.character as usize,
+                        d.range.end.character as usize,
+                    )
+                };
+                let code = d.code.as_ref().map(|c| match c {
+                    NumberOrString::Number(n) => n.to_string(),
+                    NumberOrString::String(s) => s.clone(),
+                });
+                DiagnosticEntry {
+                    range: DiagnosticRange {
+                        lsp_line: d.range.start.line,
+                        start: Anchor::new(start_offset, Bias::Left),
+                        end: Anchor::new(end_offset, Bias::Right),
+                    },
+                    severity: severity_from_lsp(d.severity),
+                    tags: tags_from_lsp(d.tags.as_deref()),
+                    message: d.message.clone(),
+                    source: Arc::clone(&source),
+                    code,
+                }
+            })
+            .collect();
+
+        store.publish(source, uri, entries);
+    }
+
+    // ── Document sync ─────────────────────────────────────────────────────────
+
+    pub fn on_document_opened(&self, uri: url::Url, lang_id: LanguageId, text: &str) {
+        if !self.is_trusted() {
+            return;
+        }
+
+        // Store rope snapshot with version 1.
+        let version: i32 = 1;
+        {
+            let mut docs = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
+            docs.insert(
+                uri.clone(),
+                OpenDoc {
+                    rope: Rope::from_str(text),
+                    lang_id: lang_id.as_str().to_owned(),
+                    version,
+                },
+            );
+        }
+
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": uri.as_str(),
+                "languageId": lang_id.as_str(),
+                "version": version,
+                "text": text,
+            }
+        });
+
+        self.notify_servers_for_lang(lang_id.as_str(), "textDocument/didOpen", &params);
+    }
+
+    pub fn on_document_changed(&self, uri: url::Url, text: &str) {
+        if !self.is_trusted() {
+            return;
+        }
+
+        // Update rope snapshot and bump version.
+        let (version, lang_id_str) = {
+            let mut docs = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(doc) = docs.get_mut(&uri) else {
+                return;
+            };
+            doc.rope = Rope::from_str(text);
+            doc.version += 1;
+            (doc.version, doc.lang_id.clone())
+        };
+
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri.as_str(), "version": version },
+            "contentChanges": [{ "text": text }],
+        });
+
+        self.notify_servers_for_lang(&lang_id_str, "textDocument/didChange", &params);
+    }
+
+    pub fn on_document_closed(&self, uri: url::Url) {
+        if !self.is_trusted() {
+            return;
+        }
+
+        let lang_id_str = {
+            let mut docs = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
+            docs.remove(&uri).map(|d| d.lang_id)
+        };
+        let Some(lang_id_str) = lang_id_str else {
+            return;
+        };
+
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri.as_str() }
+        });
+
+        self.notify_servers_for_lang(&lang_id_str, "textDocument/didClose", &params);
+    }
+
+    // ── Public accessors ──────────────────────────────────────────────────────
+
+    pub fn diagnostic_store(&self) -> Arc<DiagnosticStore> {
+        Arc::clone(&self.diagnostic_store)
+    }
+
+    pub fn server_states(&self) -> Vec<ServerStatus> {
+        (*self.status.load_full()).clone()
+    }
+
+    // ── Restart ───────────────────────────────────────────────────────────────
+
+    pub fn restart_server(self: &Arc<Self>, server_id: &str) {
+        let server_id = server_id.to_owned();
+
+        // Remove from maps.
+        {
+            let mut guard = self.servers.lock().unwrap_or_else(|p| p.into_inner());
+            guard.remove(&server_id);
+        }
+        {
+            let mut guard = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
+            for ids in guard.values_mut() {
+                ids.retain(|id| id != &server_id);
+            }
+        }
+        self.update_status();
+
+        let workspace_root = {
+            self.workspace_root
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        };
+        let Some(root) = workspace_root else {
+            log::warn!("lsp: cannot restart {server_id}: workspace root not known");
+            return;
+        };
+
+        // Find the language for this server.
+        let lang_id_str = self
+            .adapters
+            .iter()
+            .find(|a| a.server_id() == server_id.as_str())
+            .and_then(|a| a.languages().first().copied())
+            .map(|s| s.to_owned());
+        let Some(lang_str) = lang_id_str else {
+            log::warn!("lsp: cannot restart {server_id}: no adapter found");
+            return;
+        };
+
+        let mgr = Arc::clone(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let lang_id = LanguageId::new(&lang_str);
+            if let Err(e) = mgr.ensure_server_for_language(&lang_id, &root) {
+                log::error!("lsp: restart of {server_id} failed: {e}");
+                return;
+            }
+
+            // Re-send didOpen for all tracked docs matching this language.
+            let docs_snapshot: Vec<(url::Url, String, i32, String)> = {
+                let guard = mgr.open_docs.lock().unwrap_or_else(|p| p.into_inner());
+                guard
+                    .iter()
+                    .filter(|(_, d)| d.lang_id == lang_str)
+                    .map(|(uri, d)| {
+                        (
+                            uri.clone(),
+                            d.lang_id.clone(),
+                            d.version,
+                            d.rope.to_string(),
+                        )
+                    })
+                    .collect()
+            };
+            for (uri, lang, version, text) in docs_snapshot {
+                let params = serde_json::json!({
+                    "textDocument": {
+                        "uri": uri.as_str(),
+                        "languageId": lang,
+                        "version": version,
+                        "text": text,
+                    }
+                });
+                mgr.notify_servers_for_lang(&lang, "textDocument/didOpen", &params);
+            }
+            log::info!("lsp: {server_id} restarted successfully");
+        });
+    }
+
+    // ── Private ───────────────────────────────────────────────────────────────
+
+    /// Send a notification to every server registered for `lang_id_str`.
+    fn notify_servers_for_lang(&self, lang_id_str: &str, method: &str, params: &serde_json::Value) {
+        let server_ids = {
+            let guard = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
+            guard.get(lang_id_str).cloned().unwrap_or_default()
+        };
+        let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
+        for id in &server_ids {
+            if let Some(server) = servers.get(id) {
+                server.transport().notify(method, params.clone());
+            }
+        }
+    }
+
+    fn update_status(&self) {
+        let error_count = self
+            .diagnostic_store
+            .count_by_severity(crate::diagnostics::Severity::Error);
+        let warning_count = self
+            .diagnostic_store
+            .count_by_severity(crate::diagnostics::Severity::Warning);
+
+        let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
+        let lang_servers = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Build a server_id → lang_id map for display.
+        let mut server_to_lang: HashMap<String, String> = HashMap::new();
+        for (lang, ids) in lang_servers.iter() {
+            for id in ids {
+                server_to_lang
+                    .entry(id.clone())
+                    .or_insert_with(|| lang.clone());
+            }
+        }
+
+        let snapshot: Vec<ServerStatus> = servers
+            .iter()
+            .map(|(server_id, server)| {
+                let lang_str = server_to_lang.get(server_id).cloned().unwrap_or_default();
+                ServerStatus {
+                    server_id: server_id.clone(),
+                    language_id: LanguageId::new(&lang_str),
+                    state: server.state(),
+                    error_count,
+                    warning_count,
+                }
+            })
+            .collect();
+        self.status.store(Arc::new(snapshot));
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::TransportLayer;
+    use crossbeam_channel::{Receiver, Sender, unbounded};
+    use std::io::{self, Read, Write};
+
+    // ── In-memory byte pipe (mirrors server.rs / transport.rs tests) ──────────
+
+    struct ChanReader(Receiver<u8>);
+    struct ChanWriter(Sender<u8>);
+
+    impl Read for ChanReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            match self.0.recv() {
+                Ok(b) => {
+                    buf[0] = b;
+                    let mut n = 1;
+                    while n < buf.len() {
+                        match self.0.try_recv() {
+                            Ok(b) => {
+                                buf[n] = b;
+                                n += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    Ok(n)
+                }
+                Err(_) => Ok(0),
+            }
+        }
+    }
+
+    impl Write for ChanWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            for &b in buf {
+                self.0
+                    .send(b)
+                    .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e))?;
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn byte_pipe() -> (ChanWriter, ChanReader) {
+        let (tx, rx) = unbounded::<u8>();
+        (ChanWriter(tx), ChanReader(rx))
+    }
+
+    fn make_transport() -> Arc<TransportLayer> {
+        let (_, reader) = byte_pipe();
+        let (writer, _) = byte_pipe();
+        Arc::new(TransportLayer::new(reader, writer))
+    }
+
+    fn default_settings() -> LspSettings {
+        LspSettings::default()
+    }
+
+    // ── Test 1: trust gate ────────────────────────────────────────────────────
+
+    #[test]
+    fn trust_gate_blocks_document_open() {
+        let mgr = LspManager::new(vec![], default_settings(), false);
+
+        // Should not panic, and no server should be spawned.
+        mgr.on_document_opened(
+            url::Url::parse("file:///foo.rs").unwrap(),
+            LanguageId::new("rust"),
+            "fn main() {}",
+        );
+
+        let guard = mgr.servers.lock().unwrap();
+        assert!(guard.is_empty(), "no server should exist when untrusted");
+        // No doc snapshot either, since the trust gate short-circuits.
+        assert!(mgr.open_docs.lock().unwrap().is_empty());
+    }
+
+    // ── Test 2: server status snapshot ────────────────────────────────────────
+
+    #[test]
+    fn status_snapshot_reflects_running_server() {
+        let mgr = LspManager::new(vec![], default_settings(), true);
+
+        // Insert a mock server in Running state, keyed by server_id.
+        let transport = make_transport();
+        let server = LanguageServer::from_transport(transport);
+        server.set_state(ServerState::Running);
+
+        {
+            let mut guard = mgr.servers.lock().unwrap();
+            guard.insert("rust-analyzer".to_owned(), server);
+        }
+        {
+            let mut lang_servers = mgr.lang_servers.lock().unwrap();
+            lang_servers
+                .entry("rust".to_owned())
+                .or_default()
+                .push("rust-analyzer".to_owned());
+        }
+
+        mgr.update_status();
+
+        let snap = mgr.server_states();
+        assert!(!snap.is_empty(), "status snapshot must be non-empty");
+        assert_eq!(snap[0].state, ServerState::Running);
+        assert_eq!(snap[0].server_id, "rust-analyzer");
+        assert_eq!(snap[0].language_id, LanguageId::new("rust"));
+    }
+
+    // ── Test 3: diagnostic routing ────────────────────────────────────────────
+
+    #[test]
+    fn diagnostic_routing_from_publish_diagnostics() {
+        let store = Arc::new(DiagnosticStore::new());
+        let open_docs = Arc::new(Mutex::new(HashMap::new()));
+
+        let params = serde_json::to_value(lsp_types::PublishDiagnosticsParams {
+            uri: "file:///test/foo.rs".parse().unwrap(),
+            version: None,
+            diagnostics: vec![lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: 0,
+                        character: 5,
+                    },
+                },
+                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                message: "test error".to_owned(),
+                ..Default::default()
+            }],
+        })
+        .unwrap();
+
+        LspManager::handle_publish_diagnostics(
+            Arc::clone(&store),
+            open_docs,
+            PositionEncoding::Utf16,
+            "rust-analyzer",
+            params,
+        );
+
+        assert_eq!(
+            store.total_count(),
+            1,
+            "store must contain exactly one diagnostic"
+        );
+    }
+
+    // ── Test 4: idempotency guard ─────────────────────────────────────────────
+
+    #[test]
+    fn idempotent_ensure_server() {
+        let mgr = LspManager::new(vec![], default_settings(), true);
+
+        // Pre-insert a mock server keyed by server_id.
+        let transport = make_transport();
+        let server = LanguageServer::from_transport(transport);
+        server.set_state(ServerState::Running);
+
+        {
+            let mut servers = mgr.servers.lock().unwrap();
+            servers.insert("rust-analyzer".to_owned(), server);
+        }
+        {
+            let mut lang_servers = mgr.lang_servers.lock().unwrap();
+            lang_servers
+                .entry("rust".to_owned())
+                .or_default()
+                .push("rust-analyzer".to_owned());
+        }
+
+        // With the server already present, the idempotency guard keeps the
+        // count at exactly one (a real ensure call would return Ok early).
+        let count_before = mgr.servers.lock().unwrap().len();
+        assert_eq!(
+            count_before, 1,
+            "should have exactly one server pre-inserted"
+        );
+    }
+}

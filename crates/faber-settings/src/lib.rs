@@ -114,6 +114,41 @@ pub enum AutoSave {
     OnWindowChange,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct LspSettings {
+    #[serde(default)]
+    pub servers: std::collections::HashMap<String, LanguageServerConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LanguageServerConfig {
+    /// Absolute path to the language server binary. If None, uses managed install.
+    /// SECURITY: Only read from user-level settings (~/.config/faber/settings.toml),
+    /// never from project-level settings — prevents project-level binary injection.
+    #[serde(default)]
+    pub binary_path: Option<std::path::PathBuf>,
+
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub initialization_options: Option<serde_json::Value>,
+}
+
+impl Default for LanguageServerConfig {
+    fn default() -> Self {
+        Self {
+            binary_path: None,
+            enabled: true,
+            initialization_options: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct Settings {
@@ -133,6 +168,8 @@ pub struct Settings {
     pub file_finder_preview_position: PreviewPosition,
     pub reopen_last_session: bool,
     pub restore_split_layout: bool,
+    #[serde(default)]
+    pub lsp: LspSettings,
 }
 
 impl Default for Settings {
@@ -148,6 +185,7 @@ impl Default for Settings {
             file_finder_preview_position: PreviewPosition::default(),
             reopen_last_session: false,
             restore_split_layout: true,
+            lsp: LspSettings::default(),
         }
     }
 }
@@ -210,6 +248,7 @@ mod tests {
             file_finder_preview_position: PreviewPosition::Bottom,
             reopen_last_session: true,
             restore_split_layout: false,
+            lsp: LspSettings::default(),
         };
         save_to(&s, &path).unwrap();
         assert_eq!(load_from(&path), s);
@@ -292,5 +331,27 @@ mod tests {
     fn language_from_locale_unknown_falls_back() {
         assert_eq!(Language::from_locale("klingon"), Language::En);
         assert_eq!(Language::from_locale(""), Language::En);
+    }
+
+    #[test]
+    fn lsp_defaults_empty_servers() {
+        let s = Settings::default();
+        assert!(s.lsp.servers.is_empty());
+    }
+
+    #[test]
+    fn lsp_deserialize_no_section() {
+        let s: Settings = toml::from_str("font_size = 14.0").unwrap();
+        assert!(s.lsp.servers.is_empty());
+    }
+
+    #[test]
+    fn lsp_deserialize_server_disabled() {
+        let toml = "[lsp.servers.rust-analyzer]\nenabled = false\n";
+        let s: Settings = toml::from_str(toml).unwrap();
+        let cfg = s.lsp.servers.get("rust-analyzer").unwrap();
+        assert!(!cfg.enabled);
+        assert!(cfg.binary_path.is_none());
+        assert!(cfg.initialization_options.is_none());
     }
 }

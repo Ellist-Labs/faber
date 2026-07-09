@@ -96,6 +96,7 @@ close_window = "Close Window"
 close_file = "Close File"
 close_folder = "Close Folder"
 exit = "Exit"
+problems = "Problems"
 
 [tab_menu]
 close = "Close"
@@ -180,6 +181,14 @@ hint_dismiss = "Dismiss"
 [status_bar]
 scanning = "Scanning files…"
 indexing = "Indexing symbols…"
+lsp_idle = "LSP"
+lsp_downloading = "Downloading rust-analyzer…"
+lsp_starting = "Starting rust-analyzer…"
+lsp_ready = "rust-analyzer"
+lsp_errors = "errors"
+lsp_warnings = "warnings"
+lsp_restarting = "Restarting"
+lsp_error = "rust-analyzer error"
 
 [search]
 placeholder = "Search…"
@@ -191,6 +200,11 @@ no_matches = "No matches"
 [tab]
 settings = "Settings"
 search = "Search"
+problems = "Problems"
+
+[dashboard]
+problems_title = "Problems"
+problems_empty = "No problems"
 
 [project_search]
 placeholder = "Search project…"
