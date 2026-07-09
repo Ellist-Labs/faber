@@ -138,6 +138,9 @@ pub struct EditorView {
 
     // Flash highlight — set by navigate_to, cleared after ~800ms
     pub flash_line: Option<usize>,
+
+    // LSP diagnostics — set by Workspace after LspManager is wired up.
+    pub diagnostic_store: Option<std::sync::Arc<faber_lsp::diagnostics::DiagnosticStore>>,
 }
 
 impl EditorView {
@@ -201,6 +204,7 @@ impl EditorView {
             cursor_blink_on: true,
             cursor_blink_epoch: 0,
             flash_line: None,
+            diagnostic_store: None,
         };
         view.rebuild_line_cache();
         if view.is_markdown() {
@@ -535,7 +539,7 @@ impl EditorView {
             (line, (px_x - vb_x) - 8.0 - gutter_px - off_x)
         };
         let line = line.min(self.line_starts.len().saturating_sub(1));
-        let shaped = self.shape_editor_line(line, t, window);
+        let shaped = self.shape_editor_line(line, t, window, &[]);
         let byte_off = shaped.closest_index_for_x(px(rel_x.max(0.0)));
         let line_str: &str = &self.line_cache[line];
         let char_col = faber_editor::highlight::byte_col_to_char_col(line_str, byte_off as u32);
@@ -1440,6 +1444,7 @@ impl EditorView {
         flash_line: Option<usize>,
         bracket_hl: Option<(usize, usize)>,
         window: &mut Window,
+        file_diags: &[faber_lsp::diagnostics::DiagnosticEntry],
     ) -> AnyElement {
         let line_char_start = self.line_starts[line_idx];
         let next_line_start = self
@@ -1527,7 +1532,7 @@ impl EditorView {
             };
 
         // ── Non-wrap: shaped line + overlay quads (highlights under text, caret on top) ──
-        let shaped = self.shape_editor_line(line_idx, t, window);
+        let shaped = self.shape_editor_line(line_idx, t, window, file_diags);
 
         let mut hl_rects: Vec<(usize, usize, gpui::Hsla)> = Vec::new();
         if has_sel && line_sel_start < line_sel_end {
@@ -1657,6 +1662,7 @@ impl EditorView {
         line_str: &str,
         raw_spans: &[HighlightSpan],
         t: &RuntimeTheme,
+        diagnostics: &[faber_lsp::diagnostics::DiagnosticEntry],
     ) -> Vec<TextRun> {
         let line_bytes = line_str.len();
         if line_bytes == 0 {
@@ -1727,6 +1733,55 @@ impl EditorView {
                 strikethrough: None,
             });
         }
+
+        // Apply diagnostic underlines and tag styles over the base runs.
+        // Anchors store UTF-16 character offsets within the line; convert to byte offsets.
+        for diag in diagnostics {
+            let start_char = diag.range.start.offset;
+            let end_char = diag.range.end.offset;
+            // Convert UTF-16 char offsets to byte offsets within line_str.
+            let start_byte = char_col_to_byte_col(line_str, start_char).min(line_bytes);
+            let end_byte = char_col_to_byte_col(line_str, end_char).min(line_bytes);
+            if start_byte >= end_byte {
+                continue;
+            }
+            let underline_color = match diag.severity {
+                faber_lsp::diagnostics::Severity::Error => t.error,
+                faber_lsp::diagnostics::Severity::Warning => t.warning,
+                faber_lsp::diagnostics::Severity::Information => t.info,
+                faber_lsp::diagnostics::Severity::Hint => t.text_muted,
+            };
+            let is_deprecated = diag
+                .tags
+                .contains(&faber_lsp::diagnostics::DiagnosticTag::Deprecated);
+            let is_unnecessary = diag
+                .tags
+                .contains(&faber_lsp::diagnostics::DiagnosticTag::Unnecessary);
+            let mut pos = 0usize;
+            for run in &mut runs {
+                let run_end = pos + run.len;
+                if pos < end_byte && run_end > start_byte {
+                    if run.underline.is_none() {
+                        run.underline = Some(gpui::UnderlineStyle {
+                            thickness: px(1.0),
+                            color: Some(underline_color),
+                            wavy: true,
+                        });
+                    }
+                    if is_deprecated && run.strikethrough.is_none() {
+                        run.strikethrough = Some(gpui::StrikethroughStyle {
+                            thickness: px(1.0),
+                            color: Some(t.text_muted),
+                        });
+                    }
+                    if is_unnecessary {
+                        run.color = t.text_muted;
+                    }
+                }
+                pos = run_end;
+            }
+        }
+
         runs
     }
 
@@ -1739,9 +1794,15 @@ impl EditorView {
         line_idx: usize,
         t: &RuntimeTheme,
         window: &mut Window,
+        file_diags: &[faber_lsp::diagnostics::DiagnosticEntry],
     ) -> gpui::ShapedLine {
         let text = self.line_cache[line_idx].clone();
-        let runs = Self::build_text_runs(&text, self.doc.highlight_spans(line_idx), t);
+        let line_diags: Vec<faber_lsp::diagnostics::DiagnosticEntry> = file_diags
+            .iter()
+            .filter(|e| e.range.lsp_line as usize == line_idx)
+            .cloned()
+            .collect();
+        let runs = Self::build_text_runs(&text, self.doc.highlight_spans(line_idx), t, &line_diags);
         window
             .text_system()
             .shape_line(text, px(t.font_size_code), &runs, None)
@@ -2588,6 +2649,16 @@ impl Render for EditorView {
             let t2 = t.clone();
             let widest = self.widest_line;
             let flash = self.flash_line;
+            // Pre-fetch once per render so shape_editor_line doesn't acquire the store lock per line.
+            let file_diags: Vec<faber_lsp::diagnostics::DiagnosticEntry> = self
+                .diagnostic_store
+                .as_ref()
+                .and_then(|store| {
+                    url::Url::from_file_path(&self.doc.path)
+                        .ok()
+                        .map(|uri| store.get_for_uri(&uri))
+                })
+                .unwrap_or_default();
             const TRAILING_BLANK_LINES: usize = 6;
             let content = uniform_list(
                 "editor-lines",
@@ -2606,6 +2677,7 @@ impl Render for EditorView {
                                     flash,
                                     bracket_hl,
                                     window,
+                                    &file_diags,
                                 )
                             } else {
                                 div().h(px(t2.line_height_code)).into_any_element()

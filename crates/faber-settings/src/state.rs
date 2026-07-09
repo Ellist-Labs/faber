@@ -55,6 +55,10 @@ pub struct AppState {
     pub recent_projects: Vec<String>,
     pub recent_files: Vec<String>,
     pub last_session: Option<LastSession>,
+    /// Projects the user has explicitly trusted to run language servers.
+    /// Keys are canonical absolute path strings.
+    #[serde(default)]
+    pub trusted_projects: std::collections::HashSet<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -104,6 +108,16 @@ impl AppState {
         if let Some(ref mut s) = self.last_session {
             s.layout = layout;
         }
+    }
+
+    pub fn trust_project(&mut self, path: impl AsRef<std::path::Path>) {
+        self.trusted_projects
+            .insert(path.as_ref().to_string_lossy().into_owned());
+    }
+
+    pub fn is_trusted(&self, path: impl AsRef<std::path::Path>) -> bool {
+        self.trusted_projects
+            .contains(path.as_ref().to_string_lossy().as_ref())
     }
 }
 
@@ -221,5 +235,17 @@ mod tests {
         std::fs::write(&path, "not toml {{{").unwrap();
         assert_eq!(load_from(&path), AppState::default());
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn trust_project_roundtrip() {
+        let mut s = AppState::default();
+        assert!(!s.is_trusted("/home/user/myproject"));
+        s.trust_project("/home/user/myproject");
+        assert!(s.is_trusted("/home/user/myproject"));
+        assert!(!s.is_trusted("/home/user/other"));
+        // idempotent
+        s.trust_project("/home/user/myproject");
+        assert_eq!(s.trusted_projects.len(), 1);
     }
 }

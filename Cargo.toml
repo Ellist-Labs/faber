@@ -6,6 +6,7 @@ members = [
     "crates/faber-index",
     "crates/faber-theme",
     "crates/faber-settings",
+    "crates/faber-lsp",
     "crates/faber-app",
 ]
 resolver = "2"

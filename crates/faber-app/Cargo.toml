@@ -13,6 +13,7 @@ path = "src/main.rs"
 faber-core = { path = "../faber-core" }
 faber-editor = { path = "../faber-editor" }
 faber-index = { path = "../faber-index" }
+faber-lsp = { path = "../faber-lsp" }
 log = "0.4"
 ropey = "1"
 faber-settings = { path = "../faber-settings" }
@@ -21,6 +22,7 @@ gpui = "0.2"
 rust-embed = "8"
 rust-i18n = "3"
 anyhow = "1"
+url = "2"
 
 [dev-dependencies]
 toml = "0.8"
