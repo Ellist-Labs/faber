@@ -420,10 +420,16 @@ mod tests {
 
         let q = ProjectSearchQuery::new("hello");
         let mut results = Vec::new();
-        run(&q, dir.path(), Some(std::slice::from_ref(&p1)), &no_bufs(), |r| {
-            results.push(r);
-            true
-        });
+        run(
+            &q,
+            dir.path(),
+            Some(std::slice::from_ref(&p1)),
+            &no_bufs(),
+            |r| {
+                results.push(r);
+                true
+            },
+        );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, p1);
     }
@@ -437,10 +443,16 @@ mod tests {
 
         let q = ProjectSearchQuery::new("hello");
         let mut results = Vec::new();
-        run(&q, dir.path(), Some(std::slice::from_ref(&p1)), &bufs, |r| {
-            results.push(r);
-            true
-        });
+        run(
+            &q,
+            dir.path(),
+            Some(std::slice::from_ref(&p1)),
+            &bufs,
+            |r| {
+                results.push(r);
+                true
+            },
+        );
         assert_eq!(
             results.len(),
             1,
