@@ -2,8 +2,9 @@
 
 ## Project
 
-Faber is a lean, GPU-accelerated code editor (Rust + GPUI). Its core value proposition is
-**lower RAM and CPU than Electron editors while being extensible like VSCode**.
+Faber is an opinionated code editor — lean by design, fast by construction, open to the community.
+Built in Rust with GPUI, it was started as a reaction against bloated, Electron-based editors.
+**Its core invariant: lower RAM and CPU than Electron editors while remaining extensible.**
 Every code decision must protect that premise.
 
 Stack: GPUI (GPU UI), Ropey (rope buffer), Tree-sitter (incremental parsing),

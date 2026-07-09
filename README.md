@@ -1,6 +1,6 @@
 # Faber
 
-A lean, GPU-accelerated code editor built with Rust and GPUI. Lower RAM and CPU than Electron editors while remaining extensible.
+Rust, GPU-rendered, open source, and deliberately small — an editor built like a tool, not a suite.
 
 **Stack:** GPUI (GPU UI) · Ropey (rope buffer) · Tree-sitter (incremental parsing) · LSP · WASM/wasmtime (extensions)
 
@@ -43,7 +43,7 @@ cargo run -- path/to/project/
 
 # Release build
 cargo build --release
-./target/release/felix
+./target/release/faber
 ```
 
 ---
