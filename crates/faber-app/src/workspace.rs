@@ -27,9 +27,10 @@ use crate::ui::scrollbar::update_drag;
 use crate::ui::{IconName, ScrollbarDrag, h_flex, v_flex};
 use crate::welcome_view::render_welcome;
 use crate::{
-    CloseFile, CloseFolder, CloseTab, NewFile, NextTab, OpenFile, OpenFileFinder,
-    OpenFileFinderPreview, OpenFolder, OpenProjectSearch, OpenSettings, PrevTab, ProjectRoot, Quit,
-    SaveFile, ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
+    AppStateStore, CloseFile, CloseFolder, CloseTab, CloseWindow, NewFile, NextTab, OpenFile,
+    OpenFileFinder, OpenFileFinderPreview, OpenFolder, OpenProjectSearch, OpenSettings, PrevTab,
+    ProjectRoot, Quit, SaveAll, SaveAs, SaveFile, ToggleBottomPanel, ToggleRightPanel,
+    ToggleSidebar,
 };
 
 /// Rescan the file index when the cached snapshot is older than this.
@@ -148,7 +149,12 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(paths: &[String], window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        paths: &[String],
+        session: Option<&faber_settings::state::LastSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut ws = Self {
             tabs: Vec::new(),
             active: None,
@@ -169,9 +175,28 @@ impl Workspace {
             file_index: FileIndexState::default(),
             file_finder: None,
         };
-        for path in paths {
-            let editor = cx.new(|cx| EditorView::new(path, cx));
-            ws.push_editor_tab(editor, cx);
+        if !paths.is_empty() {
+            for path in paths {
+                let editor = cx.new(|cx| EditorView::new(path, cx));
+                ws.push_editor_tab(editor, cx);
+            }
+        } else if let Some(sess) = session {
+            if let Some(root) = sess.root.as_deref() {
+                let root_path = PathBuf::from(root);
+                if root_path.exists() {
+                    ws.set_root_folder(root_path, cx);
+                }
+            }
+            for file in &sess.files {
+                let file_path = PathBuf::from(file);
+                if file_path.exists() {
+                    let editor = cx.new(|cx| EditorView::new(file, cx));
+                    ws.push_editor_tab(editor, cx);
+                }
+            }
+            if !ws.tabs.is_empty() {
+                ws.activate_tab(0, window, cx);
+            }
         }
         cx.observe_window_activation(window, |ws, window, cx| {
             let auto_save = cx.global::<SettingsStore>().0.auto_save;
@@ -276,6 +301,10 @@ impl Workspace {
         let editor = cx.new(|cx| EditorView::new(&path_str, cx));
         self.push_editor_tab(editor, cx);
         self.activate_tab(self.tabs.len() - 1, window, cx);
+        if !path.as_os_str().is_empty() {
+            let abs = path_str.clone();
+            self.record_state_change(cx, move |s| s.record_recent_file(&abs));
+        }
     }
 
     pub fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -290,6 +319,7 @@ impl Workspace {
             Self::save_doc_now(&editor, cx);
         }
         self.active = Some(ix);
+        self.right_open = self.active_is_markdown(cx);
         self.focus_active(window, cx);
         cx.notify();
         // Reveal the newly active file in the explorer tree.
@@ -379,7 +409,7 @@ impl Workspace {
 
     // ── folder / explorer ──────────────────────────────────────────────────────
 
-    fn set_root_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn set_root_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         match FileTree::new(folder.clone()) {
             Ok(tree) => {
                 self.visible_rows = tree.visible();
@@ -387,13 +417,47 @@ impl Workspace {
                 self.root_folder = Some(folder.clone());
                 self.sidebar.open = true;
                 self.sidebar.active = SidebarItemKind::Explorer;
-                cx.set_global(ProjectRoot(Some(folder)));
+                cx.set_global(ProjectRoot(Some(folder.clone())));
                 self.file_index = FileIndexState::default();
                 self.kick_index_scan(false, cx);
+                let abs = folder.to_string_lossy().to_string();
+                self.record_state_change(cx, move |s| s.record_recent_project(&abs));
             }
             Err(err) => eprintln!("faber: can't open folder {}: {err}", folder.display()),
         }
         cx.notify();
+    }
+
+    fn record_state_change(
+        &self,
+        cx: &mut Context<Self>,
+        update: impl FnOnce(&mut faber_settings::state::AppState),
+    ) {
+        let mut state = cx.global::<AppStateStore>().0.clone();
+        update(&mut state);
+        let files: Vec<String> = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.editor())
+            .filter_map(|e| {
+                let p = e.read(cx).doc.path.to_string_lossy().to_string();
+                if p.is_empty() { None } else { Some(p) }
+            })
+            .collect();
+        let root = self
+            .root_folder
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        state.set_last_session(root, files);
+        let state_to_save = state.clone();
+        cx.set_global(AppStateStore(state));
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(err) = faber_settings::state::save(&state_to_save) {
+                    eprintln!("faber: can't save state: {err}");
+                }
+            })
+            .detach();
     }
 
     // ── file index / finder ────────────────────────────────────────────────────
@@ -544,41 +608,62 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Task<bool> {
         if editor.read(cx).doc.is_untitled() {
-            let dir = self
-                .root_folder
-                .clone()
-                .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
-                .unwrap_or_else(|| PathBuf::from("."));
-            let rx = cx.prompt_for_new_path(&dir, Some("untitled.txt"));
-            let editor = editor.clone();
-            cx.spawn_in(window, async move |_, cx| {
-                let Ok(Ok(Some(path))) = rx.await else {
-                    return false;
-                };
-                editor
-                    .update(cx, |ed, cx| {
-                        ed.doc.assign_path(path, &ed.registry);
-                        let ok = save(&ed.doc.rope, &ed.doc.path).is_ok();
-                        if ok {
-                            ed.doc.mark_saved();
-                        }
-                        ed.rebuild_line_cache();
-                        cx.notify();
-                        ok
-                    })
-                    .unwrap_or(false)
-            })
-        } else {
-            let ok = editor.update(cx, |ed, cx| {
-                let ok = save(&ed.doc.rope, &ed.doc.path).is_ok();
-                if ok {
-                    ed.doc.mark_saved();
-                }
-                cx.notify();
-                ok
-            });
-            Task::ready(ok)
+            return self.save_editor_as(editor, window, cx);
         }
+        let ok = editor.update(cx, |ed, cx| {
+            let ok = save(&ed.doc.rope, &ed.doc.path).is_ok();
+            if ok {
+                ed.doc.mark_saved();
+            }
+            cx.notify();
+            ok
+        });
+        Task::ready(ok)
+    }
+
+    /// Prompt the user for a path and save the document there.
+    fn save_editor_as(
+        &self,
+        editor: &Entity<EditorView>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        let dir = editor
+            .read(cx)
+            .doc
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .or_else(|| self.root_folder.clone())
+            .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let hint = editor
+            .read(cx)
+            .doc
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "untitled.txt".to_string());
+        let rx = cx.prompt_for_new_path(&dir, Some(hint.as_str()));
+        let editor = editor.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(path))) = rx.await else {
+                return false;
+            };
+            editor
+                .update(cx, |ed, cx| {
+                    ed.doc.assign_path(path, &ed.registry);
+                    let ok = save(&ed.doc.rope, &ed.doc.path).is_ok();
+                    if ok {
+                        ed.doc.mark_saved();
+                    }
+                    ed.rebuild_line_cache();
+                    cx.notify();
+                    ok
+                })
+                .unwrap_or(false)
+        })
     }
 
     /// Close a tab, prompting to save first if the document is dirty.
@@ -688,6 +773,25 @@ impl Workspace {
         {
             self.save_editor(&editor, window, cx).detach();
         }
+    }
+
+    fn on_save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self
+            .active
+            .and_then(|ix| self.tabs.get(ix))
+            .and_then(|tab| tab.editor())
+            .cloned()
+        {
+            self.save_editor_as(&editor, window, cx).detach();
+        }
+    }
+
+    fn on_save_all(&mut self, _: &SaveAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.save_all_dirty(cx);
+    }
+
+    fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_quit(&Quit, window, cx);
     }
 
     fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
@@ -1443,38 +1547,6 @@ impl Workspace {
             .child(div().w_2())
     }
 
-    fn render_right_panel(&self, t: &RuntimeTheme) -> impl IntoElement {
-        v_flex()
-            .w(px(240.))
-            .flex_shrink_0()
-            .h_full()
-            .bg(t.bg_elevated)
-            .border_l_1()
-            .border_color(t.separator)
-            .child(
-                div()
-                    .px_3()
-                    .h(px(30.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .text_size(px(t.font_size_caption))
-                    .text_color(t.text_muted)
-                    .font_family(t.ui_family.clone())
-                    .child(rust_i18n::t!("panel.panel").to_string()),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(t.font_size_caption))
-                    .text_color(t.text_muted)
-                    .font_family(t.ui_family.clone())
-                    .child(rust_i18n::t!("panel.coming_soon").to_string()),
-            )
-    }
-
     fn render_bottom_panel(&self, t: &RuntimeTheme) -> impl IntoElement {
         v_flex()
             .w_full()
@@ -1539,6 +1611,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_open_file))
             .on_action(cx.listener(Self::on_open_folder))
             .on_action(cx.listener(Self::on_save_file))
+            .on_action(cx.listener(Self::on_save_as))
+            .on_action(cx.listener(Self::on_save_all))
+            .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_close_file))
             .on_action(cx.listener(Self::on_close_folder))
             .on_action(cx.listener(Self::on_toggle_sidebar))
@@ -1583,11 +1658,23 @@ impl Render for Workspace {
 
         // Empty state: show welcome screen only when no folder and no tabs are open.
         if content.is_none() && self.root_folder.is_none() {
+            let (recent_projects, recent_files) = {
+                let store = cx.global::<AppStateStore>();
+                (
+                    store.0.recent_projects.clone(),
+                    store.0.recent_files.clone(),
+                )
+            };
             return base
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(render_welcome(&t))
+                .child(render_welcome(
+                    &t,
+                    &recent_projects,
+                    &recent_files,
+                    &cx.entity(),
+                ))
                 .when_some(self.file_finder.clone(), |el, finder| {
                     el.relative().child(finder)
                 })
@@ -1615,7 +1702,9 @@ impl Render for Workspace {
                     .child(self.render_sidebar_resize_handle(&t, cx))
             })
             .child(main)
-            .when(self.right_open, |el| el.child(self.render_right_panel(&t)));
+            .when(self.right_open, |el| {
+                el.child(self.render_right_panel(&t, cx))
+            });
 
         let body = v_flex()
             .flex_1()

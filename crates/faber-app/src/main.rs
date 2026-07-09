@@ -35,6 +35,9 @@ impl Global for ProjectRoot {}
 pub struct Registry(pub Arc<LanguageRegistry>);
 impl Global for Registry {}
 
+pub struct AppStateStore(pub faber_settings::state::AppState);
+impl Global for AppStateStore {}
+
 use workspace::Workspace;
 
 // ── actions ────────────────────────────────────────────────────────────────────
@@ -119,8 +122,11 @@ actions!(
         OpenFile,
         OpenFolder,
         SaveFile,
+        SaveAs,
+        SaveAll,
         CloseFile,
         CloseFolder,
+        CloseWindow,
         ToggleSidebar,
         ToggleBottomPanel,
         ToggleRightPanel,
@@ -171,12 +177,21 @@ fn main() {
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
-            cx.set_global(settings_view::SettingsStore(faber_settings::load()));
+            let settings = faber_settings::load();
+            let state = faber_settings::state::load();
+            let session: Option<faber_settings::state::LastSession> =
+                if settings.reopen_last_session && paths.is_empty() {
+                    state.last_session.clone()
+                } else {
+                    None
+                };
+            cx.set_global(settings_view::SettingsStore(settings));
+            cx.set_global(AppStateStore(state));
             cx.set_global(ProjectRoot(None));
             cx.set_global(Registry(Arc::new(LanguageRegistry::with_defaults())));
+            register_keybindings(cx);
             i18n::apply(cx);
             theme::apply_settings(cx);
-            register_keybindings(cx);
 
             let bounds = Bounds::centered(None, size(px(1024.), px(768.)), cx);
 
@@ -191,7 +206,7 @@ fn main() {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         ..Default::default()
                     },
-                    |window, cx| cx.new(|cx| Workspace::new(&paths, window, cx)),
+                    |window, cx| cx.new(|cx| Workspace::new(&paths, session.as_ref(), window, cx)),
                 )
                 .unwrap();
 
@@ -256,6 +271,9 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-o", OpenFile, Some("Workspace")),
         KeyBinding::new("cmd-shift-o", OpenFolder, Some("Workspace")),
         KeyBinding::new("cmd-s", SaveFile, Some("Workspace")),
+        KeyBinding::new("cmd-shift-s", SaveAs, Some("Workspace")),
+        KeyBinding::new("cmd-alt-s", SaveAll, Some("Workspace")),
+        KeyBinding::new("cmd-shift-w", CloseWindow, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("cmd-q", Quit, Some("Workspace")),
         // Sidebar / panels
@@ -356,11 +374,10 @@ pub(crate) fn register_menus(cx: &mut App) {
                 MenuItem::action(t!("menu.open_folder").to_string(), OpenFolder),
                 MenuItem::separator(),
                 MenuItem::action(t!("menu.save").to_string(), SaveFile),
+                MenuItem::action(t!("menu.save_as").to_string(), SaveAs),
+                MenuItem::action(t!("menu.save_all").to_string(), SaveAll),
                 MenuItem::separator(),
-                MenuItem::action(t!("menu.close_file").to_string(), CloseFile),
-                MenuItem::action(t!("menu.close_folder").to_string(), CloseFolder),
-                MenuItem::separator(),
-                MenuItem::action(t!("menu.exit").to_string(), Quit),
+                MenuItem::action(t!("menu.close_window").to_string(), CloseWindow),
             ],
         },
     ]);

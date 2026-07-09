@@ -62,6 +62,7 @@ mod tests {
             source_line: line,
             end_line: line,
             byte_range: Range { start: 0, end: 0 },
+            block_ix: None,
         }
     }
 

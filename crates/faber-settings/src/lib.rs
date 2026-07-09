@@ -131,6 +131,7 @@ pub struct Settings {
     pub language: Language,
     /// File-finder preview pane position.
     pub file_finder_preview_position: PreviewPosition,
+    pub reopen_last_session: bool,
 }
 
 impl Default for Settings {
@@ -144,6 +145,7 @@ impl Default for Settings {
             indent_guides: true,
             language: Language::default(),
             file_finder_preview_position: PreviewPosition::default(),
+            reopen_last_session: false,
         }
     }
 }
@@ -204,6 +206,7 @@ mod tests {
             indent_guides: true,
             language: Language::En,
             file_finder_preview_position: PreviewPosition::Bottom,
+            reopen_last_session: true,
         };
         save_to(&s, &path).unwrap();
         assert_eq!(load_from(&path), s);

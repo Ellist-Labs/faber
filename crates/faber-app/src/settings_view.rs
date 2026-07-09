@@ -61,21 +61,32 @@ fn sections() -> Vec<SettingsSectionDef> {
     vec![
         SettingsSectionDef {
             title: t!("settings.section.general").to_string(),
-            entries: vec![SettingEntry {
-                title: t!("settings.language.title").to_string(),
-                description: t!("settings.language.desc").to_string(),
-                enabled: |_| true,
-                control: SettingControl::Select {
-                    options: lang_options,
-                    get: |s| s.language.key(),
-                    set: |s, v| {
-                        s.language = match v {
-                            "en" => Language::En,
-                            _ => Language::System,
-                        }
+            entries: vec![
+                SettingEntry {
+                    title: t!("settings.language.title").to_string(),
+                    description: t!("settings.language.desc").to_string(),
+                    enabled: |_| true,
+                    control: SettingControl::Select {
+                        options: lang_options,
+                        get: |s| s.language.key(),
+                        set: |s, v| {
+                            s.language = match v {
+                                "en" => Language::En,
+                                _ => Language::System,
+                            }
+                        },
                     },
                 },
-            }],
+                SettingEntry {
+                    title: t!("settings.reopen_last_session.title").to_string(),
+                    description: t!("settings.reopen_last_session.desc").to_string(),
+                    enabled: |_| true,
+                    control: SettingControl::Toggle {
+                        get: |s| s.reopen_last_session,
+                        set: |s, v| s.reopen_last_session = v,
+                    },
+                },
+            ],
         },
         SettingsSectionDef {
             title: t!("settings.section.editor").to_string(),
