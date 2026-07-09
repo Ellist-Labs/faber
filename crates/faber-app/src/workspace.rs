@@ -15,9 +15,9 @@ use faber_editor::{
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Div, DragMoveEvent, Entity, FocusHandle, Focusable,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, PromptLevel,
-    Render, ScrollStrategy, SharedString, Stateful, Task, UniformListScrollHandle, Window,
-    anchored, deferred, div, img, prelude::*, px, relative, svg,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Render,
+    ScrollStrategy, SharedString, Stateful, Task, UniformListScrollHandle, Window, anchored,
+    deferred, div, img, prelude::*, px, relative, svg,
 };
 
 use crate::editor_view::{EditorEvent, EditorView};
@@ -28,13 +28,15 @@ use crate::settings_view::{SettingsStore, SettingsView};
 use crate::sidebar::{SidebarItem, SidebarItemKind, SidebarState, default_items};
 use crate::theme::{ActiveTheme, RuntimeTheme};
 use crate::ui::scrollbar::update_drag;
-use crate::ui::{IconName, ScrollbarDrag, h_flex, v_flex};
+use crate::ui::{
+    IconName, ScrollbarDrag, h_flex, modal_backdrop, modal_container, popover_container, v_flex,
+};
 use crate::welcome_view::render_welcome;
 use crate::{
-    AppStateStore, CloseFile, CloseFolder, CloseTab, CloseWindow, NewFile, NextTab, OpenFile,
-    OpenFileFinder, OpenFileFinderPreview, OpenFolder, OpenProjectSearch, OpenSettings, PrevTab,
-    ProjectRoot, Quit, ReindexProject, SaveAll, SaveAs, SaveFile, SplitDown, SplitLeft, SplitRight,
-    SplitUp, ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
+    AppStateStore, CfConfirm, CfDismiss, CloseFile, CloseFolder, CloseTab, CloseWindow, NewFile,
+    NextTab, OpenFile, OpenFileFinder, OpenFileFinderPreview, OpenFolder, OpenProjectSearch,
+    OpenSettings, PrevTab, ProjectRoot, Quit, ReindexProject, SaveAll, SaveAs, SaveFile, SplitDown,
+    SplitLeft, SplitRight, SplitUp, ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
 };
 
 // ── Index status ──────────────────────────────────────────────────────────────
@@ -49,6 +51,33 @@ impl IndexStatus {
             current_progress: None,
         }
     }
+}
+
+// ── Confirm modal ─────────────────────────────────────────────────────────────
+
+type ConfirmCallback =
+    Box<dyn FnOnce(&mut Workspace, usize, &mut Window, &mut Context<Workspace>) + 'static>;
+
+#[derive(Clone)]
+struct ConfirmButton {
+    label: SharedString,
+}
+
+struct ConfirmSpec {
+    message: SharedString,
+    buttons: Vec<ConfirmButton>,
+    default_ix: usize,
+    destructive_ix: Option<usize>,
+    on_answer: ConfirmCallback,
+}
+
+struct ConfirmState {
+    message: SharedString,
+    buttons: Vec<ConfirmButton>,
+    default_ix: usize,
+    destructive_ix: Option<usize>,
+    focus_handle: FocusHandle,
+    on_answer: ConfirmCallback,
 }
 
 // ── Pane resize & drag types ──────────────────────────────────────────────────
@@ -157,6 +186,7 @@ pub struct Workspace {
     status_bar: Entity<crate::status_bar::StatusBar>,
     file_finder: Option<Entity<FileFinderView>>,
     symbol_finder: Option<Entity<crate::symbol_finder::SymbolFinderView>>,
+    confirm: Option<ConfirmState>,
     pane_resize: Option<PaneResize>,
     drop_hover: Option<(PaneId, DropZone)>,
 }
@@ -206,6 +236,7 @@ impl Workspace {
             status_bar,
             file_finder: None,
             symbol_finder: None,
+            confirm: None,
             pane_resize: None,
             drop_hover: None,
         };
@@ -671,6 +702,141 @@ impl Workspace {
         }
     }
 
+    // ── Confirm modal ──────────────────────────────────────────────────────────
+
+    fn show_confirm(&mut self, spec: ConfirmSpec, window: &mut Window, cx: &mut Context<Self>) {
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle);
+        self.confirm = Some(ConfirmState {
+            message: spec.message,
+            buttons: spec.buttons,
+            default_ix: spec.default_ix,
+            destructive_ix: spec.destructive_ix,
+            focus_handle,
+            on_answer: spec.on_answer,
+        });
+        cx.notify();
+    }
+
+    fn on_confirm_answer(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(state) = self.confirm.take() {
+            (state.on_answer)(self, ix, window, cx);
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn on_cf_confirm(&mut self, _: &CfConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        let default_ix = self.confirm.as_ref().map(|s| s.default_ix).unwrap_or(0);
+        self.on_confirm_answer(default_ix, window, cx);
+    }
+
+    fn on_cf_dismiss(&mut self, _: &CfDismiss, window: &mut Window, cx: &mut Context<Self>) {
+        let cancel_ix = self
+            .confirm
+            .as_ref()
+            .map(|s| s.buttons.len().saturating_sub(1))
+            .unwrap_or(0);
+        self.on_confirm_answer(cancel_ix, window, cx);
+    }
+
+    fn render_confirm_modal(
+        &mut self,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let state = self.confirm.as_ref()?;
+
+        let focus_handle = state.focus_handle.clone();
+        let message = state.message.clone();
+        let default_ix = state.default_ix;
+        let destructive_ix = state.destructive_ix;
+        let buttons: Vec<ConfirmButton> = state.buttons.clone();
+
+        let button_els: Vec<AnyElement> = buttons
+            .into_iter()
+            .enumerate()
+            .map(|(ix, btn)| {
+                let is_default = ix == default_ix;
+                let is_destructive = destructive_ix == Some(ix);
+                let t = t.clone();
+                div()
+                    .id(("cf-btn", ix))
+                    .px(px(t.sp5))
+                    .py(px(t.sp2))
+                    .rounded(px(t.radius_sm))
+                    .cursor_pointer()
+                    .font_family(t.ui_family.clone())
+                    .text_size(px(t.font_size_caption))
+                    .border_1()
+                    .when(is_default, |el| {
+                        el.border_color(t.border_focus)
+                            .bg(t.accent)
+                            .text_color(t.text_on_accent)
+                    })
+                    .when(!is_default, |el| {
+                        el.border_color(t.border)
+                            .text_color(if is_destructive { t.error } else { t.text })
+                            .hover(move |s| s.bg(t.line_highlight))
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |ws, _, window, cx| {
+                            ws.on_confirm_answer(ix, window, cx);
+                        }),
+                    )
+                    .child(btn.label)
+                    .into_any()
+            })
+            .collect();
+
+        let modal = modal_container("cf-modal", t)
+            .w(px(440.))
+            .key_context("ConfirmModal")
+            .track_focus(&focus_handle)
+            .on_action(cx.listener(Self::on_cf_confirm))
+            .on_action(cx.listener(Self::on_cf_dismiss))
+            .child(
+                div()
+                    .px(px(t.sp6))
+                    .py(px(t.sp5))
+                    .font_family(t.ui_family.clone())
+                    .text_size(px(t.font_size_body))
+                    .text_color(t.text)
+                    .child(message),
+            )
+            .child(
+                h_flex()
+                    .px(px(t.sp4))
+                    .py(px(t.sp4))
+                    .gap(px(t.sp3))
+                    .justify_end()
+                    .border_t_1()
+                    .border_color(t.separator)
+                    .children(button_els),
+            );
+
+        Some(
+            deferred(
+                modal_backdrop("cf-backdrop", t)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ws, _, window, cx| {
+                            let cancel_ix = ws
+                                .confirm
+                                .as_ref()
+                                .map(|s| s.buttons.len().saturating_sub(1))
+                                .unwrap_or(0);
+                            ws.on_confirm_answer(cancel_ix, window, cx);
+                        }),
+                    )
+                    .child(modal),
+            )
+            .with_priority(3)
+            .into_any(),
+        )
+    }
+
     fn on_open_symbol_finder(
         &mut self,
         _: &crate::OpenSymbolFinder,
@@ -798,39 +964,46 @@ impl Workspace {
             return;
         }
         let name = Self::doc_display_name(&editor.read(cx).doc);
-        let rx = window.prompt(
-            PromptLevel::Warning,
-            &rust_i18n::t!("dialog.save_changes", name = name),
-            None,
-            &[
-                rust_i18n::t!("dialog.save").as_ref(),
-                rust_i18n::t!("dialog.dont_save").as_ref(),
-                rust_i18n::t!("dialog.cancel").as_ref(),
-            ],
+        self.show_confirm(
+            ConfirmSpec {
+                message: rust_i18n::t!("dialog.save_changes", name = name)
+                    .to_string()
+                    .into(),
+                buttons: vec![
+                    ConfirmButton {
+                        label: rust_i18n::t!("dialog.save").to_string().into(),
+                    },
+                    ConfirmButton {
+                        label: rust_i18n::t!("dialog.dont_save").to_string().into(),
+                    },
+                    ConfirmButton {
+                        label: rust_i18n::t!("dialog.cancel").to_string().into(),
+                    },
+                ],
+                default_ix: 0,
+                destructive_ix: Some(1),
+                on_answer: Box::new(move |ws, answer, window, cx| match answer {
+                    0 => {
+                        let ws_entity = cx.entity();
+                        let task = ws.save_editor(&editor, window, cx);
+                        cx.spawn_in(window, async move |_, cx| {
+                            if task.await {
+                                ws_entity
+                                    .update_in(cx, |ws, window, cx| {
+                                        ws.close_tab_by_id(tab_id, window, cx)
+                                    })
+                                    .ok();
+                            }
+                        })
+                        .detach();
+                    }
+                    1 => ws.close_tab_by_id(tab_id, window, cx),
+                    _ => {}
+                }),
+            },
+            window,
             cx,
         );
-        cx.spawn_in(window, async move |ws, cx| {
-            let Ok(answer) = rx.await else { return };
-            match answer {
-                0 => {
-                    let Ok(saved) =
-                        ws.update_in(cx, |ws, window, cx| ws.save_editor(&editor, window, cx))
-                    else {
-                        return;
-                    };
-                    if saved.await {
-                        ws.update_in(cx, |ws, window, cx| ws.close_tab_by_id(tab_id, window, cx))
-                            .ok();
-                    }
-                }
-                1 => {
-                    ws.update_in(cx, |ws, window, cx| ws.close_tab_by_id(tab_id, window, cx))
-                        .ok();
-                }
-                _ => {}
-            }
-        })
-        .detach();
     }
 
     // ── action handlers ────────────────────────────────────────────────────────
@@ -1129,44 +1302,55 @@ impl Workspace {
             return;
         }
         let count = dirty.len();
-        let rx = window.prompt(
-            PromptLevel::Warning,
-            &if count == 1 {
-                rust_i18n::t!("dialog.unsaved_count_one", count = count)
-            } else {
-                rust_i18n::t!("dialog.unsaved_count_other", count = count)
+        let msg = if count == 1 {
+            rust_i18n::t!("dialog.unsaved_count_one", count = count)
+        } else {
+            rust_i18n::t!("dialog.unsaved_count_other", count = count)
+        };
+        self.show_confirm(
+            ConfirmSpec {
+                message: msg.to_string().into(),
+                buttons: vec![
+                    ConfirmButton {
+                        label: rust_i18n::t!("dialog.save_all_quit").to_string().into(),
+                    },
+                    ConfirmButton {
+                        label: rust_i18n::t!("dialog.quit_without_saving")
+                            .to_string()
+                            .into(),
+                    },
+                    ConfirmButton {
+                        label: rust_i18n::t!("dialog.cancel").to_string().into(),
+                    },
+                ],
+                default_ix: 0,
+                destructive_ix: Some(1),
+                on_answer: Box::new(move |ws, answer, window, cx| {
+                    match answer {
+                        0 => {
+                            let ws_entity = cx.entity();
+                            let tasks: Vec<_> = dirty
+                                .iter()
+                                .map(|editor| ws.save_editor(editor, window, cx))
+                                .collect();
+                            cx.spawn_in(window, async move |_, cx| {
+                                for task in tasks {
+                                    if !task.await {
+                                        return; // cancelled a Save As dialog — abort quit
+                                    }
+                                }
+                                ws_entity.update_in(cx, |_, _, cx| cx.quit()).ok();
+                            })
+                            .detach();
+                        }
+                        1 => cx.quit(),
+                        _ => {}
+                    }
+                }),
             },
-            None,
-            &[
-                rust_i18n::t!("dialog.save_all_quit").as_ref(),
-                rust_i18n::t!("dialog.quit_without_saving").as_ref(),
-                rust_i18n::t!("dialog.cancel").as_ref(),
-            ],
+            window,
             cx,
         );
-        cx.spawn_in(window, async move |ws, cx| {
-            let Ok(answer) = rx.await else { return };
-            match answer {
-                0 => {
-                    for editor in dirty {
-                        let Ok(saved) =
-                            ws.update_in(cx, |ws, window, cx| ws.save_editor(&editor, window, cx))
-                        else {
-                            return;
-                        };
-                        if !saved.await {
-                            return; // cancelled a Save As dialog — abort quit
-                        }
-                    }
-                    ws.update_in(cx, |_, _, cx| cx.quit()).ok();
-                }
-                1 => {
-                    ws.update_in(cx, |_, _, cx| cx.quit()).ok();
-                }
-                _ => {}
-            }
-        })
-        .detach();
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -1498,17 +1682,13 @@ impl Workspace {
         let copy_items: Vec<ContextMenuItem> = vec![copy_path, copy_rel];
         let reveal_items: Vec<ContextMenuItem> = vec![reveal_finder, reveal_explorer];
 
-        let menu_div = v_flex()
-            .id("tab-ctx-menu")
-            .occlude()
+        let menu_div = popover_container("tab-ctx-menu", t)
             .on_mouse_down_out(cx.listener(|ws, _, _, cx| {
                 ws.close_tab_menu(cx);
                 cx.notify();
             }))
-            .bg(t.bg_overlay)
-            .border_1()
-            .border_color(t.border)
-            .rounded(px(t.radius_md))
+            .flex()
+            .flex_col()
             .py(px(t.sp2))
             .min_w(px(200.))
             .children(items)
@@ -2310,6 +2490,10 @@ impl Render for Workspace {
                 .when_some(self.symbol_finder.clone(), |el, finder| {
                     el.relative().child(finder)
                 })
+                .map(|el| match self.render_confirm_modal(&t, cx) {
+                    Some(modal) => el.relative().child(modal),
+                    None => el,
+                })
                 .into_any();
         }
 
@@ -2349,7 +2533,11 @@ impl Render for Workspace {
                 None => el,
             })
             .when_some(self.file_finder.clone(), |el, finder| el.child(finder))
-            .when_some(self.symbol_finder.clone(), |el, finder| el.child(finder));
+            .when_some(self.symbol_finder.clone(), |el, finder| el.child(finder))
+            .map(|el| match self.render_confirm_modal(&t, cx) {
+                Some(modal) => el.child(modal),
+                None => el,
+            });
 
         root.into_any()
     }

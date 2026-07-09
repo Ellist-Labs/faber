@@ -420,7 +420,7 @@ mod tests {
 
         let q = ProjectSearchQuery::new("hello");
         let mut results = Vec::new();
-        run(&q, dir.path(), Some(&[p1.clone()]), &no_bufs(), |r| {
+        run(&q, dir.path(), Some(std::slice::from_ref(&p1)), &no_bufs(), |r| {
             results.push(r);
             true
         });
@@ -437,7 +437,7 @@ mod tests {
 
         let q = ProjectSearchQuery::new("hello");
         let mut results = Vec::new();
-        run(&q, dir.path(), Some(&[p1.clone()]), &bufs, |r| {
+        run(&q, dir.path(), Some(std::slice::from_ref(&p1)), &bufs, |r| {
             results.push(r);
             true
         });

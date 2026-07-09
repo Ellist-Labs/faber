@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, ScrollHandle,
-    SharedString, Task, WeakEntity, Window, div, prelude::*, px,
+    AnyElement, App, Bounds, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent,
+    MouseButton, Render, ScrollHandle, SharedString, Task, TextRun, WeakEntity, Window, canvas,
+    deferred, div, fill, font, point, prelude::*, px, size, svg,
 };
 use rust_i18n::t;
 
@@ -15,7 +16,9 @@ use crate::input_helpers::{
     delete_char_before, delete_char_range, insert_at, split_at_char, word_start_before,
 };
 use crate::theme::RuntimeTheme;
-use crate::ui::{h_flex, v_flex};
+use crate::ui::{
+    IconName, h_flex, modal_backdrop, modal_container, modal_footer, render_matched_text, v_flex,
+};
 use crate::workspace::Workspace;
 use crate::{
     SfBackspace, SfConfirm, SfDismiss, SfMoveEnd, SfMoveLeft, SfMoveRight, SfMoveStart,
@@ -26,7 +29,10 @@ const RESULT_LIMIT: usize = 100;
 const FILTER_DEBOUNCE_MS: u64 = 30;
 
 const MODAL_W: f32 = 640.;
-const MODAL_H: f32 = 440.;
+const INPUT_ROW_H: f32 = 45.;
+const FOOTER_H: f32 = 30.;
+const MODAL_H: f32 = 480.;
+const BODY_H: f32 = MODAL_H - INPUT_ROW_H - FOOTER_H; // 405.
 
 pub struct SymbolFinderView {
     workspace: WeakEntity<Workspace>,
@@ -48,14 +54,21 @@ struct SymbolRow {
     name: SharedString,
     rel_path: SharedString,
     source_line: usize,
+    /// Pre-formatted `"rel_path:line"` for display — avoids per-render allocation.
+    path_and_line: SharedString,
+    /// Char positions in `name` where the query matched (for accent highlighting).
+    positions: Vec<u32>,
 }
 
 impl SymbolRow {
     fn from_match(m: faber_index::SymbolMatch) -> Self {
+        let path_and_line = format!("{}:{}", m.rel_path, m.source_line + 1).into();
         Self {
             name: m.name.into(),
             rel_path: m.rel_path.into(),
             source_line: m.source_line,
+            path_and_line,
+            positions: m.positions,
         }
     }
 }
@@ -313,25 +326,117 @@ impl SymbolFinderView {
         self.reset_blink(cx);
         cx.notify();
     }
+
+    fn render_input_row(
+        &self,
+        t: &RuntimeTheme,
+        window: &Window,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let focused = self.focus_handle.is_focused(window);
+        let is_empty = self.query.is_empty();
+        let caret_h = t.font_size_code + 4.;
+
+        let input: AnyElement = if !focused && is_empty {
+            div()
+                .flex_1()
+                .h(px(caret_h))
+                .flex()
+                .items_center()
+                .font_family(t.ui_family.clone())
+                .text_size(px(t.font_size_code))
+                .text_color(t.text_subtle)
+                .child(t!("symbol_finder.placeholder").to_string())
+                .into_any()
+        } else {
+            let (before, after) = split_at_char(&self.query, self.cursor);
+            let full_text = format!("{before}{after}");
+            let caret_byte = before.len();
+            let cur_on = focused && self.cursor_blink_on;
+            let font_sz = px(t.font_size_code);
+            let caret_h_px = px(caret_h);
+            let mono = t.mono_family.clone();
+            let text_col = t.text;
+            let cursor_color = if cur_on {
+                t.cursor
+            } else {
+                gpui::hsla(0., 0., 0., 0.)
+            };
+            canvas(
+                move |_bounds, window, _cx| {
+                    let runs = if full_text.is_empty() {
+                        vec![]
+                    } else {
+                        vec![TextRun {
+                            len: full_text.len(),
+                            font: font(mono.clone()),
+                            color: text_col,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }]
+                    };
+                    window.text_system().shape_line(
+                        SharedString::from(full_text),
+                        font_sz,
+                        &runs,
+                        None,
+                    )
+                },
+                move |bounds, shaped, window, cx| {
+                    let origin = bounds.origin;
+                    let _ = shaped.paint(origin, caret_h_px, window, cx);
+                    let cx_x = origin.x + shaped.x_for_index(caret_byte);
+                    window.paint_quad(fill(
+                        Bounds::new(point(cx_x, origin.y), size(px(2.0), caret_h_px)),
+                        cursor_color,
+                    ));
+                },
+            )
+            .flex_1()
+            .h(px(caret_h))
+            .into_any()
+        };
+
+        h_flex()
+            .id("sf-input-row")
+            .px_4()
+            .py(px(10.))
+            .gap_2()
+            .h(px(INPUT_ROW_H))
+            .border_b_1()
+            .border_color(t.separator)
+            .font_family(t.mono_family.clone())
+            .text_size(px(t.font_size_code))
+            .text_color(t.text)
+            .child(
+                svg()
+                    .path(IconName::Search.path())
+                    .size(px(15.))
+                    .text_color(t.text_muted)
+                    .flex_shrink_0(),
+            )
+            .child(input)
+            .into_any()
+    }
 }
 
 impl Render for SymbolFinderView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.global::<RuntimeTheme>().clone();
         let store_ready = self.store_arc(cx).is_some();
         let is_indexing = self.filtering && self.rows.is_empty();
         let no_results = !self.filtering && self.rows.is_empty();
         let has_root = self.root(cx).is_some();
 
-        // ── empty-state helper ────────────────────────────────────────────────
-        let empty = |msg: &str, t: &RuntimeTheme| {
+        // ── empty-state helper ─────────────────────────────────────────────────
+        // h_full + flex + items_center so the state fills the fixed BODY_H area.
+        let empty_state = |msg: &str, t: &RuntimeTheme| -> AnyElement {
             div()
-                .flex_1()
+                .h_full()
                 .flex()
-                .min_h(px(120.))
                 .items_center()
                 .justify_center()
-                .py(px(20.))
                 .font_family(t.ui_family.clone())
                 .text_size(px(t.font_size_caption))
                 .text_color(t.text_muted)
@@ -339,132 +444,94 @@ impl Render for SymbolFinderView {
                 .into_any()
         };
 
-        // ── input row ─────────────────────────────────────────────────────────
-        let (before, after) = split_at_char(&self.query, self.cursor);
-        let caret_h = t.font_size_body + 4.;
-        let cur_on = self.cursor_blink_on;
-
-        let input = if self.query.is_empty() {
-            h_flex()
-                .px_3()
-                .h(px(caret_h + 12.))
-                .items_center()
-                .border_b_1()
-                .border_color(t.separator)
-                .font_family(t.ui_family.clone())
-                .text_size(px(t.font_size_body))
-                .text_color(t.text_subtle)
-                .child(t!("symbol_finder.placeholder").to_string())
-                .into_any()
-        } else {
-            h_flex()
-                .px_3()
-                .h(px(caret_h + 12.))
-                .items_center()
-                .gap_0()
-                .border_b_1()
-                .border_color(t.separator)
-                .child(
-                    div()
-                        .font_family(t.ui_family.clone())
-                        .text_size(px(t.font_size_body))
-                        .text_color(t.text)
-                        .child(before),
-                )
-                .child(div().h(px(caret_h)).w(px(1.5)).bg(if cur_on {
-                    t.cursor
+        // ── body ───────────────────────────────────────────────────────────────
+        // Fixed height container: the input row's y-position never shifts as
+        // results appear or disappear.
+        let body: AnyElement = div()
+            .h(px(BODY_H))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .map(|el| {
+                if !has_root {
+                    el.child(empty_state(&t!("symbol_finder.open_folder_hint"), &t))
+                } else if !store_ready || is_indexing {
+                    el.child(empty_state(&t!("symbol_finder.indexing"), &t))
+                } else if no_results && !self.query.is_empty() {
+                    el.child(empty_state(&t!("symbol_finder.no_matches"), &t))
                 } else {
-                    gpui::hsla(0., 0., 0., 0.)
-                }))
-                .child(
-                    div()
-                        .font_family(t.ui_family.clone())
-                        .text_size(px(t.font_size_body))
-                        .text_color(t.text)
-                        .child(after),
-                )
-                .into_any()
-        };
-
-        // ── body ──────────────────────────────────────────────────────────────
-        let body: gpui::AnyElement = if !has_root {
-            empty(&t!("symbol_finder.open_folder_hint"), &t)
-        } else if !store_ready || is_indexing {
-            empty(&t!("symbol_finder.indexing"), &t)
-        } else if no_results && !self.query.is_empty() {
-            empty(&t!("symbol_finder.no_matches"), &t)
-        } else {
-            let selected = self.selected;
-            let entries: Vec<gpui::AnyElement> = self
-                .rows
-                .iter()
-                .enumerate()
-                .map(|(i, row)| {
-                    let is_selected = i == selected;
-                    let hover_bg = t.line_highlight;
-                    let name = row.name.to_string();
-                    let path_and_line = format!("{}:{}", row.rel_path, row.source_line + 1);
-                    div()
-                        .id(("sf-row", i))
-                        .px_3()
-                        .py(px(4.))
-                        .cursor_pointer()
-                        .when(is_selected, |el| el.bg(t.line_highlight))
-                        .hover(move |el| el.bg(hover_bg))
-                        .on_mouse_move(cx.listener(move |view, _, _, cx| {
-                            if view.selected != i {
-                                view.selected = i;
-                                cx.notify();
-                            }
-                        }))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(move |view, _, window, cx| {
-                                view.selected = i;
-                                view.confirm(window, cx);
-                            }),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_0()
-                                .child(
-                                    div()
-                                        .font_family(t.ui_family.clone())
-                                        .text_size(px(t.font_size_caption))
-                                        .text_color(t.text)
-                                        .child(name),
+                    let selected = self.selected;
+                    let entries: Vec<AnyElement> = self
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, row)| {
+                            let is_selected = i == selected;
+                            let hover_bg = t.line_highlight;
+                            let name_el = render_matched_text(
+                                row.name.as_ref(),
+                                &row.positions,
+                                0,
+                                t.text,
+                                &t,
+                            );
+                            let path_and_line = row.path_and_line.clone();
+                            div()
+                                .id(("sf-row", i))
+                                .px_4()
+                                .py(px(5.))
+                                .cursor_pointer()
+                                .when(is_selected, |el| el.bg(t.line_highlight))
+                                .hover(move |el| el.bg(hover_bg))
+                                .on_mouse_move(cx.listener(move |view, _, _, cx| {
+                                    if view.selected != i {
+                                        view.selected = i;
+                                        cx.notify();
+                                    }
+                                }))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |view, _, window, cx| {
+                                        view.selected = i;
+                                        view.confirm(window, cx);
+                                    }),
                                 )
                                 .child(
-                                    div()
-                                        .font_family(t.ui_family.clone())
-                                        .text_size(px(t.font_size_caption - 1.))
-                                        .text_color(t.text_subtle)
-                                        .child(path_and_line),
-                                ),
-                        )
-                        .into_any()
-                })
-                .collect();
-
-            div()
-                .id("sf-list")
-                .flex_col()
-                .min_h(px(120.))
-                .max_h(px(MODAL_H - 60.))
-                .overflow_y_scroll()
-                .track_scroll(&self.list_scroll)
-                .children(entries)
-                .into_any()
-        };
+                                    v_flex()
+                                        .child(
+                                            h_flex()
+                                                .gap_0()
+                                                .font_family(t.mono_family.clone())
+                                                .text_size(px(t.font_size_code))
+                                                .child(name_el),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family(t.ui_family.clone())
+                                                .text_size(px(t.font_size_caption - 1.))
+                                                .text_color(t.text_subtle)
+                                                .child(path_and_line),
+                                        ),
+                                )
+                                .into_any()
+                        })
+                        .collect();
+                    el.child(
+                        div()
+                            .id("sf-list")
+                            .h_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.list_scroll)
+                            .children(entries),
+                    )
+                }
+            })
+            .into_any();
 
         // ── modal shell ────────────────────────────────────────────────────────
-        let modal = v_flex()
+        let modal = modal_container("sf-modal", &t)
             .w(px(MODAL_W))
-            .max_h(px(MODAL_H))
-            .bg(t.bg_elevated)
-            .border_1()
-            .border_color(t.separator)
-            .rounded(px(t.radius_md))
+            .h(px(MODAL_H))
             .key_context("SymbolFinder")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_sf_dismiss))
@@ -477,16 +544,26 @@ impl Render for SymbolFinderView {
             .on_action(cx.listener(Self::on_sf_move_start))
             .on_action(cx.listener(Self::on_sf_move_end))
             .on_key_down(cx.listener(Self::on_key_down))
-            .child(input)
-            .child(body);
+            .child(self.render_input_row(&t, window, cx))
+            .child(body)
+            .child(modal_footer(
+                &t,
+                &[
+                    ("↑↓", t!("symbol_finder.hint_navigate").to_string()),
+                    ("↵", t!("symbol_finder.hint_open").to_string()),
+                    ("⎋", t!("symbol_finder.hint_dismiss").to_string()),
+                ],
+            ));
 
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_start()
-            .justify_center()
-            .pt(px(72.))
-            .child(modal)
+        // ── backdrop: centered scrim with click-outside dismiss ────────────────
+        deferred(
+            modal_backdrop("sf-backdrop", &t)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, window, cx| view.dismiss(window, cx)),
+                )
+                .child(modal),
+        )
+        .with_priority(2)
     }
 }

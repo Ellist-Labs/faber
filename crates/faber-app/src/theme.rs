@@ -180,7 +180,7 @@ impl RuntimeTheme {
             radius_sm: r.sm,
             radius_md: r.md,
             radius_lg: r.lg,
-            scrim: 0.35,
+            scrim: t.material.scrim,
             tab_h: 30.0,
             titlebar_h: 36.0,
             activity_bar_w: 44.0,
