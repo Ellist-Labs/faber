@@ -165,6 +165,12 @@ preview_too_large = "File is too large to preview"
 preview_binary = "Binary file"
 preview_unreadable = "Can't read this file"
 
+[symbol_finder]
+placeholder = "Go to symbol in project…"
+no_matches = "No symbols matched"
+open_folder_hint = "Open a folder to search symbols"
+indexing = "Indexing project symbols…"
+
 [status_bar]
 scanning = "Scanning files…"
 indexing = "Indexing symbols…"

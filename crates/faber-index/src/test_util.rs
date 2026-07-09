@@ -18,3 +18,21 @@ pub(crate) fn with_project<R>(f: impl FnOnce(&Path) -> R) -> R {
     let project = TempDir::new().expect("create temp project root");
     f(project.path())
 }
+
+/// Run `f` with `$HOME` redirected to `home`, guarded by a process-wide mutex
+/// so parallel tests don't race the env-var swap.
+pub(crate) fn with_home<R>(home: &Path, f: impl FnOnce() -> R) -> R {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap();
+    let prev = std::env::var_os("HOME");
+    unsafe { std::env::set_var("HOME", home) };
+    let out = f();
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+    out
+}

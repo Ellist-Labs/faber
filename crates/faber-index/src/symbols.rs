@@ -1,9 +1,128 @@
+use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::Result;
 use faber_lang::{LanguageRegistry, OutlineCache, OutlineItem};
+use nucleo_matcher::{
+    Config, Matcher, Utf32Str,
+    pattern::{CaseMatching, Normalization, Pattern},
+};
 
 use crate::module::{FileInput, FileMeta, IndexModule, InputNeeds, KeySuffix};
+
+// Key separator in LMDB: `{rel_path}\0{suffix}`.
+const KEY_SEP: u8 = 0;
+
+/// A fuzzy-matched project symbol from the LMDB index.
+#[derive(Debug, Clone)]
+pub struct SymbolMatch {
+    /// UTF-8 relative path from the project root.
+    pub rel_path: String,
+    pub name: String,
+    pub source_line: usize,
+    pub byte_range: Range<usize>,
+    /// Nucleo score (higher = better match); 0 for empty-query listings.
+    pub score: u32,
+    /// Char positions in `name` where the query matched (for highlighting).
+    pub positions: Vec<u32>,
+}
+
+/// Scan the symbol LMDB index and return up to `limit` fuzzy matches for
+/// `query`. Empty query returns the first `limit` symbols in path order.
+///
+/// Pure function of `store` + `query` — no global state, table-testable.
+pub fn project_symbols(
+    store: &crate::store::IndexStore,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<SymbolMatch>> {
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = if query.is_empty() {
+        None
+    } else {
+        Some(Pattern::parse(
+            query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+        ))
+    };
+
+    let mut scored: Vec<SymbolMatch> = Vec::new();
+
+    for item in store.iter_data("symbols")? {
+        let (key, value) = item?;
+
+        // Key format: `{rel_path}\0outline` — extract rel_path bytes.
+        let Some(sep) = key.iter().rposition(|&b| b == KEY_SEP) else {
+            continue;
+        };
+        let rel_bytes = &key[..sep];
+        let rel_path = String::from_utf8_lossy(rel_bytes).into_owned();
+
+        let items: Vec<OutlineItem> = match bincode::deserialize(&value) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let mut buf = Vec::new();
+        for item in items {
+            if scored.len() >= limit * 8 {
+                // Rough early cap to bound memory; a final sort+truncate follows.
+                break;
+            }
+            if let Some(pat) = &pattern {
+                let Some(score) = pat.score(Utf32Str::new(&item.name, &mut buf), &mut matcher)
+                else {
+                    continue;
+                };
+                scored.push(SymbolMatch {
+                    rel_path: rel_path.clone(),
+                    name: item.name,
+                    source_line: item.source_line,
+                    byte_range: item.byte_range,
+                    score,
+                    positions: Vec::new(),
+                });
+            } else {
+                // No query: collect in store order (bounded by limit).
+                if scored.len() < limit {
+                    scored.push(SymbolMatch {
+                        rel_path: rel_path.clone(),
+                        name: item.name,
+                        source_line: item.source_line,
+                        byte_range: item.byte_range,
+                        score: 0,
+                        positions: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(pat) = pattern.as_ref() {
+        scored.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
+        scored.truncate(limit);
+
+        // Pass 2: compute match positions for survivors.
+        let mut pos_buf = Vec::new();
+        let mut char_buf = Vec::new();
+        for sym in &mut scored {
+            pos_buf.clear();
+            if pat
+                .indices(
+                    Utf32Str::new(&sym.name, &mut char_buf),
+                    &mut matcher,
+                    &mut pos_buf,
+                )
+                .is_some()
+            {
+                sym.positions = pos_buf.clone();
+            }
+        }
+    }
+
+    Ok(scored)
+}
 
 pub struct SymbolsModule {
     registry: Arc<LanguageRegistry>,
@@ -99,7 +218,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::SystemTime;
 
-    use faber_lang::{LanguageId, LanguageRegistry};
+    use faber_lang::{LanguageId, LanguageRegistry, OutlineItem};
 
     use crate::module::{FileInput, FileMeta, IndexModule, InputNeeds};
 
@@ -199,5 +318,101 @@ pub struct Config {
         let registry = Arc::new(LanguageRegistry::with_defaults());
         let module = SymbolsModule::new(registry);
         assert_eq!(module.needs(), InputNeeds::TEXT | InputNeeds::SYNTAX);
+    }
+
+    // ── project_symbols tests ─────────────────────────────────────────────────
+
+    use crate::store::{IndexStore, Stamp};
+    use crate::test_util::with_home;
+
+    fn write_outline(store: &IndexStore, rel_path: &[u8], items: &[OutlineItem]) {
+        let stamp = Stamp {
+            mtime: SystemTime::UNIX_EPOCH,
+            size: 0,
+            hash: None,
+        };
+        let encoded = bincode::serialize(items).unwrap();
+        store
+            .write_batch(
+                "symbols",
+                &[(
+                    rel_path.to_vec(),
+                    stamp,
+                    vec![(b"outline".to_vec(), encoded)],
+                )],
+                false,
+            )
+            .unwrap();
+    }
+
+    fn make_item(name: &str, line: usize) -> OutlineItem {
+        OutlineItem {
+            depth: 0,
+            name: name.to_string(),
+            context: None,
+            source_line: line,
+            end_line: line,
+            byte_range: 0..1,
+            block_ix: None,
+        }
+    }
+
+    #[test]
+    fn project_symbols_empty_query_returns_all() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        with_home(home.path(), || {
+            let store = IndexStore::open(project.path()).unwrap();
+            write_outline(
+                &store,
+                b"src/lib.rs",
+                &[make_item("foo", 1), make_item("bar", 5)],
+            );
+            write_outline(&store, b"src/main.rs", &[make_item("main", 0)]);
+
+            let results = super::project_symbols(&store, "", 10).unwrap();
+            let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
+            assert!(names.contains(&"foo"), "expected foo; got {names:?}");
+            assert!(names.contains(&"bar"), "expected bar; got {names:?}");
+            assert!(names.contains(&"main"), "expected main; got {names:?}");
+        });
+    }
+
+    #[test]
+    fn project_symbols_fuzzy_filters_by_name() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        with_home(home.path(), || {
+            let store = IndexStore::open(project.path()).unwrap();
+            write_outline(
+                &store,
+                b"src/lib.rs",
+                &[
+                    make_item("parse_header", 1),
+                    make_item("format_row", 10),
+                    make_item("build_index", 20),
+                ],
+            );
+
+            let results = super::project_symbols(&store, "parse", 10).unwrap();
+            assert!(!results.is_empty(), "expected at least one result");
+            assert_eq!(results[0].name, "parse_header");
+            assert_eq!(results[0].rel_path, "src/lib.rs");
+        });
+    }
+
+    #[test]
+    fn project_symbols_respects_limit() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        with_home(home.path(), || {
+            let store = IndexStore::open(project.path()).unwrap();
+            let items: Vec<OutlineItem> =
+                (0..20).map(|i| make_item(&format!("fn_{i}"), i)).collect();
+            write_outline(&store, b"src/lib.rs", &items);
+
+            let results = super::project_symbols(&store, "", 5).unwrap();
+            assert!(results.len() <= 5, "limit not respected: {}", results.len());
+        });
     }
 }

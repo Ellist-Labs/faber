@@ -2532,7 +2532,7 @@ impl Render for EditorView {
                 let same = self
                     .word_occ_key
                     .as_deref()
-                    .map_or(false, |k| self.doc.rope.slice(ws..we).chars().eq(k.chars()));
+                    .is_some_and(|k| self.doc.rope.slice(ws..we).chars().eq(k.chars()));
                 if !same {
                     let word_text = self.doc.rope.slice(ws..we).to_string();
                     self.word_occ = Query::new(word_text.clone())

@@ -13,6 +13,7 @@ mod project_search_view;
 mod settings_view;
 mod sidebar;
 mod status_bar;
+mod symbol_finder;
 mod symbol_overlay;
 mod theme;
 mod ui;
@@ -137,12 +138,28 @@ actions!(
         OpenProjectSearch,
         OpenFileFinder,
         OpenFileFinderPreview,
+        OpenSymbolFinder,
         Quit,
         SplitLeft,
         SplitRight,
         SplitUp,
         SplitDown,
         ReindexProject,
+    ]
+);
+
+actions!(
+    symbol_finder,
+    [
+        SfDismiss,
+        SfConfirm,
+        SfSelectNext,
+        SfSelectPrev,
+        SfBackspace,
+        SfMoveLeft,
+        SfMoveRight,
+        SfMoveStart,
+        SfMoveEnd,
     ]
 );
 
@@ -304,6 +321,21 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-shift-x", ToggleCheckbox, Some("Editor && markdown")),
         // Project search
         KeyBinding::new("cmd-shift-f", OpenProjectSearch, Some("Workspace")),
+        // Symbol finder
+        KeyBinding::new("cmd-t", OpenSymbolFinder, Some("Workspace")),
+        KeyBinding::new("escape", SfDismiss, Some("SymbolFinder")),
+        KeyBinding::new("enter", SfConfirm, Some("SymbolFinder")),
+        KeyBinding::new("down", SfSelectNext, Some("SymbolFinder")),
+        KeyBinding::new("up", SfSelectPrev, Some("SymbolFinder")),
+        KeyBinding::new("ctrl-n", SfSelectNext, Some("SymbolFinder")),
+        KeyBinding::new("ctrl-p", SfSelectPrev, Some("SymbolFinder")),
+        KeyBinding::new("backspace", SfBackspace, Some("SymbolFinder")),
+        KeyBinding::new("left", SfMoveLeft, Some("SymbolFinder")),
+        KeyBinding::new("right", SfMoveRight, Some("SymbolFinder")),
+        KeyBinding::new("cmd-left", SfMoveStart, Some("SymbolFinder")),
+        KeyBinding::new("cmd-right", SfMoveEnd, Some("SymbolFinder")),
+        KeyBinding::new("home", SfMoveStart, Some("SymbolFinder")),
+        KeyBinding::new("end", SfMoveEnd, Some("SymbolFinder")),
         // File finder
         KeyBinding::new("cmd-p", OpenFileFinder, Some("Workspace")),
         KeyBinding::new("cmd-alt-p", OpenFileFinderPreview, Some("Workspace")),
