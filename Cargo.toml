@@ -3,6 +3,7 @@ members = [
     "crates/faber-core",
     "crates/faber-lang",
     "crates/faber-editor",
+    "crates/faber-index",
     "crates/faber-theme",
     "crates/faber-settings",
     "crates/faber-app",

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use faber_core::pane_tree::{
     Axis, DropZone, Member, PaneGroup, PaneId, Rect as PaneRect, SplitDirection, Vec2 as PaneVec2,
@@ -10,7 +10,6 @@ use faber_settings::AutoSave;
 
 use faber_editor::{
     buffer::Document,
-    file_index::{self, FileIndexSnapshot},
     project::{FileTree, VisibleRow},
     save::save,
 };
@@ -34,12 +33,23 @@ use crate::welcome_view::render_welcome;
 use crate::{
     AppStateStore, CloseFile, CloseFolder, CloseTab, CloseWindow, NewFile, NextTab, OpenFile,
     OpenFileFinder, OpenFileFinderPreview, OpenFolder, OpenProjectSearch, OpenSettings, PrevTab,
-    ProjectRoot, Quit, SaveAll, SaveAs, SaveFile, SplitDown, SplitLeft, SplitRight, SplitUp,
-    ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
+    ProjectRoot, Quit, ReindexProject, SaveAll, SaveAs, SaveFile, SplitDown, SplitLeft, SplitRight,
+    SplitUp, ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
 };
 
-/// Rescan the file index when the cached snapshot is older than this.
-const INDEX_STALE_AFTER: Duration = Duration::from_secs(5);
+// ── Index status ──────────────────────────────────────────────────────────────
+
+pub struct IndexStatus {
+    pub current_progress: Option<faber_index::progress::ProgressEvent>,
+}
+
+impl IndexStatus {
+    fn new() -> Self {
+        Self {
+            current_progress: None,
+        }
+    }
+}
 
 // ── Pane resize & drag types ──────────────────────────────────────────────────
 
@@ -80,17 +90,6 @@ impl Render for TabGhost {
             .opacity(0.8)
             .child(self.title.clone())
     }
-}
-
-/// Background-scanned project file index, shared with the file finder.
-#[derive(Default)]
-pub(crate) struct FileIndexState {
-    normal: Option<Arc<FileIndexSnapshot>>,
-    full: Option<Arc<FileIndexSnapshot>>,
-    normal_scanned_at: Option<Instant>,
-    full_scanned_at: Option<Instant>,
-    scanning_normal: bool,
-    scanning_full: bool,
 }
 
 type MenuClickFn = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
@@ -147,7 +146,11 @@ pub struct Workspace {
     /// Bumped on every edit; a debounced auto-save fires only if no newer
     /// edit arrived while its timer slept.
     autosave_generation: u64,
-    file_index: FileIndexState,
+    index_engine: Option<Arc<faber_index::engine::IndexEngine>>,
+    pub(crate) files_handle:
+        Option<faber_index::module::SnapshotHandle<faber_index::files::FileIndexSnapshot>>,
+    index_status: gpui::Entity<IndexStatus>,
+    status_bar: Entity<crate::status_bar::StatusBar>,
     file_finder: Option<Entity<FileFinderView>>,
     pane_resize: Option<PaneResize>,
     drop_hover: Option<(PaneId, DropZone)>,
@@ -164,6 +167,14 @@ impl Workspace {
         let first_pane = cx.new(|cx| Pane::new(first_pane_id, cx));
         let mut panes = HashMap::new();
         panes.insert(first_pane_id, first_pane);
+
+        let index_status = cx.new(|_| IndexStatus::new());
+        let status_bar = cx.new(|_| crate::status_bar::StatusBar::new());
+        {
+            let item =
+                cx.new(|cx| crate::status_bar::IndexingStatusItem::new(index_status.clone(), cx));
+            status_bar.update(cx, |bar, _| bar.push_right(item.into()));
+        }
 
         let mut ws = Self {
             pane_group: PaneGroup::single(first_pane_id),
@@ -182,7 +193,10 @@ impl Workspace {
             bottom_open: false,
             right_open: false,
             autosave_generation: 0,
-            file_index: FileIndexState::default(),
+            index_engine: None,
+            files_handle: None,
+            index_status,
+            status_bar,
             file_finder: None,
             pane_resize: None,
             drop_hover: None,
@@ -478,8 +492,9 @@ impl Workspace {
                 self.sidebar.open = true;
                 self.sidebar.active = SidebarItemKind::Explorer;
                 cx.set_global(ProjectRoot(Some(folder.clone())));
-                self.file_index = FileIndexState::default();
-                self.kick_index_scan(false, cx);
+                self.index_engine = None;
+                self.files_handle = None;
+                self.start_index_engine(cx);
                 let abs = folder.to_string_lossy().to_string();
                 self.record_state_change(cx, move |s| s.record_recent_project(&abs));
             }
@@ -530,80 +545,54 @@ impl Workspace {
         self.root_folder.as_ref()
     }
 
-    /// Best snapshot for the requested mode. Falls back to the normal snapshot
-    /// while the full scan is still running (stale-while-revalidate).
-    pub(crate) fn index_snapshot(&self, include_ignored: bool) -> Option<Arc<FileIndexSnapshot>> {
-        if include_ignored {
-            self.file_index
-                .full
-                .clone()
-                .or_else(|| self.file_index.normal.clone())
-        } else {
-            self.file_index.normal.clone()
-        }
-    }
+    /// No-op kept for call-site compatibility; the engine indexes everything in one pass.
+    pub(crate) fn ensure_full_index(&mut self, _cx: &mut Context<Self>) {}
 
-    /// Lazily scan the gitignored-included index the first time it's needed.
-    pub(crate) fn ensure_full_index(&mut self, cx: &mut Context<Self>) {
-        if self.file_index.full.is_none() {
-            self.kick_index_scan(true, cx);
-        }
-    }
-
-    fn kick_index_scan(&mut self, include_ignored: bool, cx: &mut Context<Self>) {
+    /// Start (or restart) the index engine for the current root folder.
+    pub(crate) fn start_index_engine(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.root_folder.clone() else {
             return;
         };
-        let scanning = if include_ignored {
-            &mut self.file_index.scanning_full
-        } else {
-            &mut self.file_index.scanning_normal
+        let registry = cx.global::<crate::Registry>().0.clone();
+
+        let mut engine = match faber_index::engine::IndexEngine::new(root, registry) {
+            Ok(e) => e,
+            Err(e) => {
+                log::error!("index engine init failed: {e}");
+                return;
+            }
         };
-        if *scanning {
-            return;
-        }
-        *scanning = true;
-        cx.spawn(async move |ws, cx| {
-            let snapshot = cx
-                .background_executor()
-                .spawn(async move { Arc::new(file_index::scan(&root, include_ignored)) })
-                .await;
-            ws.update(cx, |ws, cx| {
-                if include_ignored {
-                    ws.file_index.full = Some(snapshot);
-                    ws.file_index.scanning_full = false;
-                    ws.file_index.full_scanned_at = Some(Instant::now());
-                } else {
-                    ws.file_index.normal = Some(snapshot);
-                    ws.file_index.scanning_normal = false;
-                    ws.file_index.normal_scanned_at = Some(Instant::now());
+
+        let files_handle = engine.register(faber_index::engine::FilesModule);
+        self.files_handle = Some(files_handle);
+
+        let progress_rx = engine.progress();
+        let engine = Arc::new(engine);
+        engine.clone().start();
+        engine.request(faber_index::trigger::IndexTrigger::FolderOpened);
+        self.index_engine = Some(engine);
+
+        // Drain ProgressReceiver on a background polling loop → update Entity<IndexStatus>.
+        let status = self.index_status.clone();
+        cx.spawn(async move |_this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                if let Some(ev) = progress_rx.try_recv() {
+                    if status
+                        .update(cx, |s, cx| {
+                            s.current_progress = Some(ev);
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break; // workspace entity dropped; stop draining.
+                    }
                 }
-                if let Some(finder) = &ws.file_finder {
-                    finder.update(cx, |f, cx| f.on_index_updated(cx));
-                }
-            })
-            .ok();
+            }
         })
         .detach();
-    }
-
-    /// Rescan if the cached index is stale; the finder shows the cached list
-    /// instantly and re-filters when the fresh scan lands.
-    fn revalidate_index(&mut self, cx: &mut Context<Self>) {
-        let normal_stale = self
-            .file_index
-            .normal_scanned_at
-            .is_none_or(|at| at.elapsed() > INDEX_STALE_AFTER);
-        let full_stale = self
-            .file_index
-            .full_scanned_at
-            .is_none_or(|at| at.elapsed() > INDEX_STALE_AFTER);
-        if normal_stale {
-            self.kick_index_scan(false, cx);
-        }
-        if full_stale && self.file_index.full.is_some() {
-            self.kick_index_scan(true, cx);
-        }
     }
 
     fn open_file_finder(&mut self, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -618,7 +607,6 @@ impl Workspace {
             }
             return;
         }
-        self.revalidate_index(cx);
         let ws = cx.entity().downgrade();
         let finder = cx.new(|cx| FileFinderView::new(ws, preview, cx));
         window.focus(&finder.read(cx).focus_handle);
@@ -674,6 +662,7 @@ impl Workspace {
         if editor.read(cx).doc.is_untitled() {
             return self.save_editor_as(editor, window, cx);
         }
+        let abs_path = editor.read(cx).doc.path.clone();
         let ok = editor.update(cx, |ed, cx| {
             let ok = save(&ed.doc.rope, &ed.doc.path).is_ok();
             if ok {
@@ -682,6 +671,9 @@ impl Workspace {
             cx.notify();
             ok
         });
+        if ok && let Some(engine) = &self.index_engine {
+            engine.request(faber_index::trigger::IndexTrigger::FileSaved(abs_path));
+        }
         Task::ready(ok)
     }
 
@@ -865,6 +857,17 @@ impl Workspace {
         self.on_quit(&Quit, window, cx);
     }
 
+    fn on_reindex_project(
+        &mut self,
+        _: &ReindexProject,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        if let Some(engine) = &self.index_engine {
+            engine.request(faber_index::trigger::IndexTrigger::Manual);
+        }
+    }
+
     fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         let existing = self.pane().read(cx).find_settings_tab();
         if let Some(ix) = existing {
@@ -1010,9 +1013,8 @@ impl Workspace {
             let _ = tree.refresh();
             self.visible_rows = tree.visible();
         }
-        self.kick_index_scan(false, cx);
-        if self.file_index.full.is_some() {
-            self.kick_index_scan(true, cx);
+        if let Some(engine) = &self.index_engine {
+            engine.request(faber_index::trigger::IndexTrigger::FolderOpened);
         }
         cx.notify();
     }
@@ -2140,6 +2142,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_bottom_panel))
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_reindex_project))
             .on_action(cx.listener(Self::on_open_project_search))
             .on_action(cx.listener(Self::on_open_file_finder))
             .on_action(cx.listener(Self::on_open_file_finder_preview))
@@ -2277,6 +2280,7 @@ impl Render for Workspace {
             .relative()
             .child(self.render_titlebar(&t, cx))
             .child(body)
+            .child(self.status_bar.clone())
             .map(|el| match self.render_context_menu(&t, cx) {
                 Some(menu) => el.child(menu),
                 None => el,

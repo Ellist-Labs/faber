@@ -36,10 +36,10 @@ jobs:
       - name: Clippy (gpui-free crates)
         run: >
           cargo clippy --locked
-          -p faber-core -p faber-lang -p faber-editor -p faber-settings -p faber-theme
+          -p faber-core -p faber-lang -p faber-editor -p faber-index -p faber-settings -p faber-theme
           --all-targets -- -D warnings
 
       - name: Test (gpui-free crates)
         run: >
           cargo test --locked
-          -p faber-core -p faber-lang -p faber-editor -p faber-settings -p faber-theme
+          -p faber-core -p faber-lang -p faber-editor -p faber-index -p faber-settings -p faber-theme

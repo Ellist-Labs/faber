@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 faber-core = { path = "../faber-core" }
 ropey = "1"
+serde = { version = "1", features = ["derive"] }
 tree-sitter = "0.26"
 tree-sitter-md = "0.5"
 tree-sitter-rust = "0.24"

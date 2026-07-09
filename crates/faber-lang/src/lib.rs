@@ -7,7 +7,7 @@ pub mod language;
 pub mod registry;
 
 pub use language::{
-    Grammar, HighlightConfig, Language, LanguageId, OutlineConfig, SyntaxToken,
-    capture_name_to_token,
+    Grammar, HighlightConfig, Language, LanguageId, Outline, OutlineCache, OutlineConfig,
+    OutlineItem, SyntaxToken, capture_name_to_token,
 };
 pub use registry::LanguageRegistry;

@@ -12,6 +12,8 @@ mod pane;
 mod project_search_view;
 mod settings_view;
 mod sidebar;
+mod status_bar;
+mod symbol_overlay;
 mod theme;
 mod ui;
 mod welcome_view;
@@ -140,6 +142,7 @@ actions!(
         SplitRight,
         SplitUp,
         SplitDown,
+        ReindexProject,
     ]
 );
 

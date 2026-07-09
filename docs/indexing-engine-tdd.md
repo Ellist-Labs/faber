@@ -1,81 +1,155 @@
 # Indexing engine TDD
 
-Status: draft
+Status: draft, revised after four-lens design review (architecture/SOLID, scalability/maintainability/testability, performance/UX, cohesion/coupling)
 Related: [indexing-engine-prd.md](indexing-engine-prd.md)
 
 ## Context
 
 Faber is a 6-crate workspace where logic crates never import gpui and `faber-app` is a thin GPUI shell (CLAUDE.md rule, compiler-enforced). Today's index-like work is scattered:
 
-- `faber-editor/src/file_index.rs`: async full-tree walk (ignore crate, 200K cap), in-memory only, stale-after-5s rescan, kicked from `workspace.rs:534`.
-- `faber-editor/src/outline.rs`: per-document tree-sitter symbols, recomputed on every edit, never project-wide.
+- `faber-editor/src/file_index.rs`: async full-tree walk (ignore crate, 200K cap), in-memory only, stale-after-5s rescan, kicked from `workspace.rs:534`. Also hosts the finder data layer: `FileIndexSnapshot`, `FileEntry`, `FinderQuery`, `FinderMatch`, `filter()`.
+- `faber-editor/src/outline.rs`: per-document tree-sitter symbols (`Outline`, `OutlineItem`, compute), recomputed on every edit, never project-wide. Imports only `faber_lang::Grammar` + `tree_sitter`.
 - `faber-editor/src/project_search.rs`: on-demand walk per query (stays as is in v1).
-- No filesystem watcher. No persistence beyond TOML settings/state.
+- No filesystem watcher. No persistence beyond TOML settings/state. The `LanguageRegistry` lives in a GPUI global (`main.rs:36`).
 
-Design sources: Zed's worktree scanner and (removed) `semantic_index` crate, IntelliJ's `FileBasedIndexExtension` model, rust-analyzer's revision-based laziness. Key ideas adopted: registry of versioned pure modules, scanning vs indexing phase split, mtime-then-hash staleness, single writer with MVCC readers, snapshot publication, LSP-shaped progress events.
+Design sources: Zed's worktree scanner and (removed) `semantic_index` crate, IntelliJ's `FileBasedIndexExtension` model, rust-analyzer's revision-based laziness. Adopted ideas: registry of versioned pure modules, scanning vs indexing phase split, mtime-then-hash staleness, single writer with MVCC readers, per-module snapshot publication, throttled LSP-shaped progress.
+
+The main persistence payoff is symbols and every future content-derived module (parse cost is real); the file list rides along for uniformity and warm-start polish. Don't "simplify" the store away on the file finder's account alone.
 
 ## Architecture
 
-New GPUI-free crate `faber-index`, depending on `faber-core` and `faber-lang` only. `faber-app` wires it to GPUI executors and UI.
+New GPUI-free crate `faber-index`, depending on `faber-core` and `faber-lang` only. `faber-editor` and `faber-index` are siblings; neither depends on the other. `faber-app` wires everything.
 
 ```
 crates/faber-index/src/
-  lib.rs        IndexEngine facade, registry
-  module.rs     IndexModule trait, FileInput, ModuleState
-  scanner.rs    tree walk + stamp merge-join → dirty set
-  store.rs      heed env, per-module DBs, stamps, meta
-  pipeline.rs   staged channels: read → hash → parse → fan-out → write
-  watcher.rs    notify wrapper: debounce, coalesce, overflow fallback
-  trigger.rs    IndexTrigger queue with coalescing
-  progress.rs   ProgressEvent types
-  modules/
-    files.rs    file index module (v1)
-    symbols.rs  symbol index module (v1)
+  lib.rs        public re-exports
+  engine.rs     IndexEngine: run loop, registry, snapshot handles, readiness
+  module.rs     IndexModule trait, FileMeta, FileInput, InputNeeds, ModuleState
+  scanner.rs    tree walk + stamp merge-join → dirty set (holds a store read view)
+  store.rs      heed env, stamps, meta, batched writer, self-heal, GC
+  pipeline.rs   std::thread worker pool, staged bounded channels
+  watcher.rs    notify wrapper: debounce, coalesce, echo suppression, overflow fallback
+  trigger.rs    ScanScope lattice + coalescing queue
+  progress.rs   ProgressEvent, throttled emitter
+  files.rs      files module + finder data layer (snapshot, filter)
+  symbols.rs    symbols module + read API
 ```
+
+### Prerequisite type moves
+
+Two moves must land before the engine, or nothing compiles with the stated dependency set:
+
+- `Outline`, `OutlineItem`, and the tree-sitter compute function move from `faber-editor/src/outline.rs` to `faber-lang` (next to `OutlineConfig`, their only dependency). `faber-editor` re-exports them (it already re-exports faber-lang types); the markdown outline path stays in `faber-editor` producing the moved type.
+- The finder data layer (`FileIndexSnapshot`, `FileEntry`, `FinderQuery`, `FinderMatch`, `filter()`) plus the `nucleo-matcher` and `regex` deps move from `faber-editor/src/file_index.rs` into `faber-index/src/files.rs`. `file_index.rs` is then deleted (the scan half is replaced by the engine); `faber-app` imports from `faber_index`.
 
 ### Module trait (registry pattern)
 
 ```rust
+bitflags! { pub struct InputNeeds: u8 { const META; const TEXT; const SYNTAX; } }
+
+pub struct FileMeta {
+    pub rel_path: Arc<RelPath>,   // raw bytes, sorted bytewise; non-UTF8 safe
+    pub size: u64,
+    pub mtime: SystemTime,
+    pub is_ignored: bool,
+    pub language: Option<LanguageId>,   // resolved once by the engine
+}
+
+pub struct FileInput<'a> {
+    pub meta: &'a FileMeta,
+    pub text: Option<&'a str>,           // present iff the module declared TEXT
+    pub syntax: Option<&'a tree_sitter::Tree>,  // present iff SYNTAX and language supported
+}
+
 pub trait IndexModule: Send + Sync {
-    fn name(&self) -> &'static str;            // stable; names the LMDB sub-DBs
-    fn version(&self) -> u32;                  // bump ⇒ rebuild this module only
-    fn accepts(&self, meta: &FileMeta) -> bool;        // extension/size filter
-    fn index(&self, input: &FileInput) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>>;
-    fn publish(&self, txn: &ReadTxn, db: ModuleDb) -> anyhow::Result<Arc<dyn Any + Send + Sync>>;
+    type Snapshot: Send + Sync + 'static;
+    fn name(&self) -> &'static str;      // stable; names the LMDB sub-DBs
+    fn version(&self) -> u32;            // bump ⇒ rebuild this module only
+    fn needs(&self) -> InputNeeds;       // META-only modules skip content entirely
+    fn accepts(&self, meta: &FileMeta) -> bool;
+    fn index(&self, input: &FileInput) -> anyhow::Result<Vec<(KeySuffix, Vec<u8>)>>;
+    fn publish(&self, entries: &mut dyn Iterator<Item = (&[u8], &[u8])>)
+        -> anyhow::Result<Self::Snapshot>;
 }
 ```
 
-Rules copied from IntelliJ, enforced by the shape of the API:
+Rules, enforced by the shape of the API rather than by convention:
 
-- `index` is a pure function of `FileInput`. No filesystem reads, no globals. This is what makes modules independently rebuildable and testable.
-- `FileInput { rel_path, text, language, syntax: Option<&Tree> }`: the engine parses once with tree-sitter and shares the tree, so N modules don't parse N times.
-- Keys are path-prefixed (`path bytes + \0 + suffix`, Zed's `db_key_for_path` trick) so deleting a file's entries is one range delete and iteration follows tree order.
-- `publish` builds the in-memory snapshot consumers read (e.g. `Arc<FileIndexSnapshot>` for the finder). Called after each committed run; stored in an `ArcSwap` per module.
+- `index` is a pure function of `FileInput`. No filesystem reads, no globals. This keeps modules independently rebuildable and table-testable.
+- Modules return key *suffixes*; the engine composes the stored key as `path bytes + \0 + suffix` (Zed's layout), so range deletes per file and the merge-join ordering can't be broken by a module.
+- `publish` consumes an abstract entry iterator, never heed types. The engine feeds it from a read transaction; tests feed it straight from `index()` output. Storage stays swappable (the SQLite revisit clause survives).
+- The engine parses a file once per run, inside the worker handling it, and only when an accepting module declared `SYNTAX` for a supported language. Adding module #3 changes nothing in the engine (open/closed).
+- Value encoding is bincode; each module documents its value struct next to its `index()`.
+
+Registration returns a typed handle; `dyn Any` exists only inside the erased registry wrapper, and no downcast ever appears in `faber-app`:
+
+```rust
+pub struct SnapshotHandle<S> { /* Arc<ArcSwapOption<S>> + shared ModuleState */ }
+impl<S> SnapshotHandle<S> {
+    pub fn load(&self) -> Option<Arc<S>>;
+    pub fn state(&self) -> ModuleState;
+}
+```
+
+### Engine facade
+
+```rust
+impl IndexEngine {
+    pub fn new(root: PathBuf, index_dir: PathBuf, languages: Arc<LanguageRegistry>)
+        -> anyhow::Result<Self>;                    // registry injected; engine reads no globals
+    pub fn register<M: IndexModule>(&mut self, m: M) -> SnapshotHandle<M::Snapshot>;
+    pub fn start(self: Arc<Self>);                  // spawns run loop + workers
+    pub fn request(&self, trigger: IndexTrigger);   // the only mutation entry point
+    pub fn progress(&self) -> ProgressReceiver;     // throttled, latest-value
+}
+```
+
+`request` is the anti-corruption boundary: features never talk to the scanner, store, or watcher directly.
+
+### Threading model
+
+`faber-index` owns its threads: one run-loop thread plus a `num_cpus`-sized `std::thread` worker pool with bounded channels. CPU and IO bound batch work gains nothing from GPUI's executor, and gpui is off-limits in this crate; plain threads beat injecting a `Spawner` trait for one consumer (recorded under alternatives).
+
+- Backpressure is bounded twice: channel slots (512) and an in-flight byte budget (~64 MB semaphore) so 512 × 1 MB files can't sit in memory.
+- The writer is the only serial stage. Parsing runs in the same worker as read+hash, one parser per worker thread.
+- `faber-app` wiring: a foreground `cx.spawn` drains the progress receiver and updates `Entity<IndexStatus>`; views observe it. Engine start is sequenced after the first window frame, so startup stays interactive by construction.
+- Teardown: dropping the engine (workspace close, app quit) closes channels; threads exit. User-facing cancellation stays impossible; runs otherwise complete.
 
 ### Storage (LMDB via heed)
 
 One `heed::Env` per project at `~/.cache/faber/index/<blake3(root_abs_path)>/`, map size 1 GiB. Named databases:
 
-- `meta`: engine schema version, per-module recorded version.
-- `stamps:{module}`: rel_path → `Stamp { mtime, size, blake3 }`. Per module, so version bumps invalidate independently.
-- `data:{module}`: the module's key/value entries.
+- `meta`: engine schema version, per-module recorded version, `last_opened`, `last_rebuild_reason`.
+- `stamps:{module}`: rel_path → `Stamp`. META-only modules store `{mtime, size}`; content modules store `{mtime, size, blake3}`. Per module, so version bumps invalidate independently.
+- `data:{module}`: the module's entries, path-prefixed keys.
 
-Consistency: for each file, stamp and data writes share one write transaction. A crash mid-run loses at most uncommitted files; the next scan's merge-join reindexes them. No clean-shutdown flag needed, LMDB is copy-on-write. On `meta` version mismatch or open failure: drop the affected DBs (or the whole env dir) and rebuild in the background, never surface an error dialog.
+Consistency and durability:
 
-Single writer task owns all write transactions. Readers open MVCC read transactions and never block the writer.
+- Per file, stamp and data writes share one write transaction.
+- Cold runs: env opened with `NO_SYNC`, commits batched by time or count (~100 ms or ~1,000 files), one durable sync at run end. A crash loses at most the uncommitted tail; the next merge-join reindexes it. This avoids ~2,000 fsyncs on a 200K cold build.
+- Incremental runs: small batches (~100 files), normal sync.
+- Publish runs on a read transaction in a separate task after the writer bumps the generation, so a queued follow-up run never waits on snapshot rebuilds.
+- Map-full: abort the transaction, reopen the env with a doubled map, retry the batch.
+- Self-heal: version mismatch or open failure drops the affected DBs (or the env dir) and rebuilds in the background. Never an error dialog; always a logged reason.
+- Cache GC: on startup, delete index dirs whose `last_opened` is older than 30 days (pure cache; PRD already declares it safe to delete).
+- Ordering invariant: the scanner collects and sorts walk output bytewise on rel_path bytes; stored keys are those same bytes, so the LMDB cursor and the walk merge-join in lockstep.
 
-### Engine run loop
+### Run loop and scheduling
 
-One run at a time, serial, runs to completion (PRD FR7). Triggers arriving mid-run coalesce into at most one queued follow-up.
+One run at a time, serial, runs to completion (PRD FR7). The run has per-phase outputs, not one big barrier:
 
 ```
-trigger → scan phase → index phase → publish phase
+trigger → scan phase → [files publish] → content phase → [per-module publish]
 ```
 
-- Scan: walk the tree (ignore crate, same rules as today) collecting `FileMeta`; merge-join the sorted walk against each module's stamp DB (Zed's sorted merge-join): entries missing on disk → deletion set; present in both → dirty if mtime+size differ *and* blake3 differs (hash computed lazily, only when mtime/size changed; branch switches touch many mtimes but few contents); missing in DB → new. Scoped triggers (single file save) stat only the affected paths and skip the walk.
-- Index: staged pipeline on background threads, bounded channels for backpressure:
-  `read+hash (num_cpus workers, bounded 512) → parse once → fan out to accepting modules → single writer (batched txns, ~100 files per commit)`.
-- Publish: writer bumps a generation counter, calls each dirty module's `publish`, swaps the `ArcSwap` snapshots, emits `ProgressEvent::End`.
+- Scan: walk the tree (ignore crate, same rules as today, 200K cap logged when hit) into sorted `FileMeta`s; merge-join against each module's stamps. Dirty test: mtime+size gate first; blake3 computed only when they changed (branch switches touch many mtimes, few contents). Scoped triggers stat only the affected paths and skip the walk.
+- META-only modules (files) index straight from scan output: no reads, no hashes, no pipeline. The files snapshot publishes immediately after the scan phase, so a cold open has the finder Ready in walk time (seconds), not read+hash+parse time (minutes). This was the single worst regression risk in the first draft.
+- Content phase: dirty set ordered by priority (open documents first, then finder-history paths, then BFS depth), fed through the pipeline. Each content module publishes as soon as its own writes finish.
+- Warm start: on engine start, before any scan, each module whose recorded version matches publishes directly from the store (background; budget: under 200 ms at 200K entries), then a `Walk` verification scan queues. Finder answers from the persisted index at first paint.
+- Saves during a run: `FileSaved` paths inject into the in-flight run's work queue (the pipeline streams; one more file is cheap), so a newly created file appears in the finder without waiting behind a cold build.
+- Zero-work runs skip publish entirely (no snapshot churn on no-op triggers).
+- Ignored entries are META-only data for the files module (the `is_ignored` flag replaces today's second walk); they never enter the content phase and the watcher filters them out. `filter()` gains an `include_ignored` flag to replace the old two-snapshot model.
+- Failed `index()` calls: stamp with an error marker (retried only when content changes, preventing hot loops), counted as done for progress, logged once.
 
 ### Triggers
 
@@ -84,57 +158,58 @@ pub enum IndexTrigger {
     FolderOpened,
     FileSaved(PathBuf),
     ExternalChanges(Vec<PathBuf>),   // from watcher
-    Manual,                          // settings button: re-verify everything
+    Manual,                          // settings: re-verify everything (re-hash)
 }
+
+enum ScanScope { Paths(BTreeSet<PathBuf>), Walk, Verify }
+// merge: Verify ⊔ _ = Verify;  Walk ⊔ Paths = Walk;  Paths ⊔ Paths = union
+// a Paths set exceeding ~1,000 entries degrades to Walk (cheaper than per-path stats)
 ```
 
-`IndexEngine::request(trigger)` is the only entry point; any app code can call it. This is the abstraction the PRD asks for: features never talk to the scanner or the store directly.
+Triggers arriving mid-run merge into one pending scope through the lattice; at most one follow-up run queues.
 
 ### Watcher
 
-`notify` recommended watcher on the project root, Zed-style handling:
+`notify` recommended watcher on the project root:
 
-- Callback pushes into a shared pending buffer; a drain task sleeps 100 ms then takes the whole buffer (debounce + batch).
-- Coalesce per path (create+modify+delete of one path collapses), filter through the same ignore rules as the scanner.
-- Overflow or rescan events → fall back to a full `FolderOpened`-style scan. Watching is an optimization over scanning, never the source of truth.
-- Watcher lives in `faber-index`; `faber-app` starts it when a folder opens and drops it on close (drop = cancellation, GPUI convention).
+- Callback pushes into a shared pending buffer; a drain step sleeps 100 ms then takes the whole buffer. Coalescing is a pure function `coalesce(Vec<PathEvent>) -> Option<IndexTrigger>` (testable without real fs events or clocks); the sleep lives in a thin outer loop.
+- Echo suppression: paths indexed via `FileSaved` in the last ~2 s are dropped from watcher batches, so every in-app save doesn't schedule a second run.
+- Events filter through the same ignore rules as the scanner. Overflow or rescan events degrade to `Walk`. Watching is an optimization over scanning, never the source of truth.
+- Owned by the engine, started on folder open, dropped on close.
 
-### Threading model (faber-app wiring)
+### Progress
 
-No tokio; GPUI executors only, matching the codebase:
+Counting and emission are separate concerns:
 
-- `cx.background_spawn` runs the engine loop; the pipeline uses `background_executor().scoped()` for worker pools, as Zed's scanner does.
-- A foreground `cx.spawn` drains the progress channel and updates `Entity<IndexStatus>`; views observe it with `cx.observe`. The engine never touches UI, the UI never touches the store.
-- Tasks are stored on `Workspace` fields so dropping the workspace tears everything down. User-facing cancellation stays impossible; app quit is the only stop.
-
-### Progress contract
-
-LSP-shaped events over an unbounded channel:
+- Counting: RAII handles travel with each file through the pipeline (Zed's `IndexingEntrySet`); drop decrements an atomic. Counts can't desync.
+- Emission: the engine publishes into a latest-value cell plus a change signal, throttled to at most one `Report` per 100 ms or 1% delta. `Begin`/`End` and phase transitions always emit. No unbounded queue, no 200K foreground wakeups.
 
 ```rust
 pub enum ProgressEvent {
-    Begin { run_id: u64 },
-    Report { phase: Phase, done: usize, total: usize },  // Phase: Scanning | Indexing { module } | Publishing
-    End { run_id: u64, files_indexed: usize },
+    Begin,
+    Report { phase: Phase, done: usize, total: usize },  // Scanning | Indexing { module } | Publishing
+    End { files_indexed: usize },
 }
 ```
 
-Progress counting uses RAII handles traveling with each file through the pipeline (Zed's `IndexingEntrySet`): drop = done, so counts can't desync. The status item only renders when `files_indexed_estimate > ~50`, keeping warm starts silent.
+UI policy is time-based, not count-based (IntelliJ's mechanism): the status item appears only if a run is still active ~800 ms after `Begin`, stays at least ~1 s once shown (no flicker), rotates labels with a minimum 500 ms dwell, and updates counts in place at ≤10 Hz. Warm starts and small deltas therefore show nothing, without a magic file-count threshold.
 
 ### UI: status bar
 
 New generic component in `faber-app/src/status_bar.rs`:
 
-- Renders at the bottom of `Workspace::render`, below the existing bottom panel, ~26 px, themed like the titlebar.
-- API: left/right slots of `AnyView` items, so future items (cursor position, git branch) plug in without changes.
-- `IndexingStatusItem`: observes `Entity<IndexStatus>`; renders a 70 px determinate bar plus a label. All strings via `t!()` with keys in `locales/en.toml` (run `/i18n-guardrails` before finishing).
+- Sticky strip (~26 px) at the bottom of `Workspace::render`, below the existing bottom panel, themed like the titlebar.
+- Left/right slots of `AnyView` items so future items (cursor position, git branch) plug in without changes.
+- `IndexingStatusItem` observes `Entity<IndexStatus>`, which the foreground drain task keeps updated (per-module `ModuleState` mirror plus current progress). Snapshot swap notification is explicit: publish events reach the drain task, which calls the finder's existing `on_index_updated` and `cx.notify`; `ArcSwap` loads happen at query time (ArcSwap itself has no subscription).
+- All strings via `t!()` with keys in `locales/en.toml`; run `/i18n-guardrails` before finishing.
 
-Settings: new `Reindex project` button in Settings > General (`settings_view.rs`), enabled when a root folder is set, sends `IndexTrigger::Manual`.
+Settings: `Reindex project` in Settings > General dispatches a `ReindexProject` GPUI action handled by `Workspace` (the settings view holds no workspace reference, and a handle global would be a new hidden coupling). Enabled when `ProjectRoot` is set. Manual maps to `Verify` scope.
 
 ### V1 modules
 
-- `files`: replaces `file_index.rs` as the finder's source. Entries carry rel_path, name, extension, ignored flag. `publish` materializes today's `FileIndexSnapshot` shape so `filter()`, nucleo matching, and the finder UI stay untouched. The 5-second staleness hack and `kick_index_scan` are deleted; the finder subscribes to snapshot swaps instead. The "include ignored" variant becomes a flag on entries rather than a second walk.
-- `symbols`: runs the existing outline tree-sitter queries (`outline.rs`) per accepted file, stores `Vec<Symbol { name, kind, range }>` per path. V1 exposes a read API (`symbols_for(path)`, `all_symbols()`); a project-wide symbol picker consumes it in a later PR. Open documents keep their live per-edit outline; the index covers the unopened rest (IntelliJ's memory-overlay idea, simplified: open-buffer data wins at query time).
+- `files` (META-only): entries carry rel_path, name, extension, ignored flag. `publish` materializes the moved `FileIndexSnapshot` (~20-40 MB at 200K entries, two generations briefly alive during a swap; acceptable, noted in the memory budget). The finder, nucleo matching, and `filter()` keep their shapes except the new `include_ignored` flag. `kick_index_scan` and the 5-second staleness hack are deleted.
+- `symbols` (TEXT | SYNTAX): runs the moved outline compute per accepted file, stores `Vec<OutlineItem>` per path. Its `Snapshot` is deliberately *not* materialized: it's a thin generation-stamped store handle; `symbols_for(path)` and future fuzzy queries iterate LMDB read transactions. Materializing 200K files of symbols would cost hundreds of MB and negate the zero-copy rationale for LMDB.
+- Open-buffer overlay: storing `OutlineItem` makes index data type-identical to live outlines, so the merge is a thin composition in `faber-app` (open documents answer from their live `Outline`; everything else from the index). The engine never learns about editor state.
 
 ### Feature gating
 
@@ -144,41 +219,51 @@ Per-module state, no global dumb mode:
 pub enum ModuleState { Cold, Building { done: usize, total: usize }, Ready { generation: u64 } }
 ```
 
-Consumers check state and degrade inline (finder shows an "indexing…" row). Nothing throws, nothing blocks.
+Consumers check the handle's state and degrade inline. During `Cold`, the finder still renders and opens history rows (they live in `state.toml`, independent of the index). Nothing throws, nothing blocks.
+
+### Observability
+
+`faber-index` takes a `log` dependency and emits: run start/end with trigger, dirty counts, and duration; self-heal rebuild reason; map-full resizes; watcher overflow fallbacks; walk truncation. `meta` records `last_rebuild_reason`, so a version-mismatch rebuild loop is diagnosable instead of reading as "faber is slow". A small `examples/dump.rs` prints any project's stamps and entries for inspection.
 
 ## Alternatives considered
 
-- SQLite WAL instead of LMDB: single file, transactional multi-DB commits, FTS5 for free. Chosen against in review: LMDB has zero-copy reads, no checkpointing, and a proven shape in Zed's index on the same stack. Revisit if multi-module transactions or tooling needs grow.
-- Flat bincode files per module: simplest, but whole-index rewrites per commit kill incrementality.
-- No persistence (rescan each start): today's model; fails the warm-start goal as modules and project sizes grow.
-- tokio: rejected, the codebase is GPUI-executor only and gains nothing from a second runtime.
+- SQLite WAL instead of LMDB: single file, transactional multi-DB commits, FTS5 for free. Chosen against in review: LMDB has zero-copy reads, no checkpointing, and a proven shape in Zed's index on the same stack. Revisit if multi-module transactions or tooling needs grow; the storage-agnostic `publish` iterator keeps the swap contained.
+- Injected `Spawner` trait instead of engine-owned std threads: keeps execution on GPUI's pool, but adds an abstraction with one real implementation and makes engine tests depend on an executor. Owned threads are simpler and deterministic under test; revisit if the app ever needs to throttle the engine against other background work.
+- Flat bincode files per module: whole-index rewrites per commit kill incrementality.
+- No persistence (rescan each start): today's model; fails the warm-start goal as content modules arrive.
+- tokio: the codebase is GPUI-executor plus threads; a second runtime buys nothing.
 - Global dumb mode (IntelliJ pre-2023): rejected for per-module gating; scanning-in-smart-mode is the industry direction.
 
 ## Migration plan (PRs ≤ 700 LOC each)
 
-1. `faber-index` crate: trait, store, scanner, pipeline, `files` module, unit tests. No app wiring.
-2. App wiring: engine spawn on folder open, triggers for open/save, finder reads published snapshots, delete `kick_index_scan` + staleness timer.
-3. Status bar component + indexing item + i18n keys.
-4. Watcher + `ExternalChanges` trigger + settings reindex button.
-5. `symbols` module + read API.
-6. CLAUDE.md section (indexing architecture rules, "new project-wide computation ⇒ new module, never a bespoke scan") and a `.claude/skills/index-module/SKILL.md` guide covering: trait contract, purity rule, key layout, version bumping, publish snapshots, and the testing pattern.
+1. Type moves: outline compute + `Outline`/`OutlineItem` to `faber-lang`; create `faber-index` with the moved finder data layer (`FileIndexSnapshot`, `filter()`, deps); delete `faber-editor/src/file_index.rs` scan half; re-point imports. No engine yet.
+2. Store: heed env, stamps, meta, batched writer, self-heal, GC, logging, `examples/dump.rs`, tempdir tests.
+3. Engine core: module trait, registry + typed handles, scanner merge-join, pipeline, trigger lattice, files module, progress emitter. Unit + tempdir tests.
+4. App wiring: engine spawn after first frame, warm-start publish, triggers for open/save, finder reads the handle, delete `kick_index_scan` + staleness timer.
+5. Status bar component + indexing item + i18n keys.
+6. Watcher + echo suppression + `ExternalChanges` + settings `ReindexProject` action.
+7. Symbols module + read API + open-buffer merge in `faber-app`.
+8. CLAUDE.md section (indexing rules: "new project-wide computation ⇒ new module, never a bespoke scan") and `.claude/skills/index-module/SKILL.md`: trait contract, purity rule, needs/accepts, key suffixes, publish snapshots, version bumping, testing pattern.
 
 ## Risks
 
-- LMDB map sizing: fixed at open; 1 GiB virtual reservation is fine on 64-bit but needs a resize story if ever exceeded (log + rebuild larger).
+- LMDB map sizing: fixed at open; 1 GiB virtual reservation is fine on 64-bit; recovery path specified above (double and retry).
+- RSS accounting: mmap pages are file-backed but count toward RSS when touched; a cold build will read above the 100 MB "typical" target even though pages are evictable. Measure with cache pages separated before judging the target.
 - Hashing cost on cold start: bounded by skipping files over 1 MB and binary sniffing (first-KB NUL check), pending PRD open question.
-- Watcher platform quirks (FSEvents coalescing, inotify limits): mitigated by the overflow-falls-back-to-scan rule.
-- Tree-sitter parse cost in the pipeline: bounded by `accepts` filters; only `symbols` requests parses, and only for supported languages.
-- Finder history (`ProjectHistory`) interplay: history stays in `state.toml`; the index stores no per-user data, keeping the cache safe to delete.
+- Watcher platform quirks (FSEvents coalescing, inotify limits): covered by overflow-degrades-to-Walk plus echo suppression.
+- Tree-sitter parse cost: bounded by `needs`/`accepts`; only symbols requests parses, only for supported languages.
+- Finder history (`ProjectHistory`) stays in `state.toml`; the index stores no per-user data, keeping the cache safe to delete.
 
 ## Testing
 
-- Modules are pure: table-driven unit tests on `index()` with string inputs, no filesystem.
-- Engine tests against tempdir fixtures: cold build, warm no-op, touch-without-change (mtime bump, same content ⇒ zero reindex), edit, delete, rename, version-bump rebuild, corrupt-env recovery.
-- Watcher tests behind a small `ChangeSource` trait so the debounce/coalesce logic tests without real fs events.
-- App layer: existing pattern, logic stays out of `faber-app`; the status item renders from a plain `IndexStatus` value.
+- Modules are pure: table-driven tests on `index()` with string inputs, and on `publish()` by piping `index()` output through the iterator, no filesystem or env.
+- Engine tests on tempdir fixtures with explicit mtimes via the `filetime` crate (no sleeps, no mtime-granularity flakes): cold build, warm no-op, touch-without-change (mtime bump, same content ⇒ zero reindex), edit, delete, rename, version-bump rebuild, corrupt-env recovery, error-marker retry.
+- Watcher: `coalesce()` is a pure function tested directly; the debounce sleep stays in an untested two-line loop.
+- App layer: the status item renders from a plain `IndexStatus` value; no logic in `faber-app` beyond wiring, per codebase convention.
 
 ## Open questions
 
-- Same as PRD, plus: should `publish` snapshots be incremental (apply diff) instead of rebuilt per run? Rebuild is O(entries) and fine at 200K; measure before complicating.
-- Store one shared stamp DB with per-module generation markers instead of per-module stamp DBs, if duplicate hashing shows up in profiles (hash is computed once per run regardless; only stamp storage duplicates).
+- Max file size to hash and index (proposed: skip over 1 MB plus binary sniff).
+- GC window for stale index dirs (proposed: 30 days).
+- Should project search consume the files snapshot in v1 to skip its own walk, or stay untouched until v2?
+- Should `publish` snapshots become incremental (apply diff) later? Rebuild is O(entries) and measured fine for the files module at 200K; symbols already avoids materializing. Measure before complicating.
