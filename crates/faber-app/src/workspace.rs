@@ -149,9 +149,14 @@ pub struct Workspace {
     index_engine: Option<Arc<faber_index::engine::IndexEngine>>,
     pub(crate) files_handle:
         Option<faber_index::module::SnapshotHandle<faber_index::files::FileIndexSnapshot>>,
+    pub(crate) symbols_handle:
+        Option<faber_index::module::SnapshotHandle<faber_index::SymbolsSnapshot>>,
+    /// Keeps the filesystem watcher threads alive for the current root folder.
+    _fs_watcher: Option<faber_index::watcher::FsWatcher>,
     index_status: gpui::Entity<IndexStatus>,
     status_bar: Entity<crate::status_bar::StatusBar>,
     file_finder: Option<Entity<FileFinderView>>,
+    symbol_finder: Option<Entity<crate::symbol_finder::SymbolFinderView>>,
     pane_resize: Option<PaneResize>,
     drop_hover: Option<(PaneId, DropZone)>,
 }
@@ -195,9 +200,12 @@ impl Workspace {
             autosave_generation: 0,
             index_engine: None,
             files_handle: None,
+            symbols_handle: None,
+            _fs_watcher: None,
             index_status,
             status_bar,
             file_finder: None,
+            symbol_finder: None,
             pane_resize: None,
             drop_hover: None,
         };
@@ -494,6 +502,8 @@ impl Workspace {
                 cx.set_global(ProjectRoot(Some(folder.clone())));
                 self.index_engine = None;
                 self.files_handle = None;
+                self.symbols_handle = None;
+                self._fs_watcher = None; // drops the old watcher threads
                 self.start_index_engine(cx);
                 let abs = folder.to_string_lossy().to_string();
                 self.record_state_change(cx, move |s| s.record_recent_project(&abs));
@@ -548,6 +558,11 @@ impl Workspace {
     /// No-op kept for call-site compatibility; the engine indexes everything in one pass.
     pub(crate) fn ensure_full_index(&mut self, _cx: &mut Context<Self>) {}
 
+    /// Clone the index store `Arc` for off-thread symbol queries.
+    pub(crate) fn index_store_arc(&self) -> Option<Arc<faber_index::store::IndexStore>> {
+        self.index_engine.as_ref().map(|e| e.store_arc())
+    }
+
     /// Start (or restart) the index engine for the current root folder.
     pub(crate) fn start_index_engine(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.root_folder.clone() else {
@@ -555,7 +570,8 @@ impl Workspace {
         };
         let registry = cx.global::<crate::Registry>().0.clone();
 
-        let mut engine = match faber_index::engine::IndexEngine::new(root, registry) {
+        let mut engine = match faber_index::engine::IndexEngine::new(root.clone(), registry.clone())
+        {
             Ok(e) => e,
             Err(e) => {
                 log::error!("index engine init failed: {e}");
@@ -566,10 +582,23 @@ impl Workspace {
         let files_handle = engine.register(faber_index::engine::FilesModule);
         self.files_handle = Some(files_handle);
 
+        let symbols_handle = engine.register(faber_index::SymbolsModule::new(registry));
+        self.symbols_handle = Some(symbols_handle);
+
         let progress_rx = engine.progress();
         let engine = Arc::new(engine);
         engine.clone().start();
         engine.request(faber_index::trigger::IndexTrigger::FolderOpened);
+
+        // Wire the filesystem watcher: external edits feed incremental ExternalChanges
+        // triggers, so the finder, symbol index, and search stay fresh automatically.
+        let engine_for_watcher = engine.clone();
+        self._fs_watcher = faber_index::watcher::FsWatcher::start(&root, move |trigger| {
+            engine_for_watcher.request(trigger);
+        })
+        .map_err(|e| log::warn!("fs watcher failed to start: {e}"))
+        .ok();
+
         self.index_engine = Some(engine);
 
         // Drain ProgressReceiver on a background polling loop → update Entity<IndexStatus>.
@@ -579,16 +608,15 @@ impl Workspace {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(50))
                     .await;
-                if let Some(ev) = progress_rx.try_recv() {
-                    if status
+                if let Some(ev) = progress_rx.try_recv()
+                    && status
                         .update(cx, |s, cx| {
                             s.current_progress = Some(ev);
                             cx.notify();
                         })
                         .is_err()
-                    {
-                        break; // workspace entity dropped; stop draining.
-                    }
+                {
+                    break; // workspace entity dropped; stop draining.
                 }
             }
         })
@@ -619,6 +647,37 @@ impl Workspace {
             self.focus_active(window, cx);
             cx.notify();
         }
+    }
+
+    // ── symbol finder ──────────────────────────────────────────────────────────
+
+    pub(crate) fn open_symbol_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.symbol_finder.is_some() {
+            // Already open: cmd-t again dismisses (same pattern as file finder).
+            self.close_symbol_finder(window, cx);
+            return;
+        }
+        let ws = cx.entity().downgrade();
+        let finder = cx.new(|cx| crate::symbol_finder::SymbolFinderView::new(ws, cx));
+        window.focus(&finder.read(cx).focus_handle);
+        self.symbol_finder = Some(finder);
+        cx.notify();
+    }
+
+    pub(crate) fn close_symbol_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.symbol_finder.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn on_open_symbol_finder(
+        &mut self,
+        _: &crate::OpenSymbolFinder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_symbol_finder(window, cx);
     }
 
     fn on_open_file_finder(
@@ -2146,6 +2205,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_open_project_search))
             .on_action(cx.listener(Self::on_open_file_finder))
             .on_action(cx.listener(Self::on_open_file_finder_preview))
+            .on_action(cx.listener(Self::on_open_symbol_finder))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_split_left))
             .on_action(cx.listener(Self::on_split_right))
@@ -2247,6 +2307,9 @@ impl Render for Workspace {
                 .when_some(self.file_finder.clone(), |el, finder| {
                     el.relative().child(finder)
                 })
+                .when_some(self.symbol_finder.clone(), |el, finder| {
+                    el.relative().child(finder)
+                })
                 .into_any();
         }
 
@@ -2285,7 +2348,8 @@ impl Render for Workspace {
                 Some(menu) => el.child(menu),
                 None => el,
             })
-            .when_some(self.file_finder.clone(), |el, finder| el.child(finder));
+            .when_some(self.file_finder.clone(), |el, finder| el.child(finder))
+            .when_some(self.symbol_finder.clone(), |el, finder| el.child(finder));
 
         root.into_any()
     }

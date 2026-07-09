@@ -21,6 +21,7 @@ pub struct ScrollbarDrag {
 /// - Adding `scrollbar_drag: Option<ScrollbarDrag>` to their view.
 /// - Registering a window-level `on_mouse_move` + `on_mouse_up` when dragging
 ///   (use `on_scrollbar_drag` / `on_scrollbar_release` helpers below).
+#[allow(clippy::too_many_arguments)]
 pub fn render_scrollbar(
     track_id: impl Into<gpui::ElementId> + Clone,
     thumb_id: impl Into<gpui::ElementId>,

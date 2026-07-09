@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use faber_editor::project_search::{FileSearchResult, ProjectSearchQuery, run};
+use faber_editor::project_search::{FileSearchResult, ProjectSearchQuery, filter_candidates, run};
 use faber_editor::{ChangeSet, Transaction};
 use ropey::Rope;
 
@@ -193,26 +193,30 @@ impl ProjectSearchView {
             return;
         };
 
-        // Collect open-file paths before going async.
+        // Collect data needed for the search before going async.
+        let ws = self.workspace.upgrade();
+        let all_editors = ws
+            .as_ref()
+            .map(|ws_entity| ws_entity.read(cx).all_editors(cx))
+            .unwrap_or_default();
+
+        // Open-files-only: scope to editor paths.
         let scope_paths: Option<Vec<PathBuf>> = if self.open_files_only {
-            self.workspace.upgrade().map(|ws_entity| {
-                let editors = ws_entity.read(cx).all_editors(cx);
-                editors
-                    .into_iter()
+            Some(
+                all_editors
+                    .iter()
                     .filter_map(|e| {
                         let p = e.read(cx).doc.path.clone();
-                        if p.as_os_str().is_empty() {
-                            None
-                        } else {
-                            Some(p)
-                        }
+                        if p.as_os_str().is_empty() { None } else { Some(p) }
                     })
-                    .collect()
-            })
+                    .collect(),
+            )
         } else {
             None
         };
 
+        // Index file list: when the snapshot is ready, avoid re-walking.
+        // Glob filtering is applied here so `run()` gets a pre-filtered list.
         let mut query = ProjectSearchQuery::new(&self.query);
         query.case_sensitive = self.case_sensitive;
         query.whole_word = self.whole_word;
@@ -222,6 +226,45 @@ impl ProjectSearchView {
         query.excludes = ProjectSearchQuery::parse_globs(&self.exclude);
         query.scope_paths = scope_paths;
 
+        // Build a candidate list from the index snapshot (skips WalkBuilder traversal).
+        // None when in open-files-only mode or the index isn't ready yet.
+        let candidates: Option<Vec<PathBuf>> = if query.scope_paths.is_none() {
+            ws.as_ref()
+                .and_then(|ws_entity| ws_entity.read(cx).files_handle.as_ref()?.load())
+                .map(|snap| {
+                    let all: Vec<PathBuf> = snap
+                        .entries
+                        .iter()
+                        .filter(|e| query.include_ignored || !e.is_ignored)
+                        .map(|e| root.join(&e.rel_path))
+                        .collect();
+                    filter_candidates(&all, &root, &query)
+                })
+        } else {
+            None
+        };
+
+        // Collect dirty open-buffer text before going async (rope snapshot).
+        // Only stringify buffers that will actually be searched (in candidates).
+        let candidate_set: HashSet<&PathBuf> = candidates
+            .as_ref()
+            .map(|c| c.iter().collect())
+            .unwrap_or_default();
+        let open_buffers: HashMap<PathBuf, String> = all_editors
+            .iter()
+            .filter_map(|e| {
+                let doc = &e.read(cx).doc;
+                if !doc.is_dirty() || doc.path.as_os_str().is_empty() {
+                    return None;
+                }
+                // When candidate_set is empty (no index/scope_paths mode), include all dirty files.
+                if !candidate_set.is_empty() && !candidate_set.contains(&doc.path) {
+                    return None;
+                }
+                Some((doc.path.clone(), doc.rope.to_string()))
+            })
+            .collect();
+
         let generation = self.search_generation;
         self.is_searching = true;
         self.has_searched = false;
@@ -230,12 +273,10 @@ impl ProjectSearchView {
         cx.notify();
 
         self.search_task = Some(cx.spawn(async move |view_entity, cx| {
-            // Debounce
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
 
-            // Check still valid after debounce.
             let still_valid = view_entity
                 .update(cx, |v, _| v.search_generation == generation)
                 .unwrap_or(false);
@@ -247,10 +288,11 @@ impl ProjectSearchView {
                 .background_executor()
                 .spawn(async move {
                     let mut file_results = Vec::new();
-                    let limit_reached = run(&query, &root, |r| {
-                        file_results.push(r);
-                        true
-                    });
+                    let limit_reached =
+                        run(&query, &root, candidates.as_deref(), &open_buffers, |r| {
+                            file_results.push(r);
+                            true
+                        });
                     (file_results, limit_reached)
                 })
                 .await;

@@ -9,7 +9,7 @@ pub mod symbols;
 pub mod trigger;
 pub mod watcher;
 
-pub use symbols::{SymbolsModule, SymbolsSnapshot, symbols_for};
+pub use symbols::{SymbolMatch, SymbolsModule, SymbolsSnapshot, project_symbols, symbols_for};
 
 #[cfg(test)]
 pub(crate) mod test_util;

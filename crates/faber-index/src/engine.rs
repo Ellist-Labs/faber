@@ -161,7 +161,7 @@ struct RegisteredModule {
 /// channel feeding the run loop.
 pub struct IndexEngine {
     root: PathBuf,
-    store: IndexStore,
+    store: Arc<IndexStore>,
     registry: Arc<LanguageRegistry>,
     modules: Mutex<Vec<RegisteredModule>>,
     trigger_tx: crossbeam_channel::Sender<IndexTrigger>,
@@ -175,7 +175,7 @@ impl IndexEngine {
     /// Open the store under `index_dir` scope and build an engine rooted at
     /// `root`. Registration happens next via [`Self::register`], then [`start`].
     pub fn new(root: PathBuf, registry: Arc<LanguageRegistry>) -> Result<Self> {
-        let store = IndexStore::open(&root)?;
+        let store = Arc::new(IndexStore::open(&root)?);
         store.touch_last_opened().ok();
         let (trigger_tx, trigger_rx) = crossbeam_channel::unbounded();
         let (progress_emitter, progress_receiver) = progress_channel();
@@ -277,6 +277,11 @@ impl IndexEngine {
     /// Borrow the underlying store (e.g. for symbol queries from faber-app).
     pub fn store(&self) -> &IndexStore {
         &self.store
+    }
+
+    /// Clone the store `Arc` for off-thread queries (e.g. symbol picker).
+    pub fn store_arc(&self) -> Arc<IndexStore> {
+        self.store.clone()
     }
 
     /// Spawn the run loop on its own thread. Consumes an `Arc<Self>` so the loop

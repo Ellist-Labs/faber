@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -76,15 +77,9 @@ pub struct FileSearchResult {
 
 // ── internal: match a single file ────────────────────────────────────────────
 
-fn match_file(query: &Query, path: &Path) -> Option<FileSearchResult> {
-    let content = std::fs::read(path).ok()?;
-    // Skip binary files — bail on NUL byte.
-    if content.contains(&0u8) {
-        return None;
-    }
-    let text = String::from_utf8(content).ok()?;
-
-    let whole_file_matches = query.all_matches_str(&text);
+/// Match `text` against `query`, returning hits localised per line.
+fn match_text(query: &Query, path: &Path, text: &str) -> Option<FileSearchResult> {
+    let whole_file_matches = query.all_matches_str(text);
     if whole_file_matches.is_empty() {
         return None;
     }
@@ -145,20 +140,84 @@ fn match_file(query: &Query, path: &Path) -> Option<FileSearchResult> {
     }
 }
 
+fn match_file(query: &Query, path: &Path) -> Option<FileSearchResult> {
+    let content = std::fs::read(path).ok()?;
+    // Skip binary files — bail on NUL byte.
+    if content.contains(&0u8) {
+        return None;
+    }
+    let text = String::from_utf8(content).ok()?;
+    match_text(query, path, &text)
+}
+
 // ── public API ────────────────────────────────────────────────────────────────
 
 /// Maximum total matches returned before a "limit reached" flag is raised.
 pub const MATCH_LIMIT: usize = 10_000;
 
+fn search_one(
+    faber_query: &Query,
+    path: &Path,
+    open_buffers: &HashMap<PathBuf, String>,
+) -> Option<FileSearchResult> {
+    if let Some(text) = open_buffers.get(path) {
+        match_text(faber_query, path, text)
+    } else {
+        match_file(faber_query, path)
+    }
+}
+
+/// Filter `candidates` by the include/exclude globs in `query`, returning the
+/// subset that should be searched. Paths that don't match includes (when set)
+/// or that match excludes are dropped.
+///
+/// Pure function — no I/O, testable in isolation.
+pub fn filter_candidates(
+    candidates: &[PathBuf],
+    root: &Path,
+    query: &ProjectSearchQuery,
+) -> Vec<PathBuf> {
+    if query.includes.is_empty() && query.excludes.is_empty() {
+        return candidates.to_vec();
+    }
+    let overrides = {
+        let mut ob = OverrideBuilder::new(root);
+        for pat in &query.excludes {
+            let _ = ob.add(&format!("!{pat}"));
+        }
+        for pat in &query.includes {
+            let _ = ob.add(pat);
+        }
+        ob.build().ok()
+    };
+    let Some(ov) = overrides else {
+        return candidates.to_vec();
+    };
+    candidates
+        .iter()
+        .filter(|p| {
+            let rel = p.strip_prefix(root).unwrap_or(p);
+            !ov.matched(rel, false).is_ignore()
+        })
+        .cloned()
+        .collect()
+}
+
 /// Run a project-wide search, calling `on_batch` for each file that has hits.
 /// Returns `true` if the match limit was reached.
 ///
-/// Designed to be called from a background executor task. Dropping the
-/// receiving side of the batch channel (or returning `false` from `on_batch`)
-/// cancels the walk.
+/// `candidates` — when `Some`, search only these paths (index-provided list);
+/// when `None`, fall back to a `WalkBuilder` traversal of `root`.
+///
+/// `open_buffers` — in-memory text for dirty open documents, keyed by absolute
+/// path. When a candidate is found here its content is used instead of disk.
+///
+/// Designed to be called from a background executor task.
 pub fn run(
     query: &ProjectSearchQuery,
     root: &Path,
+    candidates: Option<&[PathBuf]>,
+    open_buffers: &HashMap<PathBuf, String>,
     mut on_batch: impl FnMut(FileSearchResult) -> bool,
 ) -> bool {
     if query.is_empty() {
@@ -174,9 +233,9 @@ pub fn run(
     let mut limit_reached = false;
 
     if let Some(scope) = &query.scope_paths {
-        // Open-files-only mode: iterate the fixed path list directly.
+        // Open-files-only: iterate the fixed path list.
         for path in scope {
-            if let Some(result) = match_file(&faber_query, path) {
+            if let Some(result) = search_one(&faber_query, path, open_buffers) {
                 total_matches += result.hits.len();
                 let keep_going = on_batch(result);
                 if !keep_going || total_matches >= MATCH_LIMIT {
@@ -188,12 +247,26 @@ pub fn run(
         return limit_reached;
     }
 
-    // Build override (include/exclude globs).
+    if let Some(paths) = candidates {
+        // Index-provided list: skip the WalkBuilder traversal.
+        for path in paths {
+            if let Some(result) = search_one(&faber_query, path, open_buffers) {
+                total_matches += result.hits.len();
+                let keep_going = on_batch(result);
+                if !keep_going || total_matches >= MATCH_LIMIT {
+                    limit_reached = total_matches >= MATCH_LIMIT;
+                    break;
+                }
+            }
+        }
+        return limit_reached;
+    }
+
+    // Fallback: WalkBuilder traversal (cold start / index not yet ready).
     let overrides = {
         let mut ob = OverrideBuilder::new(root);
         for pat in &query.excludes {
-            // Prefix with ! to exclude.
-            let _ = ob.add(&format!("!{}", pat));
+            let _ = ob.add(&format!("!{pat}"));
         }
         for pat in &query.includes {
             let _ = ob.add(pat);
@@ -214,7 +287,7 @@ pub fn run(
             continue;
         }
         let path = entry.path();
-        if let Some(result) = match_file(&faber_query, path) {
+        if let Some(result) = search_one(&faber_query, path, open_buffers) {
             total_matches += result.hits.len();
             let keep_going = on_batch(result);
             if !keep_going || total_matches >= MATCH_LIMIT {
@@ -242,6 +315,10 @@ mod tests {
         path
     }
 
+    fn no_bufs() -> HashMap<PathBuf, String> {
+        HashMap::new()
+    }
+
     #[test]
     fn finds_matches_across_files() {
         let dir = TempDir::new().unwrap();
@@ -251,7 +328,7 @@ mod tests {
 
         let q = ProjectSearchQuery::new("hello");
         let mut results = Vec::new();
-        run(&q, dir.path(), |r| {
+        run(&q, dir.path(), None, &no_bufs(), |r| {
             results.push(r);
             true
         });
@@ -269,7 +346,7 @@ mod tests {
         let mut q = ProjectSearchQuery::new("hello");
         q.case_sensitive = true;
         let mut results = Vec::new();
-        run(&q, dir.path(), |r| {
+        run(&q, dir.path(), None, &no_bufs(), |r| {
             results.push(r);
             true
         });
@@ -286,7 +363,7 @@ mod tests {
 
         let q = ProjectSearchQuery::new("hello");
         let mut results = Vec::new();
-        run(&q, dir.path(), |r| {
+        run(&q, dir.path(), None, &no_bufs(), |r| {
             results.push(r);
             true
         });
@@ -302,7 +379,7 @@ mod tests {
         let mut q = ProjectSearchQuery::new("hello");
         q.scope_paths = Some(vec![p1.clone()]);
         let mut results = Vec::new();
-        run(&q, dir.path(), |r| {
+        run(&q, dir.path(), None, &no_bufs(), |r| {
             results.push(r);
             true
         });
@@ -323,7 +400,7 @@ mod tests {
 
         let q = ProjectSearchQuery::new("hello");
         let mut results = Vec::new();
-        run(&q, dir.path(), |r| {
+        run(&q, dir.path(), None, &no_bufs(), |r| {
             results.push(r);
             true
         });
@@ -333,5 +410,72 @@ mod tests {
         assert_eq!(hit.col, 0); // first match starts at char 0 of preview
         // Two "hello" matches on the same line.
         assert_eq!(hit.ranges.len(), 2);
+    }
+
+    #[test]
+    fn candidates_list_skips_unlisted_files() {
+        let dir = TempDir::new().unwrap();
+        let p1 = write_file(&dir, "a.rs", "hello world");
+        write_file(&dir, "b.rs", "hello there");
+
+        let q = ProjectSearchQuery::new("hello");
+        let mut results = Vec::new();
+        run(&q, dir.path(), Some(&[p1.clone()]), &no_bufs(), |r| {
+            results.push(r);
+            true
+        });
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, p1);
+    }
+
+    #[test]
+    fn open_buffer_overrides_disk() {
+        let dir = TempDir::new().unwrap();
+        let p1 = write_file(&dir, "a.rs", "no match on disk");
+        let mut bufs = HashMap::new();
+        bufs.insert(p1.clone(), "hello in memory".to_string());
+
+        let q = ProjectSearchQuery::new("hello");
+        let mut results = Vec::new();
+        run(&q, dir.path(), Some(&[p1.clone()]), &bufs, |r| {
+            results.push(r);
+            true
+        });
+        assert_eq!(
+            results.len(),
+            1,
+            "buffer text should match despite disk mismatch"
+        );
+        assert_eq!(results[0].path, p1);
+    }
+
+    #[test]
+    fn filter_candidates_include_glob() {
+        let dir = TempDir::new().unwrap();
+        let paths = vec![
+            dir.path().join("src/lib.rs"),
+            dir.path().join("src/main.rs"),
+            dir.path().join("Cargo.toml"),
+        ];
+        let mut q = ProjectSearchQuery::new("x");
+        q.includes = vec!["*.rs".to_string()];
+        let filtered = filter_candidates(&paths, dir.path(), &q);
+        assert_eq!(filtered.len(), 2);
+        assert!(
+            filtered
+                .iter()
+                .all(|p| p.extension().is_some_and(|e| e == "rs"))
+        );
+    }
+
+    #[test]
+    fn filter_candidates_exclude_glob() {
+        let dir = TempDir::new().unwrap();
+        let paths = vec![dir.path().join("src/lib.rs"), dir.path().join("Cargo.lock")];
+        let mut q = ProjectSearchQuery::new("x");
+        q.excludes = vec!["*.lock".to_string()];
+        let filtered = filter_candidates(&paths, dir.path(), &q);
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].to_string_lossy().ends_with("lib.rs"));
     }
 }
