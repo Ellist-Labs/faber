@@ -74,6 +74,10 @@ right = "Right"
 left = "Left"
 bottom = "Bottom"
 
+[settings.reindex]
+title = "Reindex project"
+description = "Re-verify and rebuild the file and symbol index for this project."
+
 [common]
 on = "On"
 off = "Off"
@@ -160,6 +164,10 @@ preview_loading = "Loading…"
 preview_too_large = "File is too large to preview"
 preview_binary = "Binary file"
 preview_unreadable = "Can't read this file"
+
+[status_bar]
+scanning = "Scanning files…"
+indexing = "Indexing symbols…"
 
 [search]
 placeholder = "Search…"

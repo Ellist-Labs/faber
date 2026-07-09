@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use faber_editor::file_index::{FileIndexSnapshot, FinderQuery, filter};
+use faber_index::files::{FileIndexSnapshot, FinderQuery, filter};
 use faber_settings::PreviewPosition;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, Context, FocusHandle, Focusable,
@@ -140,8 +140,12 @@ impl FileFinderView {
     }
 
     fn snapshot(&self, cx: &App) -> Option<Arc<FileIndexSnapshot>> {
-        let ws = self.workspace.upgrade()?;
-        ws.read(cx).index_snapshot(self.include_ignored)
+        self.workspace
+            .upgrade()?
+            .read(cx)
+            .files_handle
+            .as_ref()?
+            .load()
     }
 
     fn history(&self, cx: &App) -> Vec<String> {
@@ -153,12 +157,6 @@ impl FileFinderView {
                 .to_vec(),
             None => Vec::new(),
         }
-    }
-
-    /// Called by the workspace when a background scan lands. Runs inside a
-    /// Workspace update, so the re-filter (which reads it back) is deferred.
-    pub fn on_index_updated(&mut self, cx: &mut Context<Self>) {
-        self.schedule_filter_deferred(cx);
     }
 
     // ── filtering ──────────────────────────────────────────────────────────────
@@ -180,6 +178,7 @@ impl FileFinderView {
             whole_word: self.whole_word,
             regex: self.regex_mode,
             mask: self.mask.clone(),
+            ..Default::default()
         };
         self.filtering = true;
         cx.notify();

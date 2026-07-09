@@ -5,6 +5,8 @@ use gpui::{
 };
 use rust_i18n::t;
 
+use crate::ReindexProject;
+
 use crate::theme::{ActiveTheme, RuntimeTheme, apply_settings};
 use crate::ui::{Button, Divider, Icon, IconName, Label, h_flex, v_flex};
 
@@ -389,6 +391,43 @@ impl SettingsView {
                     .child(self.render_control(entry_ix, entry, settings, t, cx)),
             )
     }
+
+    /// Render the "Reindex project" button row. Enabled only when a project is open.
+    fn render_reindex_row(&self, _t: &RuntimeTheme, cx: &mut Context<Self>) -> Div {
+        let has_project = cx.global::<crate::ProjectRoot>().0.is_some();
+        div()
+            .flex()
+            .flex_wrap()
+            .justify_between()
+            .items_start()
+            .gap_4()
+            .py_3()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .flex_1()
+                    .min_w(px(200.0))
+                    .child(Label::new(t!("settings.reindex.title").to_string()))
+                    .child(
+                        Label::new(t!("settings.reindex.description").to_string())
+                            .caption()
+                            .muted(),
+                    ),
+            )
+            .child(
+                div().flex_shrink_0().child(
+                    Button::new("reindex", t!("settings.reindex.title").to_string())
+                        .list()
+                        .caption()
+                        .when(!has_project, Button::disabled)
+                        .when(has_project, |btn| {
+                            btn.on_click(cx.listener(|_, _, window, cx| {
+                                window.dispatch_action(Box::new(ReindexProject), cx);
+                            }))
+                        }),
+                ),
+            )
+    }
 }
 
 impl Focusable for SettingsView {
@@ -403,8 +442,22 @@ impl Render for SettingsView {
         let settings = cx.global::<SettingsStore>().0.clone();
 
         let mut entry_ix = 0;
-        let sections: Vec<Div> = sections()
-            .into_iter()
+        let mut section_defs = sections().into_iter();
+
+        // General section — rendered first so we can append the Reindex row.
+        let general_section = section_defs.next().map(|section| {
+            v_flex()
+                .gap_1()
+                .child(Label::new(section.title.clone()).heading())
+                .child(Divider::horizontal())
+                .children(section.entries.iter().map(|entry| {
+                    entry_ix += 1;
+                    self.render_entry(entry_ix, entry, &settings, &t, cx)
+                }))
+                .child(self.render_reindex_row(&t, cx))
+        });
+
+        let remaining_sections: Vec<Div> = section_defs
             .map(|section| {
                 v_flex()
                     .gap_1()
@@ -438,7 +491,8 @@ impl Render for SettingsView {
                             .text_color(t.text)
                             .child(t!("settings.title").to_string()),
                     )
-                    .children(sections),
+                    .children(general_section)
+                    .children(remaining_sections),
             )
     }
 }
