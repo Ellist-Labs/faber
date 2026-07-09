@@ -132,6 +132,7 @@ pub struct Settings {
     /// File-finder preview pane position.
     pub file_finder_preview_position: PreviewPosition,
     pub reopen_last_session: bool,
+    pub restore_split_layout: bool,
 }
 
 impl Default for Settings {
@@ -146,6 +147,7 @@ impl Default for Settings {
             language: Language::default(),
             file_finder_preview_position: PreviewPosition::default(),
             reopen_last_session: false,
+            restore_split_layout: true,
         }
     }
 }
@@ -207,6 +209,7 @@ mod tests {
             language: Language::En,
             file_finder_preview_position: PreviewPosition::Bottom,
             reopen_last_session: true,
+            restore_split_layout: false,
         };
         save_to(&s, &path).unwrap();
         assert_eq!(load_from(&path), s);

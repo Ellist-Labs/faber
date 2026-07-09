@@ -8,6 +8,7 @@ mod file_preview;
 mod i18n;
 mod input_helpers;
 mod markdown_preview;
+mod pane;
 mod project_search_view;
 mod settings_view;
 mod sidebar;
@@ -135,6 +136,10 @@ actions!(
         OpenFileFinder,
         OpenFileFinderPreview,
         Quit,
+        SplitLeft,
+        SplitRight,
+        SplitUp,
+        SplitDown,
     ]
 );
 
@@ -284,6 +289,11 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-w", CloseTab, Some("Workspace")),
         KeyBinding::new("ctrl-tab", NextTab, Some("Workspace")),
         KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Workspace")),
+        // Split panes
+        KeyBinding::new("cmd-alt-left", SplitLeft, Some("Workspace")),
+        KeyBinding::new("cmd-alt-right", SplitRight, Some("Workspace")),
+        KeyBinding::new("cmd-alt-up", SplitUp, Some("Workspace")),
+        KeyBinding::new("cmd-alt-down", SplitDown, Some("Workspace")),
         // Markdown — cmd-b shadows ToggleSidebar while markdown editor is focused (VS Code parity)
         KeyBinding::new("cmd-shift-v", TogglePreview, Some("Editor && markdown")),
         KeyBinding::new("cmd-b", BoldSelection, Some("Editor && markdown")),

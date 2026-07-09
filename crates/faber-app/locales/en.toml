@@ -61,6 +61,10 @@ on_window_change = "On Window Change"
 title = "Reopen Last Session"
 desc = "Reopen the last project and files automatically when Faber starts."
 
+[settings.restore_split_layout]
+title = "Restore Split Layout"
+desc = "Reopen the split pane layout from the last session. Requires Reopen Last Session to be enabled."
+
 [settings.finder_preview]
 title = "File Finder Preview"
 desc = "Where the file finder preview pane appears (⌥⌘P)."
@@ -95,6 +99,10 @@ close_others = "Close Others"
 close_all = "Close All"
 close_left = "Close to the Left"
 close_right = "Close to the Right"
+split_left = "Split Left"
+split_right = "Split Right"
+split_up = "Split Up"
+split_down = "Split Down"
 copy_path = "Copy Path"
 copy_relative_path = "Copy Relative Path"
 reveal_in_finder = "Reveal in Finder"
