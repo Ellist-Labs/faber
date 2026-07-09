@@ -1922,7 +1922,7 @@ impl ProjectSearchView {
                                     }
                                 });
                             })
-                            .child("Open File"),
+                            .child(t!("project_search.open_file").to_string()),
                     )
             }
             ResultRow::ExpandAbove { file_idx } => {
@@ -1959,7 +1959,7 @@ impl ProjectSearchView {
                             .text_size(px(t.font_size_caption - 1.))
                             .text_color(t.text_subtle)
                             .font_family(t.ui_family.clone())
-                            .child("more above"),
+                            .child(t!("project_search.expand_above").to_string()),
                     )
             }
             ResultRow::ContextLine {
@@ -2046,7 +2046,7 @@ impl ProjectSearchView {
                             .text_size(px(t.font_size_caption - 1.))
                             .text_color(t.text_subtle)
                             .font_family(t.ui_family.clone())
-                            .child("more below"),
+                            .child(t!("project_search.expand_below").to_string()),
                     )
             }
             ResultRow::Hit { file_idx, hit_idx } => {

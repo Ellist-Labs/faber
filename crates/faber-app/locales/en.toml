@@ -3,14 +3,14 @@
 # Rules: never hardcode user-facing strings in code; always add a key here first.
 
 [welcome]
-tagline = "Lean, GPU-accelerated code editor"
-get_started = "GET STARTED"
+tagline = "Made to last, not to bloat"
+get_started = "Get Started"
 new_file = "New File"
 open_file = "Open File…"
 open_folder = "Open Folder…"
-configure = "CONFIGURE"
+configure = "Configure"
 open_settings = "Open Settings"
-recent = "RECENT"
+recent = "Recent"
 recent_projects = "Projects"
 recent_files = "Files"
 
@@ -28,15 +28,15 @@ desc = "Show line numbers in the gutter."
 
 [settings.auto_save]
 title = "Auto Save"
-desc = "Controls when dirty files are saved automatically."
+desc = "Choose when files with unsaved changes are saved automatically."
 
 [settings.auto_save_delay]
 title = "Auto Save Delay"
-desc = "Idle time before a dirty file is saved (After Delay only)."
+desc = "Idle time before a file with unsaved changes is saved. Applies only when Auto Save is set to After Delay."
 
 [settings.font_size]
 title = "Font Size"
-desc = "Base font size in pixels; the entire application scales from it."
+desc = "Base font size in pixels. The whole interface scales from this value."
 
 [settings.scrollbar]
 title = "Scrollbar"
@@ -44,11 +44,11 @@ desc = "Show an interactive scrollbar on scrollable views."
 
 [settings.indent_guides]
 title = "Indent Guides"
-desc = "Show vertical guide lines in the file explorer to indicate folder hierarchy."
+desc = "Show vertical lines in the file explorer to indicate folder nesting."
 
 [settings.language]
 title = "Language"
-desc = "Interface language. Restart may be required for some changes."
+desc = "Interface language. Some changes may require a restart."
 system = "Use System Language"
 
 [settings.auto_save_options]
@@ -59,7 +59,7 @@ on_window_change = "On Window Change"
 
 [settings.reopen_last_session]
 title = "Reopen Last Session"
-desc = "Automatically reopen the last project and files when Faber starts."
+desc = "Reopen the last project and files automatically when Faber starts."
 
 [settings.finder_preview]
 title = "File Finder Preview"
@@ -102,7 +102,8 @@ reveal_in_explorer = "Reveal in File Explorer"
 
 [dialog]
 save_changes = "Save changes to %{name}?"
-unsaved_count = "%{count} file(s) have unsaved changes."
+unsaved_count_one = "%{count} file has unsaved changes."
+unsaved_count_other = "%{count} files have unsaved changes."
 save = "Save"
 dont_save = "Don't Save"
 cancel = "Cancel"
@@ -138,7 +139,7 @@ no_matches = "No matching headings"
 [file_finder]
 placeholder = "Search files by name…"
 no_matches = "No files matched"
-no_history = "Files you open will show up here"
+no_history = "Files you open will appear here"
 open_folder_hint = "Open a folder to search files"
 indexing = "Indexing project files…"
 mask_all = "All"
@@ -150,14 +151,14 @@ preview_empty = "Select a file to preview"
 preview_loading = "Loading…"
 preview_too_large = "File is too large to preview"
 preview_binary = "Binary file"
-preview_unreadable = "Can't read file"
+preview_unreadable = "Can't read this file"
 
 [search]
 placeholder = "Search…"
 replace_placeholder = "Replace with…"
 replace = "Replace"
 replace_all = "Replace All"
-no_matches = "no matches"
+no_matches = "No matches"
 
 [tab]
 settings = "Settings"
@@ -170,7 +171,7 @@ include_placeholder = "Include files (e.g. *.rs, src/**)"
 exclude_placeholder = "Exclude files (e.g. *.lock, target/**)"
 open_files_only = "Open files only"
 include_ignored = "Include ignored"
-no_results = "No results"
+no_results = "No matches"
 searching = "Searching…"
 results_count = "%{matches} results in %{files} files"
 limit_reached = "%{matches}+ results (limit reached)"
@@ -179,7 +180,7 @@ expand_all = "Expand All"
 filters = "Filters"
 replace = "Replace"
 replace_all = "Replace All"
-confirm_replace = "Replace %{count} match(es) in %{files} file(s)? Files not open in an editor will be written directly to disk."
+confirm_replace = "Replace %{count} matches in %{files} files? Files not open in an editor will be written directly to disk."
 empty_title = "Search All Files"
 empty_hint = "Type to search across your project"
 empty_tip_case = "Match case"
@@ -189,3 +190,6 @@ empty_tip_filter = "Filter by path"
 empty_tip_replace = "Find and replace"
 no_results_title = "No Results Found"
 no_results_hint = "No files matched your search in this project."
+open_file = "Open File"
+expand_above = "Show more above"
+expand_below = "Show more below"

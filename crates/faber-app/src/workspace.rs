@@ -998,7 +998,11 @@ impl Workspace {
         let count = dirty.len();
         let rx = window.prompt(
             PromptLevel::Warning,
-            &rust_i18n::t!("dialog.unsaved_count", count = count),
+            &if count == 1 {
+                rust_i18n::t!("dialog.unsaved_count_one", count = count)
+            } else {
+                rust_i18n::t!("dialog.unsaved_count_other", count = count)
+            },
             None,
             &[
                 rust_i18n::t!("dialog.save_all_quit").as_ref(),

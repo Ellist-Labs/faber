@@ -2,7 +2,7 @@
 name = "faber"
 version = "0.1.0"
 edition = "2024"
-description = "A lean, fast, GPU-accelerated code editor"
+description = "An opinionated, GPU-accelerated code editor built in Rust."
 license = "MIT"
 
 [[bin]]
