@@ -194,6 +194,8 @@ actions!(
     ]
 );
 
+actions!(confirm, [CfConfirm, CfDismiss]);
+
 // ── main ───────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -385,6 +387,9 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-right", PsInputMoveEnd, Some("ProjectSearch")),
         KeyBinding::new("home", PsInputMoveStart, Some("ProjectSearch")),
         KeyBinding::new("end", PsInputMoveEnd, Some("ProjectSearch")),
+        // Confirm modal
+        KeyBinding::new("enter", CfConfirm, Some("ConfirmModal")),
+        KeyBinding::new("escape", CfDismiss, Some("ConfirmModal")),
         // Replace bar
         KeyBinding::new("escape", CloseSearch, Some("ReplaceBar")),
         KeyBinding::new("enter", ReplaceOne, Some("ReplaceBar")),

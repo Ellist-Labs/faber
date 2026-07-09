@@ -4,14 +4,18 @@ pub mod icon;
 pub mod input;
 pub mod key_hint;
 pub mod label;
+pub mod modal;
 pub mod scrollbar;
-pub mod surface;
+// surface.rs absorbed into modal.rs (Wave 2 adoption)
 
 pub use button::Button;
 pub use divider::Divider;
 pub use icon::{Icon, IconName};
 pub use key_hint::KeyHint;
 pub use label::Label;
+pub use modal::{
+    modal_backdrop, modal_container, modal_footer, popover_container, render_matched_text,
+};
 pub use scrollbar::{ScrollbarDrag, render_scrollbar};
 
 use gpui::{Div, Styled as _, div};

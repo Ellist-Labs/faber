@@ -164,6 +164,6 @@ fn material() -> MaterialOpacity {
     MaterialOpacity {
         chrome: 1.0, // opaque now; reduce to ~0.85 when blur lands
         overlay: 1.0,
-        scrim: 0.5,
+        scrim: 0.35,
     }
 }

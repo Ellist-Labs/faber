@@ -28,13 +28,21 @@ use crate::markdown_preview::MarkdownPreviewView;
 use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
 use crate::ui::scrollbar::{start_drag, update_drag};
-use crate::ui::{IconName, ScrollbarDrag, render_scrollbar};
+use crate::ui::{
+    IconName, ScrollbarDrag, modal_backdrop, modal_container, modal_footer, render_scrollbar,
+};
 use rust_i18n::t;
 
 // ── layout ─────────────────────────────────────────────────────────────────────
 // Line height and char width live on RuntimeTheme (settings-scaled).
 
 const GUTTER_COLS: f32 = 6.0;
+
+// ── outline overlay geometry ───────────────────────────────────────────────────
+const OUTLINE_INPUT_ROW_H: f32 = 45.;
+const OUTLINE_FOOTER_H: f32 = 30.;
+const OUTLINE_MODAL_H: f32 = 480.;
+const OUTLINE_BODY_H: f32 = OUTLINE_MODAL_H - OUTLINE_INPUT_ROW_H - OUTLINE_FOOTER_H;
 
 // ── actions ────────────────────────────────────────────────────────────────────
 
@@ -2907,6 +2915,7 @@ impl EditorView {
             .flex()
             .flex_row()
             .items_center()
+            .h(px(OUTLINE_INPUT_ROW_H))
             .px_4()
             .py(px(10.))
             .border_b_1()
@@ -3002,12 +3011,10 @@ impl EditorView {
 
         let list_body: AnyElement = if outline.items.is_empty() {
             div()
-                .flex_1()
+                .h(px(OUTLINE_BODY_H))
                 .flex()
-                .min_h(px(160.))
                 .items_center()
                 .justify_center()
-                .py(px(24.))
                 .font_family(t.ui_family.clone())
                 .text_size(px(t.font_size_caption))
                 .text_color(t.text_muted)
@@ -3015,12 +3022,10 @@ impl EditorView {
                 .into_any()
         } else if filtered.is_empty() {
             div()
-                .flex_1()
+                .h(px(OUTLINE_BODY_H))
                 .flex()
-                .min_h(px(160.))
                 .items_center()
                 .justify_center()
-                .py(px(24.))
                 .font_family(t.ui_family.clone())
                 .text_size(px(t.font_size_caption))
                 .text_color(t.text_muted)
@@ -3109,48 +3114,39 @@ impl EditorView {
                 .collect();
 
             div()
-                .id("outline-list")
+                .h(px(OUTLINE_BODY_H))
+                .overflow_hidden()
+                .flex()
                 .flex_col()
-                .overflow_y_scroll()
-                .min_h(px(160.))
-                .max_h(px(440.))
-                .children(entries)
+                .child(
+                    div()
+                        .id("outline-list")
+                        .flex_col()
+                        .h_full()
+                        .overflow_y_scroll()
+                        .children(entries),
+                )
                 .into_any()
         };
 
-        // ── modal container ───────────────────────────────────────────────────
-        // elevation: shadow_lg + large rounded corners clipped via overflow_hidden (Zed pattern).
-        // stop_propagation on inner click so backdrop's on_mouse_down doesn't fire.
-        let modal = div()
-            .id("outline-modal")
-            .occlude()
+        // ── modal container — elevation: modal_container helper (shadow_lg + rounded_lg) ──
+        let modal = modal_container("outline-modal", t)
+            .h(px(OUTLINE_MODAL_H))
             .w(px(600.))
-            .bg(t.bg_elevated)
-            .rounded_lg()
-            .border_1()
-            .border_color(t.border)
-            .shadow_lg()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(search_input)
-            .child(list_body);
+            .child(list_body)
+            .child(modal_footer(
+                t,
+                &[
+                    ("↑↓", t!("outline_overlay.hint_navigate").to_string()),
+                    ("↵", t!("outline_overlay.hint_jump").to_string()),
+                    ("⎋", t!("outline_overlay.hint_dismiss").to_string()),
+                ],
+            ));
 
-        // ── full-area backdrop — absolute+inset_0 so it fills the editor pane ──
-        // (root has .relative(), so absolute+inset_0 always covers it exactly,
-        //  and flex centering keeps the modal centered on resize — Zed modal_layer idiom)
+        // ── centered backdrop: absolute+inset_0 fills the editor pane ────────
         deferred(
-            div()
-                .id("outline-backdrop")
-                .absolute()
-                .inset_0()
-                .occlude()
-                .flex()
-                .items_start()
-                .justify_center()
-                .pt(px(64.))
-                .bg(gpui::hsla(0., 0., 0., 0.35))
+            modal_backdrop("outline-backdrop", t)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, _, window, cx| {

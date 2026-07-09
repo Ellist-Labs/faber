@@ -114,8 +114,8 @@ reveal_in_explorer = "Reveal in File Explorer"
 
 [dialog]
 save_changes = "Save changes to %{name}?"
-unsaved_count_one = "%{count} file has unsaved changes."
-unsaved_count_other = "%{count} files have unsaved changes."
+unsaved_count_one = "%{count} file has unsaved changes. Save before quitting?"
+unsaved_count_other = "%{count} files have unsaved changes. Save before quitting?"
 save = "Save"
 dont_save = "Don't Save"
 cancel = "Cancel"
@@ -147,6 +147,9 @@ untitled = "Untitled"
 placeholder = "Go to heading…"
 no_headings = "No headings in this file"
 no_matches = "No matching headings"
+hint_navigate = "Navigate"
+hint_jump = "Jump to"
+hint_dismiss = "Dismiss"
 
 [file_finder]
 placeholder = "Search files by name…"
@@ -170,6 +173,9 @@ placeholder = "Go to symbol in project…"
 no_matches = "No symbols matched"
 open_folder_hint = "Open a folder to search symbols"
 indexing = "Indexing project symbols…"
+hint_navigate = "Navigate"
+hint_open = "Open"
+hint_dismiss = "Dismiss"
 
 [status_bar]
 scanning = "Scanning files…"

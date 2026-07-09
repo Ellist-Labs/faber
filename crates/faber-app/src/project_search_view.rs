@@ -207,7 +207,11 @@ impl ProjectSearchView {
                     .iter()
                     .filter_map(|e| {
                         let p = e.read(cx).doc.path.clone();
-                        if p.as_os_str().is_empty() { None } else { Some(p) }
+                        if p.as_os_str().is_empty() {
+                            None
+                        } else {
+                            Some(p)
+                        }
                     })
                     .collect(),
             )

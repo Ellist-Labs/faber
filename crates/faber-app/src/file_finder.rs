@@ -19,7 +19,9 @@ use crate::input_helpers::{
 };
 use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
-use crate::ui::{IconName, KeyHint, h_flex, v_flex};
+use crate::ui::{
+    IconName, h_flex, modal_backdrop, modal_container, modal_footer, render_matched_text, v_flex,
+};
 use crate::workspace::Workspace;
 use crate::{
     FfBackspace, FfConfirm, FfDismiss, FfMoveEnd, FfMoveLeft, FfMoveRight, FfMoveStart,
@@ -32,8 +34,8 @@ const FILTER_DEBOUNCE_MS: u64 = 30;
 const PREVIEW_DEBOUNCE_MS: u64 = 100;
 
 // ── modal geometry ─────────────────────────────────────────────────────────────
-const BACKDROP_TOP: f32 = 56.;
 const INPUT_ROW_H: f32 = 45.;
+const FOOTER_H: f32 = 30.; // py(6)*2 + KeyHint 18px — used for dropdown top calculation
 const MODAL_W_COLLAPSED: f32 = 640.;
 const MODAL_BODY_H_COLLAPSED: f32 = 440.;
 const MODAL_W_SIDE: f32 = 1060.;
@@ -965,26 +967,15 @@ impl FileFinderView {
     }
 
     fn render_footer(&self, t: &RuntimeTheme) -> AnyElement {
-        let hint = |keys: &'static str, label: String, t: &RuntimeTheme| {
-            h_flex().gap_1().child(KeyHint::new(keys)).child(
-                div()
-                    .font_family(t.ui_family.clone())
-                    .text_size(px(t.font_size_caption - 1.))
-                    .text_color(t.text_muted)
-                    .child(label),
-            )
-        };
-        h_flex()
-            .px_4()
-            .py(px(6.))
-            .gap_3()
-            .border_t_1()
-            .border_color(t.separator)
-            .child(hint("↑↓", t!("file_finder.hint_navigate").to_string(), t))
-            .child(hint("↵", t!("file_finder.hint_open").to_string(), t))
-            .child(hint("⌥⌘P", t!("file_finder.hint_preview").to_string(), t))
-            .child(hint("⎋", t!("file_finder.hint_dismiss").to_string(), t))
-            .into_any()
+        modal_footer(
+            t,
+            &[
+                ("↑↓", t!("file_finder.hint_navigate").to_string()),
+                ("↵", t!("file_finder.hint_open").to_string()),
+                ("⌥⌘P", t!("file_finder.hint_preview").to_string()),
+                ("⎋", t!("file_finder.hint_dismiss").to_string()),
+            ],
+        )
     }
 }
 
@@ -1020,60 +1011,6 @@ fn render_row_text(row: &FinderRow, t: &RuntimeTheme) -> AnyElement {
                     .child(d),
             )
         })
-        .into_any()
-}
-
-/// Render `text` (a slice of rel_path starting at char offset `char_off`) as
-/// span segments, painting chars listed in `positions` with the accent color.
-fn render_matched_text(
-    text: &str,
-    positions: &[u32],
-    char_off: u32,
-    base_color: gpui::Hsla,
-    t: &RuntimeTheme,
-) -> AnyElement {
-    let plain = || {
-        div()
-            .text_color(base_color)
-            .overflow_hidden()
-            .text_ellipsis()
-            .child(SharedString::from(text.to_string()))
-            .into_any()
-    };
-    let chars: Vec<char> = text.chars().collect();
-    if positions.is_empty() || chars.is_empty() {
-        return plain();
-    }
-    let end = char_off + chars.len() as u32;
-    let local: Vec<usize> = positions
-        .iter()
-        .filter(|&&p| p >= char_off && p < end)
-        .map(|&p| (p - char_off) as usize)
-        .collect();
-    if local.is_empty() {
-        return plain();
-    }
-
-    let mut spans: Vec<AnyElement> = Vec::new();
-    let mut i = 0usize;
-    while i < chars.len() {
-        let matched = local.binary_search(&i).is_ok();
-        let start = i;
-        while i < chars.len() && local.binary_search(&i).is_ok() == matched {
-            i += 1;
-        }
-        let seg: String = chars[start..i].iter().collect();
-        spans.push(
-            div()
-                .text_color(if matched { t.accent } else { base_color })
-                .child(SharedString::from(seg))
-                .into_any(),
-        );
-    }
-    h_flex()
-        .min_w(px(0.))
-        .overflow_hidden()
-        .children(spans)
         .into_any()
 }
 
@@ -1225,22 +1162,11 @@ impl Render for FileFinderView {
             .with_animation(
                 ("ff-body-h", toggle_count),
                 Animation::new(std::time::Duration::from_millis(220)).with_easing(ease_in_out),
-                move |el, p| el.max_h(px(from_body_h + (final_body_h - from_body_h) * p)),
+                move |el, p| el.h(px(from_body_h + (final_body_h - from_body_h) * p)),
             );
 
         // ── modal ──────────────────────────────────────────────────────────────
-        let modal = div()
-            .id("ff-modal")
-            .occlude()
-            .relative()
-            .bg(t.bg_elevated)
-            .rounded_lg()
-            .border_1()
-            .border_color(t.border)
-            .shadow_lg()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
+        let modal = modal_container("ff-modal", &t)
             .key_context("FileFinder")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_dismiss))
@@ -1258,7 +1184,6 @@ impl Render for FileFinderView {
             .on_action(cx.listener(Self::on_toggle_ignored))
             .on_action(cx.listener(Self::on_toggle_preview))
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(self.render_input_row(&t, window, cx))
             .child(body_container)
             .child(self.render_footer(&t))
@@ -1270,10 +1195,14 @@ impl Render for FileFinderView {
             );
 
         // ── mask dropdown (outside modal to escape overflow_hidden) ────────────
+        // With centered layout the modal top = (vh - total_modal_h) / 2.
         let vw = window.viewport_size().width;
-        // Modal right edge = vw/2 + final_w/2. Dropdown 200px, 12px inset.
+        let vh = window.viewport_size().height;
+        let total_modal_h = INPUT_ROW_H + final_body_h + FOOTER_H;
+        let modal_top = (f32::from(vh) - total_modal_h) * 0.5;
+        // Modal right edge = vw/2 + final_w/2. Dropdown 200px, 12px inset from right.
         let dropdown_left = vw / 2.0 + px(final_w / 2.0 - 212.0);
-        let dropdown_top = px(BACKDROP_TOP + INPUT_ROW_H);
+        let dropdown_top = px(modal_top.max(0.) + INPUT_ROW_H);
 
         // ── drag cursor overlay ────────────────────────────────────────────────
         // While the user drags the divider, an invisible full-screen overlay
@@ -1283,16 +1212,7 @@ impl Render for FileFinderView {
         let drag_is_bottom = is_bottom;
 
         deferred(
-            div()
-                .id("ff-backdrop")
-                .absolute()
-                .inset_0()
-                .occlude()
-                .flex()
-                .items_start()
-                .justify_center()
-                .pt(px(BACKDROP_TOP))
-                .bg(gpui::hsla(0., 0., 0., 0.35))
+            modal_backdrop("ff-backdrop", &t)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, _, window, cx| view.dismiss(window, cx)),

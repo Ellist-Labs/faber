@@ -13,6 +13,10 @@ use crate::module::{FileInput, FileMeta, IndexModule, InputNeeds, KeySuffix};
 // Key separator in LMDB: `{rel_path}\0{suffix}`.
 const KEY_SEP: u8 = 0;
 
+// Pre-score buffer: collect up to this multiple of `limit` before the sort+truncate.
+// Bounds memory while giving the scorer enough candidates to rank well.
+const PRESCORE_BUFFER_FACTOR: usize = 8;
+
 /// A fuzzy-matched project symbol from the LMDB index.
 #[derive(Debug, Clone)]
 pub struct SymbolMatch {
@@ -25,6 +29,19 @@ pub struct SymbolMatch {
     pub score: u32,
     /// Char positions in `name` where the query matched (for highlighting).
     pub positions: Vec<u32>,
+}
+
+impl SymbolMatch {
+    fn new(rel_path: String, item: OutlineItem, score: u32) -> Self {
+        Self {
+            rel_path,
+            name: item.name,
+            source_line: item.source_line,
+            byte_range: item.byte_range,
+            score,
+            positions: Vec::new(),
+        }
+    }
 }
 
 /// Scan the symbol LMDB index and return up to `limit` fuzzy matches for
@@ -57,7 +74,9 @@ pub fn project_symbols(
             continue;
         };
         let rel_bytes = &key[..sep];
-        let rel_path = String::from_utf8_lossy(rel_bytes).into_owned();
+        let Ok(rel_path) = String::from_utf8(rel_bytes.to_vec()) else {
+            continue;
+        };
 
         let items: Vec<OutlineItem> = match bincode::deserialize(&value) {
             Ok(v) => v,
@@ -66,8 +85,7 @@ pub fn project_symbols(
 
         let mut buf = Vec::new();
         for item in items {
-            if scored.len() >= limit * 8 {
-                // Rough early cap to bound memory; a final sort+truncate follows.
+            if scored.len() >= limit * PRESCORE_BUFFER_FACTOR {
                 break;
             }
             if let Some(pat) = &pattern {
@@ -75,26 +93,9 @@ pub fn project_symbols(
                 else {
                     continue;
                 };
-                scored.push(SymbolMatch {
-                    rel_path: rel_path.clone(),
-                    name: item.name,
-                    source_line: item.source_line,
-                    byte_range: item.byte_range,
-                    score,
-                    positions: Vec::new(),
-                });
-            } else {
-                // No query: collect in store order (bounded by limit).
-                if scored.len() < limit {
-                    scored.push(SymbolMatch {
-                        rel_path: rel_path.clone(),
-                        name: item.name,
-                        source_line: item.source_line,
-                        byte_range: item.byte_range,
-                        score: 0,
-                        positions: Vec::new(),
-                    });
-                }
+                scored.push(SymbolMatch::new(rel_path.clone(), item, score));
+            } else if scored.len() < limit {
+                scored.push(SymbolMatch::new(rel_path.clone(), item, 0));
             }
         }
     }
@@ -104,7 +105,7 @@ pub fn project_symbols(
         scored.truncate(limit);
 
         // Pass 2: compute match positions for survivors.
-        let mut pos_buf = Vec::new();
+        let mut pos_buf: Vec<u32> = Vec::new();
         let mut char_buf = Vec::new();
         for sym in &mut scored {
             pos_buf.clear();
@@ -116,7 +117,7 @@ pub fn project_symbols(
                 )
                 .is_some()
             {
-                sym.positions = pos_buf.clone();
+                sym.positions = std::mem::take(&mut pos_buf);
             }
         }
     }
