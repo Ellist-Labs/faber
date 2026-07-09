@@ -86,6 +86,15 @@ fn sections() -> Vec<SettingsSectionDef> {
                         set: |s, v| s.reopen_last_session = v,
                     },
                 },
+                SettingEntry {
+                    title: t!("settings.restore_split_layout.title").to_string(),
+                    description: t!("settings.restore_split_layout.desc").to_string(),
+                    enabled: |s| s.reopen_last_session,
+                    control: SettingControl::Toggle {
+                        get: |s| s.restore_split_layout,
+                        set: |s, v| s.restore_split_layout = v,
+                    },
+                },
             ],
         },
         SettingsSectionDef {

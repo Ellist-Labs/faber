@@ -1563,6 +1563,7 @@ dependencies = [
 name = "faber"
 version = "0.1.0"
 dependencies = [
+ "faber-core",
  "faber-editor",
  "faber-settings",
  "faber-theme",
@@ -1580,6 +1581,8 @@ dependencies = [
  "proptest",
  "regex",
  "ropey",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

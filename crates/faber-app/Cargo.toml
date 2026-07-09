@@ -10,6 +10,7 @@ name = "faber"
 path = "src/main.rs"
 
 [dependencies]
+faber-core = { path = "../faber-core" }
 faber-editor = { path = "../faber-editor" }
 ropey = "1"
 faber-settings = { path = "../faber-settings" }

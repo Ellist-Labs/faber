@@ -1,7 +1,11 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use faber_core::pane_tree::{
+    Axis, DropZone, Member, PaneGroup, PaneId, Rect as PaneRect, SplitDirection, Vec2 as PaneVec2,
+};
 use faber_settings::AutoSave;
 
 use faber_editor::{
@@ -11,14 +15,15 @@ use faber_editor::{
     save::save,
 };
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel,
+    AnyElement, App, ClipboardItem, Context, Div, DragMoveEvent, Entity, FocusHandle, Focusable,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, PromptLevel,
     Render, ScrollStrategy, SharedString, Stateful, Task, UniformListScrollHandle, Window,
-    anchored, deferred, div, img, prelude::*, px, svg,
+    anchored, deferred, div, img, prelude::*, px, relative, svg,
 };
 
 use crate::editor_view::{EditorEvent, EditorView};
 use crate::file_finder::FileFinderView;
+use crate::pane::{Pane, TabContent, TabMenu};
 use crate::project_search_view::ProjectSearchView;
 use crate::settings_view::{SettingsStore, SettingsView};
 use crate::sidebar::{SidebarItem, SidebarItemKind, SidebarState, default_items};
@@ -29,12 +34,53 @@ use crate::welcome_view::render_welcome;
 use crate::{
     AppStateStore, CloseFile, CloseFolder, CloseTab, CloseWindow, NewFile, NextTab, OpenFile,
     OpenFileFinder, OpenFileFinderPreview, OpenFolder, OpenProjectSearch, OpenSettings, PrevTab,
-    ProjectRoot, Quit, SaveAll, SaveAs, SaveFile, ToggleBottomPanel, ToggleRightPanel,
-    ToggleSidebar,
+    ProjectRoot, Quit, SaveAll, SaveAs, SaveFile, SplitDown, SplitLeft, SplitRight, SplitUp,
+    ToggleBottomPanel, ToggleRightPanel, ToggleSidebar,
 };
 
 /// Rescan the file index when the cached snapshot is older than this.
 const INDEX_STALE_AFTER: Duration = Duration::from_secs(5);
+
+// ── Pane resize & drag types ──────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct PaneResize {
+    axis_path: Vec<usize>,
+    divider_ix: usize,
+    axis: Axis,
+    start_cursor: gpui::Point<gpui::Pixels>,
+}
+
+#[derive(Clone)]
+struct DraggedTab {
+    source_pane: PaneId,
+    tab_id: usize,
+    title: String,
+}
+
+struct TabGhost {
+    title: String,
+}
+
+impl Render for TabGhost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.global::<RuntimeTheme>().clone();
+        div()
+            .px_3()
+            .h(px(30.))
+            .flex()
+            .items_center()
+            .bg(t.bg_elevated)
+            .border_1()
+            .border_color(t.accent)
+            .rounded(px(t.radius_sm))
+            .text_size(px(t.font_size_caption))
+            .font_family(t.ui_family.clone())
+            .text_color(t.text)
+            .opacity(0.8)
+            .child(self.title.clone())
+    }
+}
 
 /// Background-scanned project file index, shared with the file finder.
 #[derive(Default)]
@@ -45,17 +91,6 @@ pub(crate) struct FileIndexState {
     full_scanned_at: Option<Instant>,
     scanning_normal: bool,
     scanning_full: bool,
-}
-
-pub enum TabContent {
-    Editor(Entity<EditorView>),
-    Settings(Entity<SettingsView>),
-    ProjectSearch(Entity<ProjectSearchView>),
-}
-
-struct TabMenu {
-    tab_id: usize,
-    pos: Point<Pixels>,
 }
 
 type MenuClickFn = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
@@ -91,44 +126,13 @@ impl RenderOnce for ContextMenuItem {
     }
 }
 
-pub struct Tab {
-    pub id: usize,
-    pub content: TabContent,
-}
-
-impl Tab {
-    pub(crate) fn editor(&self) -> Option<&Entity<EditorView>> {
-        match &self.content {
-            TabContent::Editor(e) => Some(e),
-            TabContent::Settings(_) | TabContent::ProjectSearch(_) => None,
-        }
-    }
-
-    /// (title, dirty) for the tab strip.
-    fn title(&self, cx: &App) -> (String, bool) {
-        match &self.content {
-            TabContent::Editor(e) => {
-                let doc = &e.read(cx).doc;
-                (Workspace::doc_display_name(doc), doc.dirty)
-            }
-            TabContent::Settings(_) => (rust_i18n::t!("tab.settings").to_string(), false),
-            TabContent::ProjectSearch(_) => (rust_i18n::t!("tab.search").to_string(), false),
-        }
-    }
-
-    fn tab_focus_handle(&self, cx: &App) -> FocusHandle {
-        match &self.content {
-            TabContent::Editor(e) => e.read(cx).focus_handle.clone(),
-            TabContent::Settings(s) => s.read(cx).focus_handle.clone(),
-            TabContent::ProjectSearch(p) => p.read(cx).focus_handle.clone(),
-        }
-    }
-}
-
+#[allow(dead_code)]
 pub struct Workspace {
-    pub(crate) tabs: Vec<Tab>,
-    pub(crate) active: Option<usize>,
-    next_tab_id: usize,
+    /// Pane layout tree (single pane during this commit; split panes in later commits).
+    pub(crate) pane_group: PaneGroup<PaneId>,
+    pub(crate) panes: HashMap<PaneId, Entity<Pane>>,
+    pub(crate) focused_pane: PaneId,
+    next_pane_id: u64,
     root_folder: Option<PathBuf>,
     focus_handle: FocusHandle,
     pub(crate) sidebar_items: Vec<SidebarItem>,
@@ -140,12 +144,13 @@ pub struct Workspace {
     pub(crate) tree_scrollbar_drag: Option<ScrollbarDrag>,
     pub(crate) bottom_open: bool,
     pub(crate) right_open: bool,
-    tab_menu: Option<TabMenu>,
     /// Bumped on every edit; a debounced auto-save fires only if no newer
     /// edit arrived while its timer slept.
     autosave_generation: u64,
     file_index: FileIndexState,
     file_finder: Option<Entity<FileFinderView>>,
+    pane_resize: Option<PaneResize>,
+    drop_hover: Option<(PaneId, DropZone)>,
 }
 
 impl Workspace {
@@ -155,10 +160,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let first_pane_id = PaneId(0);
+        let first_pane = cx.new(|cx| Pane::new(first_pane_id, cx));
+        let mut panes = HashMap::new();
+        panes.insert(first_pane_id, first_pane);
+
         let mut ws = Self {
-            tabs: Vec::new(),
-            active: None,
-            next_tab_id: 0,
+            pane_group: PaneGroup::single(first_pane_id),
+            panes,
+            focused_pane: first_pane_id,
+            next_pane_id: 1,
             root_folder: None,
             focus_handle: cx.focus_handle(),
             sidebar_items: default_items(),
@@ -170,10 +181,11 @@ impl Workspace {
             tree_scrollbar_drag: None,
             bottom_open: false,
             right_open: false,
-            tab_menu: None,
             autosave_generation: 0,
             file_index: FileIndexState::default(),
             file_finder: None,
+            pane_resize: None,
+            drop_hover: None,
         };
         if !paths.is_empty() {
             for path in paths {
@@ -194,7 +206,7 @@ impl Workspace {
                     ws.push_editor_tab(editor, cx);
                 }
             }
-            if !ws.tabs.is_empty() {
+            if !ws.pane().read(cx).is_empty() {
                 ws.activate_tab(0, window, cx);
             }
         }
@@ -213,17 +225,39 @@ impl Workspace {
         ws
     }
 
+    /// Returns the currently focused pane entity.
+    pub(crate) fn pane(&self) -> &Entity<Pane> {
+        &self.panes[&self.focused_pane]
+    }
+
+    /// All editor entities across all panes (for save-all, search scoping, etc.)
+    pub(crate) fn all_editors(&self, cx: &App) -> Vec<Entity<EditorView>> {
+        self.panes
+            .values()
+            .flat_map(|p| p.read(cx).all_editors().cloned().collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// Find an open editor by its file path (across all panes). Returns the
+    /// pane id and tab index if found.
+    pub(crate) fn find_open_editor(&self, path: &Path, cx: &App) -> Option<Entity<EditorView>> {
+        for p in self.panes.values() {
+            let pane = p.read(cx);
+            if let Some(ix) = pane.find_editor_by_path(path, cx) {
+                return pane.tab_at(ix)?.editor().cloned();
+            }
+        }
+        None
+    }
+
     fn push_editor_tab(&mut self, editor: Entity<EditorView>, cx: &mut Context<Self>) {
         cx.subscribe(&editor, |ws, _, _: &EditorEvent, cx| {
             ws.on_editor_edited(cx)
         })
         .detach();
-        self.tabs.push(Tab {
-            id: self.next_tab_id,
-            content: TabContent::Editor(editor),
+        self.panes[&self.focused_pane].update(cx, |pane: &mut Pane, _| {
+            pane.push_tab(TabContent::Editor(editor));
         });
-        self.next_tab_id += 1;
-        self.active = Some(self.tabs.len() - 1);
     }
 
     // ── auto-save ──────────────────────────────────────────────────────────────
@@ -250,11 +284,13 @@ impl Workspace {
 
     /// Navigate the active editor to `line`, moving the cursor and scrolling.
     pub(crate) fn outline_navigate(&mut self, line: usize, cx: &mut Context<Self>) {
-        if let Some(editor) = self
-            .active
-            .and_then(|i| self.tabs.get(i))
+        let editor = self
+            .pane()
+            .read(cx)
+            .active_tab()
             .and_then(|t| t.editor())
-        {
+            .cloned();
+        if let Some(editor) = editor {
             editor.update(cx, |ev, _cx| {
                 let char_idx = ev.line_starts.get(line).copied().unwrap_or(0);
                 ev.sel.head = char_idx;
@@ -268,12 +304,7 @@ impl Workspace {
     /// Saves every dirty document that has a path; untitled docs are skipped
     /// (VS Code behavior). Never touches content or history.
     fn save_all_dirty(&mut self, cx: &mut Context<Self>) {
-        let editors: Vec<Entity<EditorView>> = self
-            .tabs
-            .iter()
-            .filter_map(|t| t.editor())
-            .cloned()
-            .collect();
+        let editors = self.all_editors(cx);
         for editor in editors {
             Self::save_doc_now(&editor, cx);
         }
@@ -289,10 +320,8 @@ impl Workspace {
     }
 
     pub fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let existing = self
-            .tabs
-            .iter()
-            .position(|tab| tab.editor().is_some_and(|e| e.read(cx).doc.path == path));
+        // Check if already open in the focused pane.
+        let existing = self.pane().read(cx).find_editor_by_path(path, cx);
         if let Some(ix) = existing {
             self.activate_tab(ix, window, cx);
             return;
@@ -300,7 +329,8 @@ impl Workspace {
         let path_str = path.to_string_lossy().to_string();
         let editor = cx.new(|cx| EditorView::new(&path_str, cx));
         self.push_editor_tab(editor, cx);
-        self.activate_tab(self.tabs.len() - 1, window, cx);
+        let new_ix = self.pane().read(cx).tab_count() - 1;
+        self.activate_tab(new_ix, window, cx);
         if !path.as_os_str().is_empty() {
             let abs = path_str.clone();
             self.record_state_change(cx, move |s| s.record_recent_file(&abs));
@@ -308,17 +338,22 @@ impl Workspace {
     }
 
     pub fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.tabs.len() {
+        if ix >= self.pane().read(cx).tab_count() {
             return;
         }
         // Leaving a tab counts as a focus change for auto-save purposes.
+        let prev_editor = {
+            let pane = self.pane().read(cx);
+            pane.active
+                .filter(|&prev| prev != ix)
+                .and_then(|prev| pane.tab_at(prev).and_then(|t| t.editor()).cloned())
+        };
         if cx.global::<SettingsStore>().0.auto_save == AutoSave::OnFocusChange
-            && let Some(prev) = self.active.filter(|&prev| prev != ix)
-            && let Some(editor) = self.tabs.get(prev).and_then(|t| t.editor()).cloned()
+            && let Some(editor) = prev_editor
         {
             Self::save_doc_now(&editor, cx);
         }
-        self.active = Some(ix);
+        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| p.set_active(Some(ix)));
         self.right_open = self.active_is_markdown(cx);
         self.focus_active(window, cx);
         cx.notify();
@@ -330,32 +365,58 @@ impl Workspace {
     }
 
     pub fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.tabs.len() {
-            return;
-        }
-        self.tabs.remove(ix);
-        self.active = if self.tabs.is_empty() {
-            None
+        let pane_id = self.focused_pane;
+        self.panes[&pane_id].update(cx, |p: &mut Pane, _| {
+            p.remove_tab(ix);
+        });
+        // Collapse the pane if this emptied it (a no-op for the last remaining pane,
+        // which stays to show the welcome screen).
+        if self.panes[&pane_id].read(cx).is_empty() {
+            self.collapse_pane(pane_id, window, cx);
         } else {
-            Some(match self.active {
-                Some(a) if a > ix => a - 1,
-                Some(a) => a.min(self.tabs.len() - 1),
-                None => 0,
-            })
-        };
-        self.focus_active(window, cx);
-        cx.notify();
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Dismiss the focused pane's tab context menu.
+    fn close_tab_menu(&mut self, cx: &mut Context<Self>) {
+        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| p.tab_menu = None);
     }
 
     fn close_tab_by_id(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
+        let ix = self.pane().read(cx).tab_by_id(id).map(|(ix, _)| ix);
+        if let Some(ix) = ix {
             self.close_tab(ix, window, cx);
         }
     }
 
+    pub(crate) fn activate_tab_in(
+        &mut self,
+        pane_id: PaneId,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focused_pane = pane_id;
+        self.activate_tab(ix, window, cx);
+    }
+
+    fn request_close_tab_in(
+        &mut self,
+        pane_id: PaneId,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focused_pane = pane_id;
+        self.request_close_tab(ix, window, cx);
+    }
+
     pub fn focus_active(&self, window: &mut Window, cx: &App) {
-        match self.active.and_then(|ix| self.tabs.get(ix)) {
-            Some(tab) => window.focus(&tab.tab_focus_handle(cx)),
+        let pane = self.pane().read(cx);
+        match pane.active_tab() {
+            Some(tab) => window.focus(&tab.focus_handle(cx)),
             None => window.focus(&self.focus_handle),
         }
     }
@@ -369,9 +430,8 @@ impl Workspace {
 
     /// Returns the file path of the active editor tab, or `None` for untitled/Settings tabs.
     pub(crate) fn active_editor_path(&self, cx: &App) -> Option<PathBuf> {
-        let ix = self.active?;
-        let tab = self.tabs.get(ix)?;
-        let editor = tab.editor()?;
+        let pane = self.pane().read(cx);
+        let editor = pane.active_tab()?.editor()?;
         let path = editor.read(cx).doc.path.clone();
         if path.as_os_str().is_empty() {
             None
@@ -436,9 +496,8 @@ impl Workspace {
         let mut state = cx.global::<AppStateStore>().0.clone();
         update(&mut state);
         let files: Vec<String> = self
-            .tabs
-            .iter()
-            .filter_map(|t| t.editor())
+            .all_editors(cx)
+            .into_iter()
             .filter_map(|e| {
                 let p = e.read(cx).doc.path.to_string_lossy().to_string();
                 if p.is_empty() { None } else { Some(p) }
@@ -449,6 +508,11 @@ impl Workspace {
             .as_ref()
             .map(|p| p.to_string_lossy().to_string());
         state.set_last_session(root, files);
+        let settings = cx.global::<crate::settings_view::SettingsStore>().0.clone();
+        if settings.restore_split_layout {
+            let layout = self.serialize_layout(cx);
+            state.set_last_session_layout(Some(layout));
+        }
         let state_to_save = state.clone();
         cx.set_global(AppStateStore(state));
         cx.background_executor()
@@ -668,9 +732,13 @@ impl Workspace {
 
     /// Close a tab, prompting to save first if the document is dirty.
     fn request_close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(ix) else { return };
-        let tab_id = tab.id;
-        let Some(editor) = tab.editor().cloned() else {
+        // Extract tab data in a block so the pane borrow drops before any mutable use.
+        let (tab_id, editor) = {
+            let pane = self.pane().read(cx);
+            let Some(tab) = pane.tab_at(ix) else { return };
+            (tab.id, tab.editor().cloned())
+        };
+        let Some(editor) = editor else {
             self.close_tab(ix, window, cx);
             return;
         };
@@ -720,7 +788,8 @@ impl Workspace {
         let registry = cx.global::<crate::Registry>().0.clone();
         let editor = cx.new(|cx| EditorView::from_doc(Document::empty_untitled(), registry, cx));
         self.push_editor_tab(editor, cx);
-        self.activate_tab(self.tabs.len() - 1, window, cx);
+        let new_ix = self.pane().read(cx).tab_count() - 1;
+        self.activate_tab(new_ix, window, cx);
     }
 
     fn on_open_file(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
@@ -765,23 +834,25 @@ impl Workspace {
     }
 
     fn on_save_file(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(editor) = self
-            .active
-            .and_then(|ix| self.tabs.get(ix))
-            .and_then(|tab| tab.editor())
-            .cloned()
-        {
+        let editor = self
+            .pane()
+            .read(cx)
+            .active_tab()
+            .and_then(|t| t.editor())
+            .cloned();
+        if let Some(editor) = editor {
             self.save_editor(&editor, window, cx).detach();
         }
     }
 
     fn on_save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(editor) = self
-            .active
-            .and_then(|ix| self.tabs.get(ix))
-            .and_then(|tab| tab.editor())
-            .cloned()
-        {
+        let editor = self
+            .pane()
+            .read(cx)
+            .active_tab()
+            .and_then(|t| t.editor())
+            .cloned();
+        if let Some(editor) = editor {
             self.save_editor_as(&editor, window, cx).detach();
         }
     }
@@ -795,21 +866,17 @@ impl Workspace {
     }
 
     fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
-        let existing = self
-            .tabs
-            .iter()
-            .position(|tab| matches!(tab.content, TabContent::Settings(_)));
+        let existing = self.pane().read(cx).find_settings_tab();
         if let Some(ix) = existing {
             self.activate_tab(ix, window, cx);
             return;
         }
         let view = cx.new(SettingsView::new);
-        self.tabs.push(Tab {
-            id: self.next_tab_id,
-            content: TabContent::Settings(view),
+        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| {
+            p.push_tab(TabContent::Settings(view));
         });
-        self.next_tab_id += 1;
-        self.activate_tab(self.tabs.len() - 1, window, cx);
+        let new_ix = self.pane().read(cx).tab_count() - 1;
+        self.activate_tab(new_ix, window, cx);
     }
 
     pub(crate) fn on_open_project_search(
@@ -820,8 +887,9 @@ impl Workspace {
     ) {
         // Prefill with active editor selection text if any.
         let prefill = self
-            .active
-            .and_then(|ix| self.tabs.get(ix))
+            .pane()
+            .read(cx)
+            .active_tab()
             .and_then(|t| t.editor())
             .and_then(|e| {
                 let ev = e.read(cx);
@@ -836,25 +904,30 @@ impl Workspace {
             })
             .unwrap_or_default();
 
-        let existing = self
-            .tabs
-            .iter()
-            .position(|t| matches!(t.content, TabContent::ProjectSearch(_)));
+        let existing = self.pane().read(cx).find_project_search_tab();
+        let active_ix = self.pane().read(cx).active;
         if let Some(ix) = existing {
             // Toggle closed if already the active tab (mirrors Cmd+F in-file behaviour).
-            if self.active == Some(ix) {
+            if active_ix == Some(ix) {
                 self.close_tab(ix, window, cx);
                 return;
             }
             self.activate_tab(ix, window, cx);
-            if !prefill.is_empty() {
-                if let TabContent::ProjectSearch(view) = &self.tabs[ix].content {
-                    view.update(cx, |psv, cx| {
-                        psv.set_query(prefill, cx);
-                    });
+            // Prefill query and focus.
+            let ps_view = {
+                let pane = self.pane().read(cx);
+                pane.tab_at(ix).and_then(|t| {
+                    if let TabContent::ProjectSearch(v) = &t.content {
+                        Some(v.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(view) = ps_view {
+                if !prefill.is_empty() {
+                    view.update(cx, |psv, cx| psv.set_query(prefill, cx));
                 }
-            }
-            if let TabContent::ProjectSearch(view) = &self.tabs[ix].content {
                 let qh = view.read(cx).query_handle.clone();
                 window.focus(&qh);
             }
@@ -862,12 +935,11 @@ impl Workspace {
         }
         let ws_entity = cx.entity();
         let view = cx.new(|cx| ProjectSearchView::new(ws_entity.downgrade(), prefill, cx));
-        self.tabs.push(Tab {
-            id: self.next_tab_id,
-            content: TabContent::ProjectSearch(view.clone()),
+        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| {
+            p.push_tab(TabContent::ProjectSearch(view.clone()));
         });
-        self.next_tab_id += 1;
-        self.activate_tab(self.tabs.len() - 1, window, cx);
+        let new_ix = self.pane().read(cx).tab_count() - 1;
+        self.activate_tab(new_ix, window, cx);
         let qh = view.read(cx).query_handle.clone();
         window.focus(&qh);
     }
@@ -884,8 +956,9 @@ impl Workspace {
     ) {
         self.open_path(path, window, cx);
         if let Some(editor) = self
-            .active
-            .and_then(|i| self.tabs.get(i))
+            .pane()
+            .read(cx)
+            .active_tab()
             .and_then(|t| t.editor())
             .cloned()
         {
@@ -945,7 +1018,8 @@ impl Workspace {
     }
 
     fn on_close_file(&mut self, _: &CloseFile, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.active {
+        let ix = self.pane().read(cx).active;
+        if let Some(ix) = ix {
             self.request_close_tab(ix, window, cx);
         }
     }
@@ -984,12 +1058,10 @@ impl Workspace {
     }
 
     fn on_quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-        let dirty: Vec<Entity<EditorView>> = self
-            .tabs
-            .iter()
-            .filter_map(|t| t.editor())
+        let editors = self.all_editors(cx);
+        let dirty: Vec<Entity<EditorView>> = editors
+            .into_iter()
             .filter(|e| e.read(cx).doc.dirty)
-            .cloned()
             .collect();
         if dirty.is_empty() {
             cx.quit();
@@ -1037,7 +1109,8 @@ impl Workspace {
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.active {
+        let ix = self.pane().read(cx).active;
+        if let Some(ix) = ix {
             self.request_close_tab(ix, window, cx);
         }
     }
@@ -1045,13 +1118,16 @@ impl Workspace {
     /// Close all tabs except the one with `keep_id`.
     fn close_other_tabs(&mut self, keep_id: usize, window: &mut Window, cx: &mut Context<Self>) {
         let ids: Vec<usize> = self
+            .pane()
+            .read(cx)
             .tabs
             .iter()
             .filter(|t| t.id != keep_id)
             .map(|t| t.id)
             .collect();
         for id in ids {
-            if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
+            let ix = self.pane().read(cx).tab_by_id(id).map(|(ix, _)| ix);
+            if let Some(ix) = ix {
                 self.request_close_tab(ix, window, cx);
             }
         }
@@ -1059,9 +1135,10 @@ impl Workspace {
 
     /// Close all tabs.
     fn close_all_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ids: Vec<usize> = self.tabs.iter().map(|t| t.id).collect();
+        let ids: Vec<usize> = self.pane().read(cx).tabs.iter().map(|t| t.id).collect();
         for id in ids {
-            if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
+            let ix = self.pane().read(cx).tab_by_id(id).map(|(ix, _)| ix);
+            if let Some(ix) = ix {
                 self.request_close_tab(ix, window, cx);
             }
         }
@@ -1074,14 +1151,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let anchor_ix = self
-            .tabs
-            .iter()
-            .position(|t| t.id == anchor_id)
-            .unwrap_or(0);
-        let ids: Vec<usize> = self.tabs[..anchor_ix].iter().map(|t| t.id).collect();
+        let ids: Vec<usize> = {
+            let pane = self.pane().read(cx);
+            let anchor_ix = pane
+                .tabs
+                .iter()
+                .position(|t| t.id == anchor_id)
+                .unwrap_or(0);
+            pane.tabs[..anchor_ix].iter().map(|t| t.id).collect()
+        };
         for id in ids {
-            if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
+            let ix = self.pane().read(cx).tab_by_id(id).map(|(ix, _)| ix);
+            if let Some(ix) = ix {
                 self.request_close_tab(ix, window, cx);
             }
         }
@@ -1094,144 +1175,65 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let anchor_ix = self
-            .tabs
-            .iter()
-            .position(|t| t.id == anchor_id)
-            .unwrap_or(0);
-        let ids: Vec<usize> = self.tabs[anchor_ix + 1..].iter().map(|t| t.id).collect();
+        let ids: Vec<usize> = {
+            let pane = self.pane().read(cx);
+            let anchor_ix = pane
+                .tabs
+                .iter()
+                .position(|t| t.id == anchor_id)
+                .unwrap_or(0);
+            pane.tabs[anchor_ix + 1..].iter().map(|t| t.id).collect()
+        };
         for id in ids {
-            if let Some(ix) = self.tabs.iter().position(|t| t.id == id) {
+            let ix = self.pane().read(cx).tab_by_id(id).map(|(ix, _)| ix);
+            if let Some(ix) = ix {
                 self.request_close_tab(ix, window, cx);
             }
         }
     }
 
     fn on_next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.active {
-            let next = (ix + 1) % self.tabs.len();
+        let (active, count) = {
+            let pane = self.pane().read(cx);
+            (pane.active, pane.tab_count())
+        };
+        if let Some(ix) = active {
+            let next = (ix + 1) % count;
             self.activate_tab(next, window, cx);
         }
     }
 
     fn on_prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.active {
-            let prev = if ix == 0 { self.tabs.len() - 1 } else { ix - 1 };
+        let (active, count) = {
+            let pane = self.pane().read(cx);
+            (pane.active, pane.tab_count())
+        };
+        if let Some(ix) = active {
+            let prev = if ix == 0 { count - 1 } else { ix - 1 };
             self.activate_tab(prev, window, cx);
         }
     }
 
     // ── rendering ──────────────────────────────────────────────────────────────
 
-    fn render_tab(&self, ix: usize, t: &RuntimeTheme, cx: &mut Context<Self>) -> Stateful<Div> {
-        let tab = &self.tabs[ix];
-        let (title, dirty) = tab.title(cx);
-        let is_active = self.active == Some(ix);
-
-        let icon: AnyElement = match &tab.content {
-            TabContent::Editor(_) => img(crate::file_icons::icon_for_file(&title))
-                .size(px(14.0))
-                .flex_shrink_0()
-                .into_any_element(),
-            TabContent::Settings(_) => svg()
-                .path(IconName::Settings.path())
-                .size(px(14.0))
-                .flex_shrink_0()
-                .text_color(t.text_muted)
-                .into_any_element(),
-            TabContent::ProjectSearch(_) => svg()
-                .path(IconName::Search.path())
-                .size(px(14.0))
-                .flex_shrink_0()
-                .text_color(t.text_muted)
-                .into_any_element(),
-        };
-
-        let tab_id = tab.id;
-        h_flex()
-            .id(tab.id)
-            .group("tab")
-            .flex_shrink_0()
-            .max_w(px(170.))
-            .gap_2()
-            .px_3()
-            .h_full()
-            .border_r_1()
-            .border_color(t.separator)
-            .when(is_active, |el| el.bg(t.bg))
-            .when(!is_active, |el| el.bg(t.bg_elevated))
-            .font_family(t.ui_family.clone())
-            .text_size(px(t.font_size_caption))
-            .text_color(if is_active { t.text } else { t.text_muted })
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |ws, _, window, cx| ws.activate_tab(ix, window, cx)),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
-                    ws.tab_menu = Some(TabMenu {
-                        tab_id,
-                        pos: ev.position,
-                    });
-                    cx.notify();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(move |ws, _, window, cx| ws.request_close_tab(ix, window, cx)),
-            )
-            .child(icon)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(title),
-            )
-            .when(dirty, |el| {
-                el.child(
-                    div()
-                        .size(px(7.0))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .bg(t.dirty),
-                )
-            })
-            .child(
-                svg()
-                    .path(IconName::Close.path())
-                    .size(px(16.0))
-                    .flex_shrink_0()
-                    .text_color(gpui::transparent_black())
-                    .group_hover("tab", |s| s.text_color(t.text_subtle))
-                    .hover(|s| s.text_color(t.text))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |ws, _, window, cx| {
-                            cx.stop_propagation();
-                            ws.request_close_tab(ix, window, cx);
-                        }),
-                    ),
-            )
-    }
-
     fn render_context_menu(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let menu = self.tab_menu.as_ref()?;
-        let tab_id = menu.tab_id;
-        let pos = menu.pos;
-
-        let tab_ix = self.tabs.iter().position(|t| t.id == tab_id)?;
-        let path = self
-            .tabs
-            .get(tab_ix)
-            .and_then(|t| t.editor())
-            .map(|e| e.read(cx).doc.path.clone())
-            .filter(|p| !p.as_os_str().is_empty());
+        // Read all pane data before any mutable cx use.
+        let (tab_id, pos, tab_ix, path, tab_count) = {
+            let pane = self.pane().read(cx);
+            let menu = pane.tab_menu.as_ref()?;
+            let tab_id = menu.tab_id;
+            let pos = menu.pos;
+            let tab_ix = pane.tabs.iter().position(|t| t.id == tab_id)?;
+            let path = pane
+                .tabs
+                .get(tab_ix)
+                .and_then(|t| t.editor())
+                .map(|e| e.read(cx).doc.path.clone())
+                .filter(|p| !p.as_os_str().is_empty());
+            let tab_count = pane.tabs.len();
+            (tab_id, pos, tab_ix, path, tab_count)
+        };
         let has_path = path.is_some();
-        let tab_count = self.tabs.len();
         let has_left = tab_ix > 0;
         let has_right = tab_ix + 1 < tab_count;
         let has_others = tab_count > 1;
@@ -1255,8 +1257,9 @@ impl Workspace {
                 true,
                 Box::new(move |_, window, cx| {
                     ws.update(cx, |ws, cx| {
-                        ws.tab_menu = None;
-                        if let Some(ix) = ws.tabs.iter().position(|t| t.id == tab_id) {
+                        ws.close_tab_menu(cx);
+                        let ix = ws.pane().read(cx).tab_by_id(tab_id).map(|(ix, _)| ix);
+                        if let Some(ix) = ix {
                             ws.request_close_tab(ix, window, cx);
                         }
                     });
@@ -1271,7 +1274,7 @@ impl Workspace {
                 has_others,
                 Box::new(move |_, window, cx| {
                     ws.update(cx, |ws, cx| {
-                        ws.tab_menu = None;
+                        ws.close_tab_menu(cx);
                         ws.close_other_tabs(tab_id, window, cx);
                     });
                 }),
@@ -1285,7 +1288,7 @@ impl Workspace {
                 true,
                 Box::new(move |_, window, cx| {
                     ws.update(cx, |ws, cx| {
-                        ws.tab_menu = None;
+                        ws.close_tab_menu(cx);
                         ws.close_all_tabs(window, cx);
                     });
                 }),
@@ -1299,7 +1302,7 @@ impl Workspace {
                 has_left,
                 Box::new(move |_, window, cx| {
                     ws.update(cx, |ws, cx| {
-                        ws.tab_menu = None;
+                        ws.close_tab_menu(cx);
                         ws.close_tabs_to_left(tab_id, window, cx);
                     });
                 }),
@@ -1313,7 +1316,7 @@ impl Workspace {
                 has_right,
                 Box::new(move |_, window, cx| {
                     ws.update(cx, |ws, cx| {
-                        ws.tab_menu = None;
+                        ws.close_tab_menu(cx);
                         ws.close_tabs_to_right(tab_id, window, cx);
                     });
                 }),
@@ -1330,7 +1333,7 @@ impl Workspace {
                 Box::new(move |_, _, cx| {
                     let Some(p) = p.clone() else { return };
                     ws.update(cx, |ws, cx| {
-                        ws.tab_menu = None;
+                        ws.close_tab_menu(cx);
                         cx.write_to_clipboard(ClipboardItem::new_string(p.display().to_string()));
                         cx.notify();
                     });
@@ -1362,7 +1365,7 @@ impl Workspace {
                 Box::new(move |_, _, cx| {
                     let rel = rel.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.tab_menu = None;
+                        ws.close_tab_menu(cx);
                         cx.write_to_clipboard(ClipboardItem::new_string(rel));
                         cx.notify();
                     });
@@ -1380,7 +1383,7 @@ impl Workspace {
                 Box::new(move |_, _, cx| {
                     let Some(p) = p.clone() else { return };
                     ws.update(cx, |ws, cx| {
-                        ws.tab_menu = None;
+                        ws.close_tab_menu(cx);
                         cx.reveal_path(&p);
                         cx.notify();
                     });
@@ -1397,7 +1400,7 @@ impl Workspace {
                 Box::new(move |_, _, cx| {
                     let Some(p) = p.clone() else { return };
                     ws.update(cx, |ws, cx| {
-                        ws.tab_menu = None;
+                        ws.close_tab_menu(cx);
                         ws.sidebar.open = true;
                         ws.sidebar.active = SidebarItemKind::Explorer;
                         ws.reveal_in_tree(&p, cx);
@@ -1406,6 +1409,28 @@ impl Workspace {
                 }),
             )
         };
+
+        let split_items: Vec<ContextMenuItem> = [
+            (rust_i18n::t!("tab_menu.split_left"), SplitDirection::Left),
+            (rust_i18n::t!("tab_menu.split_right"), SplitDirection::Right),
+            (rust_i18n::t!("tab_menu.split_up"), SplitDirection::Up),
+            (rust_i18n::t!("tab_menu.split_down"), SplitDirection::Down),
+        ]
+        .into_iter()
+        .map(|(label, dir)| {
+            let ws = ws.clone();
+            item(
+                label.into(),
+                true,
+                Box::new(move |_, window, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.close_tab_menu(cx);
+                        ws.split_focused(dir, window, cx);
+                    });
+                }),
+            )
+        })
+        .collect();
 
         let items: Vec<ContextMenuItem> =
             vec![close_item, close_others, close_all, close_left, close_right];
@@ -1416,7 +1441,7 @@ impl Workspace {
             .id("tab-ctx-menu")
             .occlude()
             .on_mouse_down_out(cx.listener(|ws, _, _, cx| {
-                ws.tab_menu = None;
+                ws.close_tab_menu(cx);
                 cx.notify();
             }))
             .bg(t.bg_overlay)
@@ -1427,6 +1452,8 @@ impl Workspace {
             .min_w(px(200.))
             .children(items)
             .child(sep())
+            .children(split_items)
+            .child(sep())
             .children(copy_items)
             .child(sep())
             .children(reveal_items);
@@ -1436,20 +1463,6 @@ impl Workspace {
                 .with_priority(1)
                 .into_any_element(),
         )
-    }
-
-    fn render_tab_bar(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("tab-bar")
-            .flex()
-            .flex_row()
-            .h(px(30.0))
-            .flex_shrink_0()
-            .overflow_x_scroll()
-            .bg(t.bg_elevated)
-            .border_b_1()
-            .border_color(t.separator)
-            .children((0..self.tabs.len()).map(|ix| self.render_tab(ix, t, cx)))
     }
 
     fn render_titlebar(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1582,6 +1595,518 @@ impl Workspace {
                     .child(rust_i18n::t!("panel.coming_soon").to_string()),
             )
     }
+
+    // ── Split / pane management ───────────────────────────────────────────────
+
+    fn split_focused(&mut self, dir: SplitDirection, window: &mut Window, cx: &mut Context<Self>) {
+        let new_pane_id = PaneId(self.next_pane_id);
+        self.next_pane_id += 1;
+        let new_pane = cx.new(|cx| Pane::new(new_pane_id, cx));
+        let registry = cx.global::<crate::Registry>().0.clone();
+        let editor = cx.new(|cx| {
+            EditorView::from_doc(
+                faber_editor::buffer::Document::empty_untitled(),
+                registry,
+                cx,
+            )
+        });
+        cx.subscribe(&editor, |ws, _, _: &EditorEvent, cx| {
+            ws.on_editor_edited(cx)
+        })
+        .detach();
+        new_pane.update(cx, |p: &mut Pane, _| {
+            p.push_tab(TabContent::Editor(editor));
+        });
+        self.panes.insert(new_pane_id, new_pane);
+        self.pane_group.split(self.focused_pane, new_pane_id, dir);
+        self.focused_pane = new_pane_id;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn move_tab(
+        &mut self,
+        source_pane: PaneId,
+        tab_id: usize,
+        target_pane: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ix = {
+            let pane = self.panes[&source_pane].read(cx);
+            let Some((ix, _)) = pane.tab_by_id(tab_id) else {
+                return;
+            };
+            ix
+        };
+        let mut removed_tab = None;
+        self.panes[&source_pane].update(cx, |p: &mut Pane, _| {
+            removed_tab = p.remove_tab(ix);
+        });
+        let Some(tab) = removed_tab else { return };
+        if let TabContent::Editor(ref e) = tab.content {
+            cx.subscribe(e, |ws, _, _: &EditorEvent, cx| ws.on_editor_edited(cx))
+                .detach();
+        }
+        self.panes[&target_pane].update(cx, |p: &mut Pane, _| {
+            p.push_tab(tab.content);
+        });
+        self.focused_pane = target_pane;
+        let new_ix = self.panes[&target_pane].read(cx).tab_count() - 1;
+        self.activate_tab_in(target_pane, new_ix, window, cx);
+        if self.panes.contains_key(&source_pane) && self.panes[&source_pane].read(cx).is_empty() {
+            self.collapse_pane(source_pane, window, cx);
+        }
+    }
+
+    fn collapse_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(neighbor_id) = self.pane_group.remove_pane(pane_id) {
+            self.panes.remove(&pane_id);
+            self.focused_pane = neighbor_id;
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn on_tab_drop(
+        &mut self,
+        dragged: DraggedTab,
+        target_pane: PaneId,
+        zone: DropZone,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match zone {
+            DropZone::Center => {
+                if dragged.source_pane != target_pane {
+                    self.move_tab(dragged.source_pane, dragged.tab_id, target_pane, window, cx);
+                }
+            }
+            DropZone::Edge(dir) => {
+                let source_tab_count = self.panes[&dragged.source_pane].read(cx).tab_count();
+                if dragged.source_pane == target_pane && source_tab_count == 1 {
+                    return;
+                }
+                let new_pane_id = PaneId(self.next_pane_id);
+                self.next_pane_id += 1;
+                let new_pane = cx.new(|cx| Pane::new(new_pane_id, cx));
+                self.panes.insert(new_pane_id, new_pane);
+                self.pane_group.split(target_pane, new_pane_id, dir);
+                self.move_tab(dragged.source_pane, dragged.tab_id, new_pane_id, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    // ── Split action handlers ─────────────────────────────────────────────────
+
+    fn on_split_left(&mut self, _: &SplitLeft, w: &mut Window, cx: &mut Context<Self>) {
+        self.split_focused(SplitDirection::Left, w, cx);
+    }
+
+    fn on_split_right(&mut self, _: &SplitRight, w: &mut Window, cx: &mut Context<Self>) {
+        self.split_focused(SplitDirection::Right, w, cx);
+    }
+
+    fn on_split_up(&mut self, _: &SplitUp, w: &mut Window, cx: &mut Context<Self>) {
+        self.split_focused(SplitDirection::Up, w, cx);
+    }
+
+    fn on_split_down(&mut self, _: &SplitDown, w: &mut Window, cx: &mut Context<Self>) {
+        self.split_focused(SplitDirection::Down, w, cx);
+    }
+
+    // ── Multi-pane rendering ──────────────────────────────────────────────────
+
+    fn render_tab_for(
+        &self,
+        pane_id: PaneId,
+        ix: usize,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let (title, dirty, is_active, tab_id, icon) = {
+            let pane = self.panes[&pane_id].read(cx);
+            let tab = &pane.tabs[ix];
+            let (title, dirty) = tab.title(cx);
+            let is_active = pane.active == Some(ix);
+            let icon: AnyElement = match &tab.content {
+                TabContent::Editor(_) => img(crate::file_icons::icon_for_file(&title))
+                    .size(px(14.0))
+                    .flex_shrink_0()
+                    .into_any_element(),
+                TabContent::Settings(_) => svg()
+                    .path(IconName::Settings.path())
+                    .size(px(14.0))
+                    .flex_shrink_0()
+                    .text_color(t.text_muted)
+                    .into_any_element(),
+                TabContent::ProjectSearch(_) => svg()
+                    .path(IconName::Search.path())
+                    .size(px(14.0))
+                    .flex_shrink_0()
+                    .text_color(t.text_muted)
+                    .into_any_element(),
+            };
+            (title, dirty, is_active, tab.id, icon)
+        };
+
+        let element_id = SharedString::from(format!("tab-{}-{}", pane_id.0, tab_id));
+
+        h_flex()
+            .id(element_id)
+            .group("tab")
+            .flex_shrink_0()
+            .max_w(px(170.))
+            .gap_2()
+            .px_3()
+            .h_full()
+            .border_r_1()
+            .border_color(t.separator)
+            .when(is_active, |el| el.bg(t.bg))
+            .when(!is_active, |el| el.bg(t.bg_elevated))
+            .font_family(t.ui_family.clone())
+            .text_size(px(t.font_size_caption))
+            .text_color(if is_active { t.text } else { t.text_muted })
+            .cursor_pointer()
+            .on_drag(
+                DraggedTab {
+                    source_pane: pane_id,
+                    tab_id,
+                    title: title.clone(),
+                },
+                |dragged: &DraggedTab, _point, _window, cx| {
+                    let title = dragged.title.clone();
+                    cx.new(|_| TabGhost { title })
+                },
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, _, window, cx| ws.activate_tab_in(pane_id, ix, window, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    ws.panes[&pane_id].update(cx, |p: &mut Pane, _| {
+                        p.tab_menu = Some(TabMenu {
+                            tab_id,
+                            pos: ev.position,
+                        });
+                    });
+                    ws.focused_pane = pane_id;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |ws, _, window, cx| {
+                    ws.request_close_tab_in(pane_id, ix, window, cx)
+                }),
+            )
+            .child(icon)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(title),
+            )
+            .when(dirty, |el| {
+                el.child(
+                    div()
+                        .size(px(7.0))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(t.dirty),
+                )
+            })
+            .child(
+                svg()
+                    .path(IconName::Close.path())
+                    .size(px(16.0))
+                    .flex_shrink_0()
+                    .text_color(gpui::transparent_black())
+                    .group_hover("tab", |s| s.text_color(t.text_subtle))
+                    .hover(|s| s.text_color(t.text))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |ws, _, window, cx| {
+                            cx.stop_propagation();
+                            ws.request_close_tab_in(pane_id, ix, window, cx);
+                        }),
+                    ),
+            )
+    }
+
+    fn render_tab_bar_for(
+        &self,
+        pane_id: PaneId,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tab_count = self.panes[&pane_id].read(cx).tab_count();
+        let bar_id = SharedString::from(format!("tab-bar-{}", pane_id.0));
+        div()
+            .id(bar_id)
+            .flex()
+            .flex_row()
+            .h(px(30.0))
+            .flex_shrink_0()
+            .overflow_x_scroll()
+            .bg(t.bg_elevated)
+            .border_b_1()
+            .border_color(t.separator)
+            .on_drop::<DraggedTab>(cx.listener(move |ws, dragged: &DraggedTab, window, cx| {
+                ws.drop_hover = None;
+                if dragged.source_pane != pane_id {
+                    let d = dragged.clone();
+                    ws.move_tab(d.source_pane, d.tab_id, pane_id, window, cx);
+                }
+                cx.notify();
+            }))
+            .children((0..tab_count).map(|ix| self.render_tab_for(pane_id, ix, t, cx)))
+    }
+
+    fn render_sash(
+        &self,
+        axis_path: Vec<usize>,
+        divider_ix: usize,
+        axis: Axis,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_h = matches!(axis, Axis::Horizontal);
+        let sash_id = SharedString::from(format!(
+            "sash-{}-{}",
+            axis_path
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("-"),
+            divider_ix
+        ));
+        let accent = t.accent;
+        let sep = t.separator;
+        div()
+            .id(sash_id)
+            .flex_shrink_0()
+            .when(is_h, |el| el.w(px(4.)).h_full().cursor_ew_resize())
+            .when(!is_h, |el| el.h(px(4.)).w_full().cursor_ns_resize())
+            .bg(sep)
+            .hover(move |s| s.bg(accent))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    ws.pane_resize = Some(PaneResize {
+                        axis_path: axis_path.clone(),
+                        divider_ix,
+                        axis,
+                        start_cursor: ev.position,
+                    });
+                    cx.notify();
+                }),
+            )
+    }
+
+    fn render_pane_area(
+        &self,
+        pane_id: PaneId,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let content: Option<AnyElement> = {
+            let pane = self.panes[&pane_id].read(cx);
+            pane.active_tab().map(|tab| match &tab.content {
+                TabContent::Editor(e) => e.clone().into_any_element(),
+                TabContent::Settings(s) => s.clone().into_any_element(),
+                TabContent::ProjectSearch(p) => p.clone().into_any_element(),
+            })
+        };
+
+        let tab_bar = self.render_tab_bar_for(pane_id, t, cx);
+
+        // Drop-zone highlight for this pane, shown only while a tab is actually
+        // being dragged (so an aborted drag can't leave a stale overlay).
+        let hover_zone = if cx.has_active_drag() {
+            self.drop_hover
+                .filter(|(id, _)| *id == pane_id)
+                .map(|(_, z)| z)
+        } else {
+            None
+        };
+
+        v_flex()
+            .flex_1()
+            .h_full()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, _, _, cx| {
+                    ws.focused_pane = pane_id;
+                    cx.notify();
+                }),
+            )
+            .child(tab_bar)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .on_drag_move::<DraggedTab>(cx.listener(
+                        move |ws, ev: &DragMoveEvent<DraggedTab>, _, cx| {
+                            // Every pane's handler fires on each move (capture phase),
+                            // so gate on whether the cursor is actually over THIS pane.
+                            let bounds = ev.bounds;
+                            let cursor = ev.event.position;
+                            let pane_rect = PaneRect {
+                                x: f32::from(bounds.origin.x),
+                                y: f32::from(bounds.origin.y),
+                                w: f32::from(bounds.size.width),
+                                h: f32::from(bounds.size.height),
+                            };
+                            let cursor_v = PaneVec2 {
+                                x: f32::from(cursor.x),
+                                y: f32::from(cursor.y),
+                            };
+                            if pane_rect.contains(cursor_v) {
+                                let zone =
+                                    faber_core::pane_tree::drop_zone(pane_rect, cursor_v, 0.25);
+                                if ws.drop_hover != Some((pane_id, zone)) {
+                                    ws.drop_hover = Some((pane_id, zone));
+                                    cx.notify();
+                                }
+                            } else if matches!(ws.drop_hover, Some((p, _)) if p == pane_id) {
+                                ws.drop_hover = None;
+                                cx.notify();
+                            }
+                        },
+                    ))
+                    .on_drop::<DraggedTab>(cx.listener(
+                        move |ws, dragged: &DraggedTab, window, cx| {
+                            let zone = ws
+                                .drop_hover
+                                .take()
+                                .map(|(_, z)| z)
+                                .unwrap_or(DropZone::Center);
+                            let d = dragged.clone();
+                            ws.on_tab_drop(d, pane_id, zone, window, cx);
+                        },
+                    ))
+                    .when_some(content, |el, c| el.child(c))
+                    .when_some(hover_zone, |el, zone| {
+                        el.child(deferred(Self::drop_overlay(zone, t)))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// Translucent accent rect covering the region a dragged tab would occupy:
+    /// the whole body for `Center`, or the matching half for an `Edge` split.
+    fn drop_overlay(zone: DropZone, t: &RuntimeTheme) -> Div {
+        let mut el = div()
+            .absolute()
+            .bg(t.accent)
+            .opacity(0.25)
+            .border_2()
+            .border_color(t.accent);
+        el = match zone {
+            DropZone::Center => el.top_0().left_0().w_full().h_full(),
+            DropZone::Edge(SplitDirection::Left) => el.top_0().left_0().h_full().w(relative(0.5)),
+            DropZone::Edge(SplitDirection::Right) => el.top_0().right_0().h_full().w(relative(0.5)),
+            DropZone::Edge(SplitDirection::Up) => el.top_0().left_0().w_full().h(relative(0.5)),
+            DropZone::Edge(SplitDirection::Down) => {
+                el.bottom_0().left_0().w_full().h(relative(0.5))
+            }
+        };
+        el
+    }
+
+    fn render_pane_group(
+        &self,
+        member: Member<PaneId>,
+        axis_path: Vec<usize>,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match member {
+            Member::Pane(id) => self.render_pane_area(id, t, cx),
+            Member::Axis(axis_node) => {
+                let is_h = matches!(axis_node.axis, Axis::Horizontal);
+                let axis = axis_node.axis;
+                // Build axis containers without `items_center` (h_flex applies it),
+                // so children stretch on the cross axis and fill the pane slot.
+                let container: Div = if is_h {
+                    div().flex().flex_row()
+                } else {
+                    div().flex().flex_col()
+                };
+                let mut container = container.flex_1().h_full().min_w(px(0.)).min_h(px(0.));
+                for (i, (member, flex)) in axis_node
+                    .members
+                    .into_iter()
+                    .zip(axis_node.flexes.iter())
+                    .enumerate()
+                {
+                    if i > 0 {
+                        let sash = self.render_sash(axis_path.clone(), i - 1, axis, t, cx);
+                        container = container.child(sash);
+                    }
+                    let mut child_path = axis_path.clone();
+                    child_path.push(i);
+                    let child_elem = self.render_pane_group(member, child_path, t, cx);
+                    let mut wrapper = div().flex().min_w(px(0.)).min_h(px(0.)).overflow_hidden();
+                    wrapper.style().flex_grow = Some(*flex);
+                    wrapper.style().flex_basis = Some(px(0.).into());
+                    let wrapper = wrapper.child(child_elem);
+                    container = container.child(wrapper);
+                }
+                container.into_any_element()
+            }
+        }
+    }
+
+    // ── Layout persistence helpers ────────────────────────────────────────────
+
+    fn serialize_layout(&self, cx: &App) -> faber_settings::state::SerializedLayout {
+        use faber_core::pane_tree::SerializedMember;
+        use faber_settings::state::{SerializedLayout, SerializedNode, SerializedPane};
+
+        fn convert(m: SerializedMember<SerializedPane>) -> SerializedNode {
+            match m {
+                SerializedMember::Pane(p) => SerializedNode::Pane(p),
+                SerializedMember::Axis {
+                    axis,
+                    members,
+                    flexes,
+                } => SerializedNode::Axis {
+                    axis: match axis {
+                        Axis::Horizontal => "horizontal".to_string(),
+                        Axis::Vertical => "vertical".to_string(),
+                    },
+                    members: members.into_iter().map(convert).collect(),
+                    flexes,
+                },
+            }
+        }
+
+        let root_member = self.pane_group.to_serialized(&|id: PaneId| {
+            let pane = self.panes[&id].read(cx);
+            let files: Vec<String> = pane
+                .tabs
+                .iter()
+                .filter_map(|tab| tab.editor())
+                .map(|e| e.read(cx).doc.path.to_string_lossy().to_string())
+                .filter(|p| !p.is_empty())
+                .collect();
+            let active = pane.active.unwrap_or(0);
+            SerializedPane { files, active }
+        });
+        SerializedLayout {
+            root: convert(root_member),
+        }
+    }
 }
 
 impl Focusable for Workspace {
@@ -1593,15 +2118,6 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.global::<RuntimeTheme>().clone();
-
-        let content: Option<AnyElement> =
-            self.active
-                .and_then(|ix| self.tabs.get(ix))
-                .map(|tab| match &tab.content {
-                    TabContent::Editor(e) => e.clone().into_any_element(),
-                    TabContent::Settings(s) => s.clone().into_any_element(),
-                    TabContent::ProjectSearch(p) => p.clone().into_any_element(),
-                });
 
         let base = div()
             .size_full()
@@ -1628,6 +2144,51 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_open_file_finder))
             .on_action(cx.listener(Self::on_open_file_finder_preview))
             .on_action(cx.listener(Self::on_quit))
+            .on_action(cx.listener(Self::on_split_left))
+            .on_action(cx.listener(Self::on_split_right))
+            .on_action(cx.listener(Self::on_split_up))
+            .on_action(cx.listener(Self::on_split_down))
+            .when(self.pane_resize.is_some(), |el| {
+                let axis = self.pane_resize.as_ref().map(|r| r.axis);
+                el.when(axis == Some(Axis::Horizontal), |el| el.cursor_ew_resize())
+                    .when(axis == Some(Axis::Vertical), |el| el.cursor_ns_resize())
+                    .on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, window, cx| {
+                        if let Some(ref resize) = ws.pane_resize {
+                            let delta = ev.position - resize.start_cursor;
+                            let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+                            let shift = if resize.axis == Axis::Horizontal {
+                                dx
+                            } else {
+                                dy
+                            };
+                            let vp = window.viewport_size();
+                            let container_px = if resize.axis == Axis::Horizontal {
+                                f32::from(vp.width)
+                            } else {
+                                f32::from(vp.height)
+                            };
+                            ws.pane_group.resize(
+                                &resize.axis_path,
+                                resize.divider_ix,
+                                shift,
+                                container_px,
+                                0.1,
+                            );
+                            ws.pane_resize = Some(PaneResize {
+                                start_cursor: ev.position,
+                                ..ws.pane_resize.clone().unwrap()
+                            });
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|ws, _, _, cx| {
+                            ws.pane_resize = None;
+                            cx.notify();
+                        }),
+                    )
+            })
             .when(self.sidebar_resizing, |el| {
                 el.on_mouse_move(cx.listener(|ws, event: &MouseMoveEvent, _, cx| {
                     use crate::sidebar::ACTIVITY_BAR_W;
@@ -1660,8 +2221,9 @@ impl Render for Workspace {
                 )
             });
 
-        // Empty state: show welcome screen only when no folder and no tabs are open.
-        if content.is_none() && self.root_folder.is_none() {
+        // Empty state: show welcome screen only when no folder and all panes are empty.
+        let all_empty = self.panes.values().all(|p| p.read(cx).is_empty());
+        if all_empty && self.root_folder.is_none() {
             let (recent_projects, recent_files) = {
                 let store = cx.global::<AppStateStore>();
                 (
@@ -1685,17 +2247,8 @@ impl Render for Workspace {
                 .into_any();
         }
 
-        let main = v_flex()
-            .flex_1()
-            .min_w(px(0.))
-            .h_full()
-            .child(self.render_tab_bar(&t, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .when_some(content, |el, c| el.child(c)),
-            );
+        let root_member = self.pane_group.root.clone();
+        let main = self.render_pane_group(root_member, vec![], &t, cx);
 
         let body_row = h_flex()
             .flex_1()

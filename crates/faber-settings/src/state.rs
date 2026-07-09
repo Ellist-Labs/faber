@@ -6,6 +6,31 @@ use serde::{Deserialize, Serialize};
 
 const RECENT_CAP: usize = 5;
 
+// ── Serialized pane layout ────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SerializedPane {
+    pub files: Vec<String>,
+    pub active: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SerializedNode {
+    Pane(SerializedPane),
+    Axis {
+        axis: String,
+        members: Vec<SerializedNode>,
+        flexes: Vec<f32>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SerializedLayout {
+    pub root: SerializedNode,
+}
+
 fn push_recent(list: &mut Vec<String>, abs: &str) {
     list.retain(|p| p != abs);
     list.insert(0, abs.to_string());
@@ -17,6 +42,7 @@ fn push_recent(list: &mut Vec<String>, abs: &str) {
 pub struct LastSession {
     pub root: Option<String>,
     pub files: Vec<String>,
+    pub layout: Option<SerializedLayout>,
 }
 
 /// Per-project persisted app state (not user preferences). Lives in its own
@@ -66,7 +92,18 @@ impl AppState {
     }
 
     pub fn set_last_session(&mut self, root: Option<String>, files: Vec<String>) {
-        self.last_session = Some(LastSession { root, files });
+        let layout = self.last_session.as_ref().and_then(|s| s.layout.clone());
+        self.last_session = Some(LastSession {
+            root,
+            files,
+            layout,
+        });
+    }
+
+    pub fn set_last_session_layout(&mut self, layout: Option<SerializedLayout>) {
+        if let Some(ref mut s) = self.last_session {
+            s.layout = layout;
+        }
     }
 }
 

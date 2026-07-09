@@ -415,10 +415,8 @@ impl Workspace {
 
     /// Returns the outline of the active editor, or empty.
     fn active_outline(&self, cx: &Context<Self>) -> Arc<Outline> {
-        let Some(i) = self.active else {
-            return Arc::new(Outline::default());
-        };
-        let Some(tab) = self.tabs.get(i) else {
+        let pane = self.pane().read(cx);
+        let Some(tab) = pane.active_tab() else {
             return Arc::new(Outline::default());
         };
         let Some(editor) = tab.editor() else {
@@ -428,8 +426,8 @@ impl Workspace {
     }
 
     pub(crate) fn active_is_markdown(&self, cx: &App) -> bool {
-        self.active
-            .and_then(|ix| self.tabs.get(ix))
+        let pane = self.pane().read(cx);
+        pane.active_tab()
             .and_then(|t| t.editor())
             .is_some_and(|e| e.read(cx).is_markdown())
     }
