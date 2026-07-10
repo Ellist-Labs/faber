@@ -222,9 +222,8 @@ impl Workspace {
         }
         {
             let ws_weak = cx.entity().downgrade();
-            let item = cx.new(|cx| {
-                crate::status_bar::LspStatusItem::new(lsp_status.clone(), ws_weak, cx)
-            });
+            let item =
+                cx.new(|cx| crate::status_bar::LspStatusItem::new(lsp_status.clone(), ws_weak, cx));
             status_bar.update(cx, |bar, _| bar.push_right(item.into()));
         }
 
@@ -869,7 +868,10 @@ impl Workspace {
                             .panes
                             .values()
                             .flat_map(|pane| {
-                                pane.read(cx).all_problems_panels().cloned().collect::<Vec<_>>()
+                                pane.read(cx)
+                                    .all_problems_panels()
+                                    .cloned()
+                                    .collect::<Vec<_>>()
                             })
                             .collect();
                         for panel in panels {
@@ -1018,20 +1020,25 @@ impl Workspace {
                     .child("✕")
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         if let Some(ws) = ws_dismiss.upgrade() {
-                            ws.update(cx, |ws, cx| { ws.lsp_overlay_open = false; cx.notify(); });
+                            ws.update(cx, |ws, cx| {
+                                ws.lsp_overlay_open = false;
+                                cx.notify();
+                            });
                         }
                     }),
             );
 
         // ── server rows ───────────────────────────────────────────────────────
         let rows: Vec<AnyElement> = if statuses.is_empty() {
-            vec![div()
-                .font_family(t.ui_family.clone())
-                .text_size(px(t.font_size_body))
-                .text_color(t.text_subtle)
-                .py(px(4.))
-                .child(rust_i18n::t!("lsp_overlay.no_servers").to_string())
-                .into_any_element()]
+            vec![
+                div()
+                    .font_family(t.ui_family.clone())
+                    .text_size(px(t.font_size_body))
+                    .text_color(t.text_subtle)
+                    .py(px(4.))
+                    .child(rust_i18n::t!("lsp_overlay.no_servers").to_string())
+                    .into_any_element(),
+            ]
         } else {
             statuses
                 .iter()
@@ -1054,9 +1061,10 @@ impl Workspace {
                         ServerState::Error(_) => {
                             (rust_i18n::t!("lsp_overlay.error").to_string(), t.error)
                         }
-                        ServerState::Stopped => {
-                            (rust_i18n::t!("lsp_overlay.stopped").to_string(), t.text_subtle)
-                        }
+                        ServerState::Stopped => (
+                            rust_i18n::t!("lsp_overlay.stopped").to_string(),
+                            t.text_subtle,
+                        ),
                     };
 
                     let server_id = s.server_id.clone();
@@ -1117,7 +1125,10 @@ impl Workspace {
                                                 .text_size(px(t.font_size_caption))
                                                 .font_family(t.ui_family.clone())
                                                 .text_color(t.text_muted)
-                                                .child(rust_i18n::t!("lsp_overlay.restart").to_string())
+                                                .child(
+                                                    rust_i18n::t!("lsp_overlay.restart")
+                                                        .to_string(),
+                                                )
                                                 .on_mouse_down(MouseButton::Left, {
                                                     let sid = server_id.clone();
                                                     let mgr = mgr_btn.clone();
@@ -1134,7 +1145,9 @@ impl Workspace {
                                                 .text_size(px(t.font_size_caption))
                                                 .font_family(t.ui_family.clone())
                                                 .text_color(t.text_muted)
-                                                .child(rust_i18n::t!("lsp_overlay.stop").to_string())
+                                                .child(
+                                                    rust_i18n::t!("lsp_overlay.stop").to_string(),
+                                                )
                                                 .on_mouse_down(MouseButton::Left, {
                                                     let sid = server_id.clone();
                                                     let mgr = mgr_btn.clone();

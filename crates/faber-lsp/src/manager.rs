@@ -207,18 +207,36 @@ impl LspManager {
             Ok(s) => s,
             Err(e) => {
                 log::error!("lsp: spawn failed for {server_id}: {e}");
-                self.downloading.lock().unwrap_or_else(|p| p.into_inner()).remove(&server_id);
-                self.download_msgs.lock().unwrap_or_else(|p| p.into_inner()).remove(&server_id);
-                self.permanently_failed.lock().unwrap_or_else(|p| p.into_inner()).insert(server_id.clone(), e.to_string());
+                self.downloading
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&server_id);
+                self.download_msgs
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&server_id);
+                self.permanently_failed
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(server_id.clone(), e.to_string());
                 self.update_status();
                 return Err(e);
             }
         };
         if let Err(e) = server.initialize(None, workspace_root, init_options) {
             log::error!("lsp: initialize failed for {server_id}: {e}");
-            self.downloading.lock().unwrap_or_else(|p| p.into_inner()).remove(&server_id);
-            self.download_msgs.lock().unwrap_or_else(|p| p.into_inner()).remove(&server_id);
-            self.permanently_failed.lock().unwrap_or_else(|p| p.into_inner()).insert(server_id.clone(), e.to_string());
+            self.downloading
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&server_id);
+            self.download_msgs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&server_id);
+            self.permanently_failed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(server_id.clone(), e.to_string());
             self.update_status();
             return Err(e);
         }
@@ -472,9 +490,18 @@ impl LspManager {
                 ids.retain(|id| id != &server_id);
             }
         }
-        self.downloading.lock().unwrap_or_else(|p| p.into_inner()).remove(&server_id);
-        self.download_msgs.lock().unwrap_or_else(|p| p.into_inner()).remove(&server_id);
-        self.permanently_failed.lock().unwrap_or_else(|p| p.into_inner()).remove(&server_id);
+        self.downloading
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&server_id);
+        self.download_msgs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&server_id);
+        self.permanently_failed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&server_id);
         self.update_status();
     }
 
@@ -492,7 +519,10 @@ impl LspManager {
                 ids.retain(|id| id != &server_id);
             }
         }
-        self.permanently_failed.lock().unwrap_or_else(|p| p.into_inner()).remove(&server_id);
+        self.permanently_failed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&server_id);
         self.update_status();
 
         let workspace_root = {
@@ -629,14 +659,22 @@ impl LspManager {
         let adapter_lang: HashMap<&str, &str> = self
             .adapters
             .iter()
-            .map(|a| (a.server_id(), a.languages().first().copied().unwrap_or_default()))
+            .map(|a| {
+                (
+                    a.server_id(),
+                    a.languages().first().copied().unwrap_or_default(),
+                )
+            })
             .collect();
 
         let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
         let lang_servers = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
         let downloading = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
         let dl_msgs = self.download_msgs.lock().unwrap_or_else(|p| p.into_inner());
-        let failed = self.permanently_failed.lock().unwrap_or_else(|p| p.into_inner());
+        let failed = self
+            .permanently_failed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
 
         // Build a server_id → lang_id map for display.
         let mut server_to_lang: HashMap<String, String> = HashMap::new();

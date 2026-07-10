@@ -3231,4 +3231,3 @@ impl EditorView {
         .into_any()
     }
 }
-

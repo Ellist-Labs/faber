@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
-use gpui::{AnyView, Context, Entity, IntoElement, MouseButton, Render, Window, div, prelude::*, px, svg};
+use gpui::{
+    AnyView, Context, Entity, IntoElement, MouseButton, Render, Window, div, prelude::*, px, svg,
+};
 use rust_i18n::t;
 
 use crate::lsp_status::LspStatus;
@@ -319,18 +321,26 @@ impl Render for LspStatusItem {
             let status = &lsp.statuses[0];
             let color = match &status.state {
                 ServerState::Running => {
-                    if lsp.error_count > 0 { t.error }
-                    else if lsp.warning_count > 0 { t.warning }
-                    else { t.success }
+                    if lsp.error_count > 0 {
+                        t.error
+                    } else if lsp.warning_count > 0 {
+                        t.warning
+                    } else {
+                        t.success
+                    }
                 }
-                ServerState::Downloading | ServerState::Starting | ServerState::Initializing
+                ServerState::Downloading
+                | ServerState::Starting
+                | ServerState::Initializing
                 | ServerState::Restarting { .. } => t.warning,
                 ServerState::Error(_) => t.error,
                 ServerState::Stopped => t.text_subtle,
             };
             let badge = match &status.state {
                 ServerState::Running if lsp.error_count > 0 => Some(lsp.error_count.to_string()),
-                ServerState::Running if lsp.warning_count > 0 => Some(lsp.warning_count.to_string()),
+                ServerState::Running if lsp.warning_count > 0 => {
+                    Some(lsp.warning_count.to_string())
+                }
                 _ => None,
             };
             (color, badge)
