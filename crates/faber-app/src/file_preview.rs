@@ -7,7 +7,6 @@ use gpui::{
 };
 use rust_i18n::t;
 
-use crate::editor_view::EditorView;
 use crate::file_finder::FileFinderView;
 use crate::theme::RuntimeTheme;
 use crate::ui::v_flex;
@@ -138,8 +137,12 @@ pub fn render_preview(
                 range
                     .map(|i| {
                         let text = lines[i].clone();
-                        let runs =
-                            EditorView::build_text_runs(&text, doc.highlight_spans(i), &t2, &[]);
+                        let runs = crate::buffer_view::build_text_runs(
+                            &text,
+                            doc.highlight_spans(i),
+                            &t2,
+                            &[],
+                        );
                         div()
                             .h(line_h)
                             .w_full()

@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use faber_editor::buffer::Document;
 use faber_editor::project_search::{FileSearchResult, ProjectSearchQuery, filter_candidates, run};
-use faber_editor::{ChangeSet, Transaction};
+use faber_editor::{ChangeSet, LanguageRegistry, Transaction};
 use ropey::Rope;
 
 use gpui::{
@@ -89,6 +90,7 @@ pub struct ProjectSearchView {
 
     // Expand context state
     file_contents: HashMap<PathBuf, Vec<String>>,
+    file_docs: HashMap<PathBuf, Box<Document>>,
     context_above: HashMap<PathBuf, usize>,
     context_below: HashMap<PathBuf, usize>,
 
@@ -141,6 +143,7 @@ impl ProjectSearchView {
             total_matches: 0,
             limit_reached: false,
             file_contents: HashMap::new(),
+            file_docs: HashMap::new(),
             context_above: HashMap::new(),
             context_below: HashMap::new(),
             root_folder: cx.global::<ProjectRoot>().0.clone(),
@@ -370,17 +373,20 @@ impl ProjectSearchView {
         }
     }
 
-    fn load_file_content(&mut self, path: &PathBuf) {
+    fn load_file_content(&mut self, path: &PathBuf, registry: &LanguageRegistry) {
         if self.file_contents.contains_key(path) {
             return;
         }
         if let Ok(content) = std::fs::read_to_string(path) {
             let lines: Vec<String> = content.lines().map(String::from).collect();
             self.file_contents.insert(path.clone(), lines);
+            let language = registry.language_for_path(path);
+            let doc = Document::from_str(&content, language.as_ref());
+            self.file_docs.insert(path.clone(), Box::new(doc));
         }
     }
 
-    fn expand_context_for_active(&mut self) {
+    fn expand_context_for_active(&mut self, cx: &mut Context<Self>) {
         let file_idx = {
             let row_ref = self.active_row.and_then(|r| self.rows.get(r));
             match row_ref {
@@ -400,7 +406,8 @@ impl ProjectSearchView {
         let Some(path) = self.results.get(file_idx).map(|r| r.path.clone()) else {
             return;
         };
-        self.load_file_content(&path);
+        let registry = cx.global::<crate::Registry>().0.clone();
+        self.load_file_content(&path, &registry);
         *self.context_above.entry(path.clone()).or_insert(0) += 3;
         *self.context_below.entry(path.clone()).or_insert(0) += 3;
         self.rebuild_rows();
@@ -644,7 +651,7 @@ impl ProjectSearchView {
             "enter" => {
                 if ks.modifiers.shift {
                     // shift+enter: expand context around the active file's results
-                    self.expand_context_for_active();
+                    self.expand_context_for_active(cx);
                     cx.notify();
                 } else if active == ActiveInput::Query {
                     // Re-run search immediately (skip debounce).
@@ -1972,8 +1979,9 @@ impl ProjectSearchView {
                     .cursor_pointer()
                     .hover(|s| s.bg(t.line_highlight))
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        entity.update(cx, |ps, _| {
-                            ps.load_file_content(&path);
+                        entity.update(cx, |ps, cx| {
+                            let registry = cx.global::<crate::Registry>().0.clone();
+                            ps.load_file_content(&path, &registry);
                             let count = ps.context_above.entry(path.clone()).or_insert(0);
                             *count += 3;
                             ps.rebuild_rows();
@@ -2035,14 +2043,17 @@ impl ProjectSearchView {
                             .text_color(t.text_subtle)
                             .child(format!("{}", line_number + 1)),
                     )
-                    .child(
+                    .child({
+                        let spans = self
+                            .file_docs
+                            .get(&file_result.path)
+                            .map(|doc| doc.highlight_spans(line_number))
+                            .unwrap_or_default();
                         div()
                             .flex_1()
                             .min_w(px(0.))
-                            .overflow_hidden()
-                            .text_color(t.text_subtle)
-                            .child(SharedString::from(line_text)),
-                    )
+                            .child(crate::buffer_view::build_syntax_spans(&line_text, spans, t))
+                    })
             }
             ResultRow::ExpandBelow { file_idx } => {
                 let file_result = &self.results[file_idx];
@@ -2059,8 +2070,9 @@ impl ProjectSearchView {
                     .cursor_pointer()
                     .hover(|s| s.bg(t.line_highlight))
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        entity.update(cx, |ps, _| {
-                            ps.load_file_content(&path);
+                        entity.update(cx, |ps, cx| {
+                            let registry = cx.global::<crate::Registry>().0.clone();
+                            ps.load_file_content(&path, &registry);
                             let count = ps.context_below.entry(path.clone()).or_insert(0);
                             *count += 3;
                             ps.rebuild_rows();
