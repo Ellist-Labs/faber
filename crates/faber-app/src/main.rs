@@ -143,6 +143,7 @@ actions!(
         OpenFileFinderPreview,
         OpenSymbolFinder,
         OpenProblems,
+        ToggleLspStatus,
         Quit,
         SplitLeft,
         SplitRight,
@@ -331,6 +332,7 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-t", OpenSymbolFinder, Some("Workspace")),
         // Problems panel
         KeyBinding::new("cmd-shift-m", OpenProblems, Some("Workspace")),
+        KeyBinding::new("cmd-shift-p", OpenProblems, Some("Workspace")),
         KeyBinding::new("escape", SfDismiss, Some("SymbolFinder")),
         KeyBinding::new("enter", SfConfirm, Some("SymbolFinder")),
         KeyBinding::new("down", SfSelectNext, Some("SymbolFinder")),

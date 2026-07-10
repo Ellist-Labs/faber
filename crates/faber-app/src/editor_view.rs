@@ -17,8 +17,8 @@ use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle,
     Focusable, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollStrategy, ScrollWheelEvent,
-    SharedString, TextRun, UniformListScrollHandle, Window, canvas, deferred, div, fill, font,
-    point, prelude::*, px, size, svg, uniform_list,
+    SharedString, TextRun, UniformListScrollHandle, Window, anchored, canvas, deferred, div, fill,
+    font, point, prelude::*, px, size, svg, uniform_list,
 };
 
 use crate::input_helpers::{
@@ -141,6 +141,16 @@ pub struct EditorView {
 
     // LSP diagnostics — set by Workspace after LspManager is wired up.
     pub diagnostic_store: Option<std::sync::Arc<faber_lsp::diagnostics::DiagnosticStore>>,
+
+    // LSP hover
+    pub lsp_manager: Option<std::sync::Arc<faber_lsp::manager::LspManager>>,
+    hover_timer: Option<gpui::Task<()>>,
+    /// Pixel Y of the last mouse-over; anchors the popover vertically.
+    hover_pixel_y: f32,
+    /// Char offset in the rope at the last mouse-over position.
+    hover_char_offset: Option<usize>,
+    /// Markdown / plain-text content from the last successful hover response.
+    pub hover_content: Option<String>,
 }
 
 impl EditorView {
@@ -205,6 +215,11 @@ impl EditorView {
             cursor_blink_epoch: 0,
             flash_line: None,
             diagnostic_store: None,
+            lsp_manager: None,
+            hover_timer: None,
+            hover_pixel_y: 0.0,
+            hover_char_offset: None,
+            hover_content: None,
         };
         view.rebuild_line_cache();
         if view.is_markdown() {
@@ -602,6 +617,14 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Track position for hover when not dragging; compute offset while Window is available.
+        if !ev.dragging() {
+            let t = cx.global::<RuntimeTheme>().clone();
+            let show_ln = cx.global::<SettingsStore>().0.line_numbers;
+            let offset = self.offset_at(ev.position, &t, show_ln, window);
+            self.schedule_hover(ev.position, offset, cx);
+        }
+
         if !ev.dragging() || !self.mouse_selecting {
             return;
         }
@@ -667,6 +690,75 @@ impl EditorView {
     ) {
         if self.mouse_selecting {
             self.mouse_selecting = false;
+            cx.notify();
+        }
+    }
+
+    // ── LSP hover ─────────────────────────────────────────────────────────────
+
+    fn schedule_hover(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        offset: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hover_content.is_some() {
+            self.hover_content = None;
+            cx.notify();
+        }
+        self.hover_pixel_y = f32::from(position.y);
+        self.hover_char_offset = offset;
+        self.hover_timer = Some(cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(400))
+                .await;
+            view.update(cx, |ev, cx| ev.trigger_hover(cx)).ok();
+        }));
+    }
+
+    fn trigger_hover(&mut self, cx: &mut Context<Self>) {
+        let Some(offset) = self.hover_char_offset else {
+            return;
+        };
+        let Some(mgr) = self.lsp_manager.clone() else {
+            return;
+        };
+        let path = self.doc.path.clone();
+        let uri = match url::Url::from_file_path(&path) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+        let encoding = mgr.position_encoding_for_uri(&uri);
+        let lsp_pos = faber_lsp::position::to_lsp_position(&self.doc.rope, offset, encoding);
+        let params_json = serde_json::json!({
+            "textDocument": { "uri": uri.as_str() },
+            "position": { "line": lsp_pos.line, "character": lsp_pos.character }
+        });
+        let Some(rx) = mgr.request_for_document(&uri, "textDocument/hover", params_json) else {
+            return;
+        };
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rx.recv_timeout(std::time::Duration::from_secs(5)) })
+                .await;
+            let content = match result {
+                Ok(Ok(val)) => faber_lsp::hover::extract_hover_text(&val),
+                _ => None,
+            };
+            view.update(cx, |ev, cx| {
+                ev.hover_content = content;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_timer = None;
+        if self.hover_content.is_some() {
+            self.hover_content = None;
             cx.notify();
         }
     }
@@ -2808,7 +2900,53 @@ impl Render for EditorView {
         } else {
             root
         };
+        let root = if let Some(content) = self.hover_content.clone() {
+            root.child(self.render_hover_popover(&t, content, cx))
+        } else {
+            root
+        };
         root.into_any()
+    }
+}
+
+// ── Hover popover ──────────────────────────────────────────────────────────────
+
+impl EditorView {
+    fn render_hover_popover(
+        &self,
+        t: &RuntimeTheme,
+        content: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pixel_y = self.hover_pixel_y;
+        let t2 = t.clone();
+        deferred(
+            anchored()
+                .position(point(px(120.), px(pixel_y + 24.)))
+                .snap_to_window()
+                .child(
+                    div()
+                        .id("hover-popover")
+                        .bg(t.bg_elevated)
+                        .border_1()
+                        .border_color(t.border)
+                        .rounded(px(t.radius_md))
+                        .p(px(10.))
+                        .max_w(px(520.))
+                        .font_family(t.ui_family.clone())
+                        .text_size(px(t.font_size_body))
+                        .text_color(t.text)
+                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_, _, _, _| {}))
+                        .child(
+                            div()
+                                .font_family(t2.mono_family.clone())
+                                .text_size(px(t2.font_size_code))
+                                .child(content),
+                        ),
+                ),
+        )
+        .with_priority(3)
+        .into_any_element()
     }
 }
 
@@ -3093,3 +3231,4 @@ impl EditorView {
         .into_any()
     }
 }
+

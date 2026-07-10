@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod diagnostics;
+pub mod hover;
 pub mod install;
 pub mod manager;
 pub mod position;

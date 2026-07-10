@@ -112,6 +112,44 @@ impl DiagnosticStore {
         result
     }
 
+    /// All diagnostics grouped by URI, each group sorted by line then severity.
+    /// Files with errors come first; ties broken alphabetically by URI.
+    pub fn get_all(&self) -> Vec<(url::Url, Vec<DiagnosticEntry>)> {
+        let inner = self.inner.read().expect("lock poisoned");
+        let mut by_uri: std::collections::HashMap<url::Url, Vec<DiagnosticEntry>> =
+            std::collections::HashMap::new();
+        for (key, entries) in &inner.entries {
+            by_uri
+                .entry(key.uri.clone())
+                .or_default()
+                .extend(entries.iter().cloned());
+        }
+        let mut groups: Vec<(url::Url, Vec<DiagnosticEntry>)> = by_uri.into_iter().collect();
+        // Sort entries within each group by line then severity.
+        for (_, entries) in &mut groups {
+            entries.sort_by(|a, b| {
+                a.range
+                    .lsp_line
+                    .cmp(&b.range.lsp_line)
+                    .then_with(|| a.severity.cmp(&b.severity))
+            });
+        }
+        // Sort files: errors-first, then warnings-first, then alphabetically.
+        groups.sort_by(|(ua, ea), (ub, eb)| {
+            let worst = |entries: &[DiagnosticEntry]| {
+                entries
+                    .iter()
+                    .map(|e| e.severity)
+                    .min()
+                    .unwrap_or(Severity::Hint)
+            };
+            worst(ea)
+                .cmp(&worst(eb))
+                .then_with(|| ua.as_str().cmp(ub.as_str()))
+        });
+        groups
+    }
+
     /// Generation counter — bumped after every publish. Poll this at 50ms to detect changes.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)

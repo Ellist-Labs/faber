@@ -37,8 +37,8 @@ use crate::{
     AppStateStore, CfConfirm, CfDismiss, CloseFile, CloseFolder, CloseTab, CloseWindow, NewFile,
     NextTab, OpenFile, OpenFileFinder, OpenFileFinderPreview, OpenFolder, OpenProblems,
     OpenProjectSearch, OpenSettings, PrevTab, ProjectRoot, Quit, ReindexProject, SaveAll, SaveAs,
-    SaveFile, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleBottomPanel, ToggleRightPanel,
-    ToggleSidebar,
+    SaveFile, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleBottomPanel, ToggleLspStatus,
+    ToggleRightPanel, ToggleSidebar,
 };
 use faber_lang::{LanguageId as LspLanguageId, LanguageRegistry};
 use faber_lsp::adapter::{LspAdapter, RustAnalyzerAdapter};
@@ -196,6 +196,8 @@ pub struct Workspace {
     confirm: Option<ConfirmState>,
     pane_resize: Option<PaneResize>,
     drop_hover: Option<(PaneId, DropZone)>,
+    pub(crate) lsp_overlay_open: bool,
+    pub(crate) lsp_overlay_pos: gpui::Point<gpui::Pixels>,
 }
 
 impl Workspace {
@@ -219,7 +221,10 @@ impl Workspace {
             status_bar.update(cx, |bar, _| bar.push_right(item.into()));
         }
         {
-            let item = cx.new(|cx| crate::status_bar::LspStatusItem::new(lsp_status.clone(), cx));
+            let ws_weak = cx.entity().downgrade();
+            let item = cx.new(|cx| {
+                crate::status_bar::LspStatusItem::new(lsp_status.clone(), ws_weak, cx)
+            });
             status_bar.update(cx, |bar, _| bar.push_right(item.into()));
         }
 
@@ -253,6 +258,8 @@ impl Workspace {
             confirm: None,
             pane_resize: None,
             drop_hover: None,
+            lsp_overlay_open: false,
+            lsp_overlay_pos: gpui::point(gpui::px(0.), gpui::px(0.)),
         };
         if !paths.is_empty() {
             for path in paths {
@@ -323,11 +330,13 @@ impl Workspace {
             ws.on_editor_edited(cx)
         })
         .detach();
-        // Wire the shared diagnostic store so squiggles render for this editor.
+        // Wire the shared diagnostic store and LSP manager so squiggles + hover work.
         if let Some(mgr) = &self.lsp_manager {
             let store = mgr.diagnostic_store();
+            let mgr_arc = Arc::clone(mgr);
             editor.update(cx, |ev, _cx| {
                 ev.diagnostic_store = Some(store);
+                ev.lsp_manager = Some(mgr_arc);
             });
         }
         self.panes[&self.focused_pane].update(cx, |pane: &mut Pane, cx| {
@@ -841,7 +850,7 @@ impl Workspace {
                 {
                     break;
                 }
-                // Notify EditorViews to repaint if diagnostics changed.
+                // Notify EditorViews + DiagnosticsPanels to repaint if diagnostics changed.
                 let diag_gen = diag_store.generation();
                 if diag_gen != last_diag_gen {
                     last_diag_gen = diag_gen;
@@ -855,6 +864,16 @@ impl Workspace {
                             .collect();
                         for ev in editors {
                             ev.update(cx, |_, cx| cx.notify());
+                        }
+                        let panels: Vec<_> = ws
+                            .panes
+                            .values()
+                            .flat_map(|pane| {
+                                pane.read(cx).all_problems_panels().cloned().collect::<Vec<_>>()
+                            })
+                            .collect();
+                        for panel in panels {
+                            panel.update(cx, |_, cx| cx.notify());
                         }
                     });
                 }
@@ -890,7 +909,8 @@ impl Workspace {
             return;
         }
         let ws = cx.entity().downgrade();
-        let finder = cx.new(|cx| FileFinderView::new(ws, preview, cx));
+        let index_status = self.index_status.clone();
+        let finder = cx.new(|cx| FileFinderView::new(ws, index_status, preview, cx));
         window.focus(&finder.read(cx).focus_handle);
         self.file_finder = Some(finder);
         cx.notify();
@@ -961,6 +981,201 @@ impl Workspace {
             .map(|s| s.buttons.len().saturating_sub(1))
             .unwrap_or(0);
         self.on_confirm_answer(cancel_ix, window, cx);
+    }
+
+    fn render_lsp_overlay(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.lsp_overlay_open {
+            return None;
+        }
+
+        use faber_lsp::server::ServerState;
+        let statuses = self.lsp_status.read(cx).statuses.clone();
+        let mgr = self.lsp_manager.clone();
+        let ws_entity = cx.entity().downgrade();
+
+        // ── header ────────────────────────────────────────────────────────────
+        let ws_dismiss = ws_entity.clone();
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .mb(px(8.))
+            .child(
+                div()
+                    .font_family(t.ui_family.clone())
+                    .text_size(px(t.font_size_caption))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(t.text_muted)
+                    .child(rust_i18n::t!("lsp_overlay.title").to_string()),
+            )
+            .child(
+                div()
+                    .cursor_pointer()
+                    .text_color(t.text_muted)
+                    .text_size(px(t.font_size_caption))
+                    .font_family(t.ui_family.clone())
+                    .px(px(4.))
+                    .child("✕")
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        if let Some(ws) = ws_dismiss.upgrade() {
+                            ws.update(cx, |ws, cx| { ws.lsp_overlay_open = false; cx.notify(); });
+                        }
+                    }),
+            );
+
+        // ── server rows ───────────────────────────────────────────────────────
+        let rows: Vec<AnyElement> = if statuses.is_empty() {
+            vec![div()
+                .font_family(t.ui_family.clone())
+                .text_size(px(t.font_size_body))
+                .text_color(t.text_subtle)
+                .py(px(4.))
+                .child(rust_i18n::t!("lsp_overlay.no_servers").to_string())
+                .into_any_element()]
+        } else {
+            statuses
+                .iter()
+                .map(|s| {
+                    let (state_text, dot_color) = match &s.state {
+                        ServerState::Downloading => {
+                            let msg = s.download_msg.as_deref().unwrap_or("Downloading...");
+                            (msg.to_owned(), t.warning)
+                        }
+                        ServerState::Starting | ServerState::Initializing => {
+                            (rust_i18n::t!("lsp_overlay.starting").to_string(), t.warning)
+                        }
+                        ServerState::Running => {
+                            (rust_i18n::t!("lsp_overlay.running").to_string(), t.success)
+                        }
+                        ServerState::Restarting { attempt } => (
+                            format!("{} ({})", rust_i18n::t!("lsp_overlay.restarting"), attempt),
+                            t.warning,
+                        ),
+                        ServerState::Error(_) => {
+                            (rust_i18n::t!("lsp_overlay.error").to_string(), t.error)
+                        }
+                        ServerState::Stopped => {
+                            (rust_i18n::t!("lsp_overlay.stopped").to_string(), t.text_subtle)
+                        }
+                    };
+
+                    let server_id = s.server_id.clone();
+                    let mgr_btn = mgr.clone();
+                    let ws_stop = ws_entity.clone();
+
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .py(px(8.))
+                        .border_b_1()
+                        .border_color(t.separator)
+                        // server name row
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .size(px(7.))
+                                        .rounded_full()
+                                        .bg(dot_color)
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(t.ui_family.clone())
+                                        .text_size(px(t.font_size_body))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(t.text)
+                                        .child(s.server_id.clone()),
+                                ),
+                        )
+                        // state + action buttons row
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .pl(px(13.))
+                                .child(
+                                    div()
+                                        .font_family(t.ui_family.clone())
+                                        .text_size(px(t.font_size_caption))
+                                        .text_color(dot_color)
+                                        .child(state_text),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .text_size(px(t.font_size_caption))
+                                                .font_family(t.ui_family.clone())
+                                                .text_color(t.text_muted)
+                                                .child(rust_i18n::t!("lsp_overlay.restart").to_string())
+                                                .on_mouse_down(MouseButton::Left, {
+                                                    let sid = server_id.clone();
+                                                    let mgr = mgr_btn.clone();
+                                                    move |_, _, _cx| {
+                                                        if let Some(m) = &mgr {
+                                                            m.restart_server(&sid);
+                                                        }
+                                                    }
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .text_size(px(t.font_size_caption))
+                                                .font_family(t.ui_family.clone())
+                                                .text_color(t.text_muted)
+                                                .child(rust_i18n::t!("lsp_overlay.stop").to_string())
+                                                .on_mouse_down(MouseButton::Left, {
+                                                    let sid = server_id.clone();
+                                                    let mgr = mgr_btn.clone();
+                                                    move |_, _, cx| {
+                                                        if let Some(m) = &mgr {
+                                                            m.stop_server(&sid);
+                                                        }
+                                                        if let Some(ws) = ws_stop.upgrade() {
+                                                            ws.update(cx, |ws, cx| {
+                                                                ws.lsp_overlay_open = false;
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    }
+                                                }),
+                                        ),
+                                ),
+                        )
+                        .into_any_element()
+                })
+                .collect()
+        };
+
+        let panel = popover_container("lsp-overlay", t)
+            .w(px(280.))
+            .p(px(12.))
+            .child(header)
+            .children(rows);
+
+        let pos = self.lsp_overlay_pos;
+        Some(
+            deferred(
+                anchored()
+                    .position(pos)
+                    .anchor(gpui::Corner::BottomRight)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(panel),
+            )
+            .with_priority(2)
+            .into_any(),
+        )
     }
 
     fn render_confirm_modal(
@@ -1340,6 +1555,20 @@ impl Workspace {
         self.activate_tab(new_ix, window, cx);
     }
 
+    fn on_toggle_lsp_status(
+        &mut self,
+        _: &ToggleLspStatus,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.lsp_overlay_open = !self.lsp_overlay_open;
+        if self.lsp_overlay_open {
+            let size = window.viewport_size();
+            self.lsp_overlay_pos = gpui::point(size.width - px(8.), size.height - px(30.));
+        }
+        cx.notify();
+    }
+
     fn on_open_problems(&mut self, _: &OpenProblems, window: &mut Window, cx: &mut Context<Self>) {
         let existing = self.pane().read(cx).find_problems_tab();
         if let Some(ix) = existing {
@@ -1347,10 +1576,11 @@ impl Workspace {
             return;
         }
         let store = self.lsp_manager.as_ref().map(|m| m.diagnostic_store());
+        let ws_weak = cx.weak_entity();
         let panel = cx.new(|cx| {
             let mut p = crate::panels::diagnostics_panel::DiagnosticsPanel::new(cx);
             if let Some(s) = store {
-                p.set_store(s);
+                p.set_store(s, ws_weak);
             }
             p
         });
@@ -2626,6 +2856,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_open_problems))
+            .on_action(cx.listener(Self::on_toggle_lsp_status))
             .on_action(cx.listener(Self::on_reindex_project))
             .on_action(cx.listener(Self::on_open_project_search))
             .on_action(cx.listener(Self::on_open_file_finder))
@@ -2739,6 +2970,10 @@ impl Render for Workspace {
                     Some(modal) => el.relative().child(modal),
                     None => el,
                 })
+                .map(|el| match self.render_lsp_overlay(&t, cx) {
+                    Some(overlay) => el.child(overlay),
+                    None => el,
+                })
                 .into_any();
         }
 
@@ -2781,6 +3016,10 @@ impl Render for Workspace {
             .when_some(self.symbol_finder.clone(), |el, finder| el.child(finder))
             .map(|el| match self.render_confirm_modal(&t, cx) {
                 Some(modal) => el.child(modal),
+                None => el,
+            })
+            .map(|el| match self.render_lsp_overlay(&t, cx) {
+                Some(overlay) => el.child(overlay),
                 None => el,
             });
 
