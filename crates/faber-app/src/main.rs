@@ -1,4 +1,5 @@
 mod assets;
+mod buffer_view;
 mod editor_logic;
 mod editor_view;
 mod file_finder;

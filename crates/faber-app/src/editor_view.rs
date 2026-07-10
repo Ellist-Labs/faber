@@ -5,7 +5,7 @@ use faber_editor::{
     buffer::Document,
     cursor,
     edit_history::History,
-    highlight::{HighlightSpan, char_col_to_byte_col},
+    highlight::char_col_to_byte_col,
     markdown::{
         edit::{EnterAction, enter_action, looks_like_url, smart_wrap, toggle_checkbox},
         parse_markdown,
@@ -1658,133 +1658,6 @@ impl EditorView {
         row.child(content).into_any_element()
     }
 
-    pub(crate) fn build_text_runs(
-        line_str: &str,
-        raw_spans: &[HighlightSpan],
-        t: &RuntimeTheme,
-        diagnostics: &[faber_lsp::diagnostics::DiagnosticEntry],
-    ) -> Vec<TextRun> {
-        let line_bytes = line_str.len();
-        if line_bytes == 0 {
-            return Vec::new();
-        }
-        let default_font = font(t.mono_family.clone());
-        if raw_spans.is_empty() {
-            return vec![TextRun {
-                len: line_bytes,
-                font: default_font,
-                color: t.text,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }];
-        }
-        let mut breakpoints: Vec<usize> = vec![0, line_bytes];
-        for s in raw_spans {
-            let sb = (s.start_byte_col as usize).min(line_bytes);
-            let eb = if s.end_byte_col == u32::MAX {
-                line_bytes
-            } else {
-                (s.end_byte_col as usize).min(line_bytes)
-            };
-            if sb < eb {
-                breakpoints.push(sb);
-                breakpoints.push(eb);
-            }
-        }
-        breakpoints.sort_unstable();
-        breakpoints.dedup();
-        let mut runs = Vec::new();
-        for i in 0..breakpoints.len().saturating_sub(1) {
-            let start = breakpoints[i];
-            let end = breakpoints[i + 1];
-            if start >= end {
-                continue;
-            }
-            let color = raw_spans
-                .iter()
-                .rfind(|s| {
-                    let sb = (s.start_byte_col as usize).min(line_bytes);
-                    let eb = if s.end_byte_col == u32::MAX {
-                        line_bytes
-                    } else {
-                        (s.end_byte_col as usize).min(line_bytes)
-                    };
-                    start >= sb && end <= eb
-                })
-                .map(|s| Self::token_color(s.token, t))
-                .unwrap_or(t.text);
-            runs.push(TextRun {
-                len: end - start,
-                font: default_font.clone(),
-                color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
-        }
-        if runs.is_empty() {
-            runs.push(TextRun {
-                len: line_bytes,
-                font: default_font,
-                color: t.text,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
-        }
-
-        // Apply diagnostic underlines and tag styles over the base runs.
-        // Anchors store UTF-16 character offsets within the line; convert to byte offsets.
-        for diag in diagnostics {
-            let start_char = diag.range.start.offset;
-            let end_char = diag.range.end.offset;
-            // Convert UTF-16 char offsets to byte offsets within line_str.
-            let start_byte = char_col_to_byte_col(line_str, start_char).min(line_bytes);
-            let end_byte = char_col_to_byte_col(line_str, end_char).min(line_bytes);
-            if start_byte >= end_byte {
-                continue;
-            }
-            let underline_color = match diag.severity {
-                faber_lsp::diagnostics::Severity::Error => t.error,
-                faber_lsp::diagnostics::Severity::Warning => t.warning,
-                faber_lsp::diagnostics::Severity::Information => t.info,
-                faber_lsp::diagnostics::Severity::Hint => t.text_muted,
-            };
-            let is_deprecated = diag
-                .tags
-                .contains(&faber_lsp::diagnostics::DiagnosticTag::Deprecated);
-            let is_unnecessary = diag
-                .tags
-                .contains(&faber_lsp::diagnostics::DiagnosticTag::Unnecessary);
-            let mut pos = 0usize;
-            for run in &mut runs {
-                let run_end = pos + run.len;
-                if pos < end_byte && run_end > start_byte {
-                    if run.underline.is_none() {
-                        run.underline = Some(gpui::UnderlineStyle {
-                            thickness: px(1.0),
-                            color: Some(underline_color),
-                            wavy: true,
-                        });
-                    }
-                    if is_deprecated && run.strikethrough.is_none() {
-                        run.strikethrough = Some(gpui::StrikethroughStyle {
-                            thickness: px(1.0),
-                            color: Some(t.text_muted),
-                        });
-                    }
-                    if is_unnecessary {
-                        run.color = t.text_muted;
-                    }
-                }
-                pos = run_end;
-            }
-        }
-
-        runs
-    }
-
     /// Shape one logical line with its syntax runs. Single source of truth for
     /// painting AND mouse hit-testing — identical runs → identical glyph
     /// geometry → clicks land exactly where glyphs are painted. GPUI's line
@@ -1802,30 +1675,11 @@ impl EditorView {
             .filter(|e| e.range.lsp_line as usize == line_idx)
             .cloned()
             .collect();
-        let runs = Self::build_text_runs(&text, self.doc.highlight_spans(line_idx), t, &line_diags);
+        let runs =
+            crate::buffer_view::build_text_runs(&text, self.doc.highlight_spans(line_idx), t, &line_diags);
         window
             .text_system()
             .shape_line(text, px(t.font_size_code), &runs, None)
-    }
-
-    fn token_color(token: SyntaxToken, t: &RuntimeTheme) -> gpui::Hsla {
-        match token {
-            SyntaxToken::Keyword => t.syntax_keyword,
-            SyntaxToken::Function => t.syntax_function,
-            SyntaxToken::Type => t.syntax_type,
-            SyntaxToken::String => t.syntax_string,
-            SyntaxToken::Number => t.syntax_number,
-            SyntaxToken::Comment => t.syntax_comment,
-            SyntaxToken::Constant => t.syntax_constant,
-            SyntaxToken::Operator => t.syntax_operator,
-            SyntaxToken::Punctuation => t.syntax_punctuation,
-            SyntaxToken::Variable => t.syntax_variable,
-            SyntaxToken::Property => t.syntax_property,
-            SyntaxToken::Attribute => t.syntax_attribute,
-            SyntaxToken::Namespace => t.syntax_namespace,
-            SyntaxToken::Tag => t.syntax_tag,
-            SyntaxToken::Label => t.syntax_label,
-        }
     }
 
     fn render_search_bar(
@@ -2435,7 +2289,7 @@ impl Render for EditorView {
             );
             for item in &crumb_stack {
                 let seg_color = crate::editor_logic::context_to_token(item.context.as_deref())
-                    .map(|tok| Self::token_color(tok, &t))
+                    .map(|tok| crate::buffer_view::token_color(tok, &t))
                     .unwrap_or(t.text);
                 inner = inner
                     .child(div().text_color(sep_color).flex_shrink_0().child(" ›"))
