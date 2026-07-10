@@ -1675,8 +1675,12 @@ impl EditorView {
             .filter(|e| e.range.lsp_line as usize == line_idx)
             .cloned()
             .collect();
-        let runs =
-            crate::buffer_view::build_text_runs(&text, self.doc.highlight_spans(line_idx), t, &line_diags);
+        let runs = crate::buffer_view::build_text_runs(
+            &text,
+            self.doc.highlight_spans(line_idx),
+            t,
+            &line_diags,
+        );
         window
             .text_system()
             .shape_line(text, px(t.font_size_code), &runs, None)

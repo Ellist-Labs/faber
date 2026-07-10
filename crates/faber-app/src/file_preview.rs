@@ -137,8 +137,12 @@ pub fn render_preview(
                 range
                     .map(|i| {
                         let text = lines[i].clone();
-                        let runs =
-                            crate::buffer_view::build_text_runs(&text, doc.highlight_spans(i), &t2, &[]);
+                        let runs = crate::buffer_view::build_text_runs(
+                            &text,
+                            doc.highlight_spans(i),
+                            &t2,
+                            &[],
+                        );
                         div()
                             .h(line_h)
                             .w_full()

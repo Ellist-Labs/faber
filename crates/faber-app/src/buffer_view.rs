@@ -37,7 +37,11 @@ pub(crate) fn build_text_runs(
     // Clamp a span's byte offsets to the actual line length.
     let span_range = |s: &HighlightSpan| {
         let sb = (s.start_byte_col as usize).min(line_bytes);
-        let eb = if s.end_byte_col == u32::MAX { line_bytes } else { (s.end_byte_col as usize).min(line_bytes) };
+        let eb = if s.end_byte_col == u32::MAX {
+            line_bytes
+        } else {
+            (s.end_byte_col as usize).min(line_bytes)
+        };
         (sb, eb)
     };
     let mut breakpoints: Vec<usize> = vec![0, line_bytes];
@@ -59,7 +63,10 @@ pub(crate) fn build_text_runs(
         }
         let color = raw_spans
             .iter()
-            .rfind(|s| { let (sb, eb) = span_range(s); start >= sb && end <= eb })
+            .rfind(|s| {
+                let (sb, eb) = span_range(s);
+                start >= sb && end <= eb
+            })
             .map(|s| token_color(s.token, t))
             .unwrap_or(t.text);
         runs.push(TextRun {
@@ -154,7 +161,9 @@ pub(crate) fn build_syntax_spans(
     let mut children: Vec<AnyElement> = Vec::new();
     for run in &runs {
         let end = (pos + run.len).min(bytes.len());
-        let text = std::str::from_utf8(&bytes[pos..end]).unwrap_or("").to_string();
+        let text = std::str::from_utf8(&bytes[pos..end])
+            .unwrap_or("")
+            .to_string();
         children.push(
             div()
                 .flex_shrink_0()
