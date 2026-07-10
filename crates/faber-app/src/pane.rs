@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gpui::{App, Context, Entity, FocusHandle, Render, Window, div, prelude::*};
+use gpui::{AnyView, App, Context, Entity, FocusHandle, Render, Window, div, prelude::*};
 
 use faber_core::pane_tree::PaneId;
 
@@ -9,14 +9,82 @@ use crate::panels::diagnostics_panel::DiagnosticsPanel;
 use crate::project_search_view::ProjectSearchView;
 use crate::settings_view::SettingsView;
 
-// ── Tab types (moved from workspace.rs) ──────────────────────────────────────
+// ── Tab types ────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
-pub enum TabContent {
-    Editor(Entity<EditorView>),
-    Settings(Entity<SettingsView>),
-    ProjectSearch(Entity<ProjectSearchView>),
-    Problems(Entity<DiagnosticsPanel>),
+/// Discriminant used to identify tab kind without exposing concrete types.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TabKind {
+    Editor,
+    Settings,
+    ProjectSearch,
+    Problems,
+}
+
+/// Type-erased tab content: renderable view + focus handle + title closure.
+/// Adding a new panel type only requires a new `TabItem::from_*` constructor
+/// — no existing match arms need updating.
+pub struct TabItem {
+    pub focus_handle: FocusHandle,
+    pub view: AnyView,
+    pub(crate) kind: TabKind,
+    title_fn: Box<dyn Fn(&App) -> (String, bool) + Send + Sync>,
+}
+
+impl TabItem {
+    pub(crate) fn title(&self, cx: &App) -> (String, bool) {
+        (self.title_fn)(cx)
+    }
+
+    pub(crate) fn from_editor(entity: Entity<EditorView>, cx: &App) -> Self {
+        let focus = entity.read(cx).focus_handle.clone();
+        let view = AnyView::from(entity.clone());
+        TabItem {
+            focus_handle: focus,
+            view,
+            kind: TabKind::Editor,
+            title_fn: Box::new(move |cx| {
+                let doc = &entity.read(cx).doc;
+                let name = doc.path.file_name().map_or_else(
+                    || rust_i18n::t!("editor.untitled").to_string(),
+                    |n| n.to_string_lossy().to_string(),
+                );
+                (name, doc.dirty)
+            }),
+        }
+    }
+
+    pub(crate) fn from_settings(entity: Entity<SettingsView>, cx: &App) -> Self {
+        let focus = entity.read(cx).focus_handle.clone();
+        let view = AnyView::from(entity);
+        TabItem {
+            focus_handle: focus,
+            view,
+            kind: TabKind::Settings,
+            title_fn: Box::new(|_cx| (rust_i18n::t!("tab.settings").to_string(), false)),
+        }
+    }
+
+    pub(crate) fn from_project_search(entity: Entity<ProjectSearchView>, cx: &App) -> Self {
+        let focus = entity.read(cx).focus_handle.clone();
+        let view = AnyView::from(entity);
+        TabItem {
+            focus_handle: focus,
+            view,
+            kind: TabKind::ProjectSearch,
+            title_fn: Box::new(|_cx| (rust_i18n::t!("tab.search").to_string(), false)),
+        }
+    }
+
+    pub(crate) fn from_problems(entity: Entity<DiagnosticsPanel>, cx: &App) -> Self {
+        let focus = entity.read(cx).focus_handle.clone();
+        let view = AnyView::from(entity);
+        TabItem {
+            focus_handle: focus,
+            view,
+            kind: TabKind::Problems,
+            title_fn: Box::new(|_cx| (rust_i18n::t!("tab.problems").to_string(), false)),
+        }
+    }
 }
 
 pub(crate) struct TabMenu {
@@ -26,49 +94,29 @@ pub(crate) struct TabMenu {
 
 pub struct Tab {
     pub id: usize,
-    pub content: TabContent,
+    pub content: TabItem,
+    // Concrete handle kept for editor-specific operations (subscribe, save, etc.).
+    pub(crate) editor: Option<Entity<EditorView>>,
+    // Concrete handle kept for project-search operations (prefill, focus query bar).
+    pub(crate) project_search: Option<Entity<ProjectSearchView>>,
 }
 
 impl Tab {
     pub(crate) fn editor(&self) -> Option<&Entity<EditorView>> {
-        match &self.content {
-            TabContent::Editor(e) => Some(e),
-            TabContent::Settings(_) | TabContent::ProjectSearch(_) | TabContent::Problems(_) => {
-                None
-            }
-        }
+        self.editor.as_ref()
     }
 
-    /// Returns `(title, dirty)` for the tab strip.
     pub(crate) fn title(&self, cx: &App) -> (String, bool) {
-        match &self.content {
-            TabContent::Editor(e) => {
-                let doc = &e.read(cx).doc;
-                let name = doc.path.file_name().map_or_else(
-                    || rust_i18n::t!("editor.untitled").to_string(),
-                    |n| n.to_string_lossy().to_string(),
-                );
-                (name, doc.dirty)
-            }
-            TabContent::Settings(_) => (rust_i18n::t!("tab.settings").to_string(), false),
-            TabContent::ProjectSearch(_) => (rust_i18n::t!("tab.search").to_string(), false),
-            TabContent::Problems(_) => (rust_i18n::t!("tab.problems").to_string(), false),
-        }
+        self.content.title(cx)
     }
 
-    pub(crate) fn focus_handle(&self, cx: &App) -> FocusHandle {
-        match &self.content {
-            TabContent::Editor(e) => e.read(cx).focus_handle.clone(),
-            TabContent::Settings(s) => s.read(cx).focus_handle.clone(),
-            TabContent::ProjectSearch(p) => p.read(cx).focus_handle.clone(),
-            TabContent::Problems(p) => p.read(cx).focus_handle.clone(),
-        }
+    pub(crate) fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.content.focus_handle.clone()
     }
 }
 
 // ── Pane entity ───────────────────────────────────────────────────────────────
 
-/// A single editor pane: an ordered list of tabs with one active.
 #[allow(dead_code)]
 pub struct Pane {
     pub id: PaneId,
@@ -93,13 +141,75 @@ impl Pane {
 
     // ── Tab data operations ───────────────────────────────────────────────────
 
-    /// Add a tab and make it active. Returns the new tab's id.
-    pub(crate) fn push_tab(&mut self, content: TabContent) -> usize {
+    pub(crate) fn push_editor_tab(&mut self, entity: Entity<EditorView>, cx: &App) -> usize {
         let id = self.next_tab_id;
-        self.tabs.push(Tab { id, content });
+        let content = TabItem::from_editor(entity.clone(), cx);
+        self.tabs.push(Tab {
+            id,
+            content,
+            editor: Some(entity),
+            project_search: None,
+        });
         self.next_tab_id += 1;
         self.active = Some(self.tabs.len() - 1);
         id
+    }
+
+    pub(crate) fn push_settings_tab(&mut self, entity: Entity<SettingsView>, cx: &App) -> usize {
+        let id = self.next_tab_id;
+        let content = TabItem::from_settings(entity, cx);
+        self.tabs.push(Tab {
+            id,
+            content,
+            editor: None,
+            project_search: None,
+        });
+        self.next_tab_id += 1;
+        self.active = Some(self.tabs.len() - 1);
+        id
+    }
+
+    pub(crate) fn push_project_search_tab(
+        &mut self,
+        entity: Entity<ProjectSearchView>,
+        cx: &App,
+    ) -> usize {
+        let id = self.next_tab_id;
+        let content = TabItem::from_project_search(entity.clone(), cx);
+        self.tabs.push(Tab {
+            id,
+            content,
+            editor: None,
+            project_search: Some(entity),
+        });
+        self.next_tab_id += 1;
+        self.active = Some(self.tabs.len() - 1);
+        id
+    }
+
+    pub(crate) fn push_problems_tab(
+        &mut self,
+        entity: Entity<DiagnosticsPanel>,
+        cx: &App,
+    ) -> usize {
+        let id = self.next_tab_id;
+        let content = TabItem::from_problems(entity, cx);
+        self.tabs.push(Tab {
+            id,
+            content,
+            editor: None,
+            project_search: None,
+        });
+        self.next_tab_id += 1;
+        self.active = Some(self.tabs.len() - 1);
+        id
+    }
+
+    pub(crate) fn push_tab_raw(&mut self, mut tab: Tab) {
+        tab.id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tabs.push(tab);
+        self.active = Some(self.tabs.len() - 1);
     }
 
     pub(crate) fn tab_count(&self) -> usize {
@@ -122,14 +232,10 @@ impl Pane {
         self.tabs.iter().enumerate().find(|(_, t)| t.id == id)
     }
 
-    /// Set active index, clamping to the current length.
-    /// Passing `None` clears the selection.
     pub(crate) fn set_active(&mut self, ix: Option<usize>) {
         self.active = ix.map(|i| i.min(self.tabs.len().saturating_sub(1)));
     }
 
-    /// Remove the tab at `ix` and remap `active` correctly.
-    /// Returns the removed tab, or `None` if out of bounds.
     pub(crate) fn remove_tab(&mut self, ix: usize) -> Option<Tab> {
         if ix >= self.tabs.len() {
             return None;
@@ -147,8 +253,6 @@ impl Pane {
         Some(tab)
     }
 
-    /// Move a tab from `from` to `to` (clamped). Remaps `active` so the
-    /// logically-selected tab follows its id.
     #[allow(dead_code)]
     pub(crate) fn reorder_tab(&mut self, from: usize, to: usize) {
         if from == to || from >= self.tabs.len() {
@@ -182,23 +286,22 @@ impl Pane {
     pub(crate) fn find_settings_tab(&self) -> Option<usize> {
         self.tabs
             .iter()
-            .position(|t| matches!(t.content, TabContent::Settings(_)))
+            .position(|t| t.content.kind == TabKind::Settings)
     }
 
     pub(crate) fn find_project_search_tab(&self) -> Option<usize> {
         self.tabs
             .iter()
-            .position(|t| matches!(t.content, TabContent::ProjectSearch(_)))
+            .position(|t| t.content.kind == TabKind::ProjectSearch)
     }
 
     #[allow(dead_code)]
     pub(crate) fn find_problems_tab(&self) -> Option<usize> {
         self.tabs
             .iter()
-            .position(|t| matches!(t.content, TabContent::Problems(_)))
+            .position(|t| t.content.kind == TabKind::Problems)
     }
 
-    /// All editor entities in this pane (in order).
     pub(crate) fn all_editors(&self) -> impl Iterator<Item = &Entity<EditorView>> {
         self.tabs.iter().filter_map(|t| t.editor())
     }

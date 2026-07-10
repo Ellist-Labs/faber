@@ -310,8 +310,8 @@ impl Render for LspStatusItem {
         let (state_label, text_color) = if lsp.statuses.is_empty() {
             (t!("status_bar.lsp_idle").to_string(), t.text_subtle)
         } else {
-            let total_errors: usize = lsp.statuses.iter().map(|s| s.error_count).sum();
-            let total_warnings: usize = lsp.statuses.iter().map(|s| s.warning_count).sum();
+            let total_errors = lsp.error_count;
+            let total_warnings = lsp.warning_count;
             let label = match &lsp.statuses[0].state {
                 ServerState::Downloading => t!("status_bar.lsp_downloading").to_string(),
                 ServerState::Starting | ServerState::Initializing => {
