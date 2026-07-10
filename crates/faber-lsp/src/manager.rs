@@ -11,6 +11,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use crossbeam_channel::Receiver;
 use lsp_types::NumberOrString;
 use ropey::Rope;
 
@@ -22,24 +23,11 @@ use crate::{
     install::Installer,
     position::{PositionEncoding, from_lsp_position},
     server::{LanguageServer, ServerState},
+    transport::RpcError,
 };
 use faber_core::anchor::{Anchor, Bias};
+use faber_lang::LanguageId;
 use faber_settings::LspSettings;
-
-// ── LanguageId ────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LanguageId(pub String);
-
-impl LanguageId {
-    pub fn new(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 // ── ServerStatus ──────────────────────────────────────────────────────────────
 
@@ -48,8 +36,6 @@ pub struct ServerStatus {
     pub server_id: String,
     pub language_id: LanguageId,
     pub state: ServerState,
-    pub error_count: usize,
-    pub warning_count: usize,
 }
 
 // ── OpenDoc ───────────────────────────────────────────────────────────────────
@@ -68,6 +54,8 @@ pub struct LspManager {
     servers: Mutex<HashMap<String, Arc<LanguageServer>>>,
     /// Reverse index: language id string → server ids serving it.
     lang_servers: Mutex<HashMap<String, Vec<String>>>,
+    /// Servers currently resolving/downloading: server_id → lang_id_str.
+    downloading: Mutex<HashMap<String, String>>,
     diagnostic_store: Arc<DiagnosticStore>,
     settings: Arc<RwLock<LspSettings>>,
     trusted: Arc<AtomicBool>,
@@ -86,6 +74,7 @@ impl LspManager {
             adapters,
             servers: Mutex::new(HashMap::new()),
             lang_servers: Mutex::new(HashMap::new()),
+            downloading: Mutex::new(HashMap::new()),
             diagnostic_store: Arc::new(DiagnosticStore::new()),
             settings: Arc::new(RwLock::new(settings)),
             trusted: Arc::new(AtomicBool::new(trusted)),
@@ -101,6 +90,8 @@ impl LspManager {
         self.trusted.load(Ordering::Relaxed)
     }
 
+    // Caller must kick ensure_server_for_language + on_document_opened for all
+    // open docs after calling this with `trusted = true`.
     pub fn set_trusted(self: &Arc<Self>, trusted: bool) {
         self.trusted.store(trusted, Ordering::Relaxed);
     }
@@ -143,20 +134,32 @@ impl LspManager {
         };
 
         let server_id = adapter.server_id().to_owned();
+        let lang_id_str = lang_id.as_str().to_owned();
 
-        // Idempotency: check if server already running.
+        // Idempotency check + mark downloading atomically (prevents TOCTOU with
+        // concurrent calls for the same server_id).
         {
-            let guard = self.servers.lock().unwrap_or_else(|p| p.into_inner());
-            if guard.contains_key(&server_id) {
+            let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
+            let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
+            if servers.contains_key(&server_id) || dl.contains_key(&server_id) {
                 return Ok(());
             }
+            dl.insert(server_id.clone(), lang_id_str);
         }
+        self.update_status();
 
-        // Resolve binary.
+        // Resolve binary (may download ~60 s on first run).
         let settings_guard = self.settings.read().unwrap_or_else(|p| p.into_inner());
-        let binary_path = adapter
-            .resolve_binary(&settings_guard, &mut |msg| log::info!("{}", msg))
-            .map_err(|e| anyhow::anyhow!("resolve_binary failed: {e}"))?;
+        let binary_path =
+            match adapter.resolve_binary(&settings_guard, &mut |msg| log::info!("{}", msg)) {
+                Ok(p) => p,
+                Err(e) => {
+                    let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
+                    dl.remove(&server_id);
+                    self.update_status();
+                    return Err(anyhow::anyhow!("resolve_binary failed: {e}"));
+                }
+            };
         drop(settings_guard);
 
         let init_options = adapter.init_options();
@@ -171,8 +174,21 @@ impl LspManager {
         };
 
         // Spawn and initialize.
-        let server = LanguageServer::spawn(&binary_path, workspace_root, env_path)?;
-        server.initialize(None, workspace_root, init_options)?;
+        let server = match LanguageServer::spawn(&binary_path, workspace_root, env_path) {
+            Ok(s) => s,
+            Err(e) => {
+                let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
+                dl.remove(&server_id);
+                self.update_status();
+                return Err(e);
+            }
+        };
+        if let Err(e) = server.initialize(None, workspace_root, init_options) {
+            let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
+            dl.remove(&server_id);
+            self.update_status();
+            return Err(e);
+        }
 
         // After initialize: read the negotiated position encoding.
         let encoding = server.capabilities().position_encoding;
@@ -196,7 +212,7 @@ impl LspManager {
             );
         }
 
-        // Insert into maps.
+        // Insert into running maps and clear downloading flag.
         {
             let mut servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
             servers.insert(server_id.clone(), server);
@@ -206,7 +222,11 @@ impl LspManager {
             lang_map
                 .entry(lang_id.as_str().to_owned())
                 .or_default()
-                .push(server_id);
+                .push(server_id.clone());
+        }
+        {
+            let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
+            dl.remove(&server_id);
         }
         self.update_status();
 
@@ -452,6 +472,32 @@ impl LspManager {
         });
     }
 
+    // ── Request routing ───────────────────────────────────────────────────────
+
+    /// Route a JSON-RPC request to the server currently handling the given URI.
+    /// Returns None if the document is unknown or has no running server.
+    pub fn request_for_document(
+        &self,
+        uri: &url::Url,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> Option<Receiver<Result<serde_json::Value, RpcError>>> {
+        if !self.is_trusted() {
+            return None;
+        }
+        let lang_id_str = {
+            let guard = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
+            guard.get(uri)?.lang_id.clone()
+        };
+        let server_id = {
+            let guard = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
+            guard.get(&lang_id_str)?.first()?.clone()
+        };
+        let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
+        let server = servers.get(&server_id)?;
+        Some(server.transport().request(method, params))
+    }
+
     // ── Private ───────────────────────────────────────────────────────────────
 
     /// Send a notification to every server registered for `lang_id_str`.
@@ -469,15 +515,9 @@ impl LspManager {
     }
 
     fn update_status(&self) {
-        let error_count = self
-            .diagnostic_store
-            .count_by_severity(crate::diagnostics::Severity::Error);
-        let warning_count = self
-            .diagnostic_store
-            .count_by_severity(crate::diagnostics::Severity::Warning);
-
         let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
         let lang_servers = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
+        let downloading = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
 
         // Build a server_id → lang_id map for display.
         let mut server_to_lang: HashMap<String, String> = HashMap::new();
@@ -489,7 +529,7 @@ impl LspManager {
             }
         }
 
-        let snapshot: Vec<ServerStatus> = servers
+        let mut snapshot: Vec<ServerStatus> = servers
             .iter()
             .map(|(server_id, server)| {
                 let lang_str = server_to_lang.get(server_id).cloned().unwrap_or_default();
@@ -497,11 +537,21 @@ impl LspManager {
                     server_id: server_id.clone(),
                     language_id: LanguageId::new(&lang_str),
                     state: server.state(),
-                    error_count,
-                    warning_count,
                 }
             })
             .collect();
+
+        // Include in-flight downloads so the status bar can show Downloading.
+        for (server_id, lang_str) in downloading.iter() {
+            if !servers.contains_key(server_id) {
+                snapshot.push(ServerStatus {
+                    server_id: server_id.clone(),
+                    language_id: LanguageId::new(lang_str),
+                    state: ServerState::Downloading,
+                });
+            }
+        }
+
         self.status.store(Arc::new(snapshot));
     }
 }
@@ -698,5 +748,85 @@ mod tests {
             count_before, 1,
             "should have exactly one server pre-inserted"
         );
+    }
+
+    // ── Test 5: on_document_opened sends textDocument/didOpen ────────────────
+
+    #[test]
+    fn doc_opened_sends_did_open() {
+        let mgr = LspManager::new(vec![], default_settings(), true);
+
+        // Build a transport whose output we can observe.
+        // server_out: what the (mock) server sends to the transport (nothing here).
+        // client_out_rx: what the transport sends to the server — we read this.
+        let (_, server_out_reader) = byte_pipe();
+        let (client_out_writer, mut client_out_rx) = byte_pipe();
+        let transport = Arc::new(TransportLayer::new(server_out_reader, client_out_writer));
+
+        let server = LanguageServer::from_transport(transport);
+        server.set_state(ServerState::Running);
+
+        {
+            let mut guard = mgr.servers.lock().unwrap();
+            guard.insert("rust-analyzer".to_owned(), server);
+        }
+        {
+            let mut lang_servers = mgr.lang_servers.lock().unwrap();
+            lang_servers
+                .entry("rust".to_owned())
+                .or_default()
+                .push("rust-analyzer".to_owned());
+        }
+
+        let uri = url::Url::parse("file:///tmp/main.rs").unwrap();
+        mgr.on_document_opened(uri.clone(), LanguageId::new("rust"), "fn main() {}");
+
+        // Give the writer thread time to flush the notification.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Read the Content-Length framed bytes from client_out_rx.
+        let raw = drain_pipe(&mut client_out_rx);
+        let body_str = parse_lsp_frame(&raw).expect("expected a valid LSP frame");
+        let msg: serde_json::Value = serde_json::from_str(&body_str).expect("valid JSON");
+
+        assert_eq!(msg["method"], "textDocument/didOpen");
+        assert_eq!(msg["params"]["textDocument"]["uri"], uri.as_str());
+        assert_eq!(msg["params"]["textDocument"]["languageId"], "rust");
+        assert_eq!(msg["params"]["textDocument"]["text"], "fn main() {}");
+    }
+
+    /// Drain all available bytes from a ChanReader into a Vec without blocking.
+    fn drain_pipe(reader: &mut ChanReader) -> Vec<u8> {
+        let mut out = Vec::new();
+        // Block on the first byte so we wait until the writer thread has flushed.
+        match reader.0.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(b) => out.push(b),
+            Err(_) => return out,
+        }
+        // Drain the rest without blocking.
+        loop {
+            match reader.0.try_recv() {
+                Ok(b) => out.push(b),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
+    /// Parse a single `Content-Length: N\r\n\r\n<body>` frame and return the body.
+    fn parse_lsp_frame(data: &[u8]) -> Option<String> {
+        let header_end = data.windows(4).position(|w| w == b"\r\n\r\n")?;
+        let header = std::str::from_utf8(&data[..header_end]).ok()?;
+        let content_length: usize = header
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))?
+            .split(':')
+            .nth(1)?
+            .trim()
+            .parse()
+            .ok()?;
+        let body_start = header_end + 4;
+        let body = data.get(body_start..body_start + content_length)?;
+        String::from_utf8(body.to_vec()).ok()
     }
 }

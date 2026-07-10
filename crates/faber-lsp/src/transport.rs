@@ -168,6 +168,13 @@ impl TransportLayer {
         self.notify("$/cancelRequest", serde_json::json!({ "id": id }));
     }
 
+    // ── Test helpers ──────────────────────────────────────────────────────────
+
+    #[cfg(test)]
+    pub fn pending_count(&self) -> usize {
+        self.pending.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     fn spawn_reader(
@@ -635,5 +642,41 @@ mod tests {
             .expect("timed out; reader did not continue after bad JSON");
 
         assert_eq!(result.unwrap(), "ok");
+    }
+
+    // ── Test 7: pending-map entry removed via cancel (no leak) ───────────────
+
+    #[test]
+    fn pending_map_cleaned_up_via_cancel() {
+        let (_server_out_writer, server_out_reader) = byte_pipe();
+        let (transport_out_writer, _transport_out_reader) = byte_pipe();
+
+        let transport = TransportLayer::new(server_out_reader, transport_out_writer);
+
+        assert_eq!(
+            transport.pending_count(),
+            0,
+            "pending map should start empty"
+        );
+
+        let (id, _rx) = transport.request_with_id("textDocument/hover", serde_json::json!({}));
+
+        // Give the writer thread time to process the outbound message.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        assert_eq!(
+            transport.pending_count(),
+            1,
+            "pending map should have one entry after request"
+        );
+
+        // Simulate caller timeout: cancel removes the entry and notifies the server.
+        transport.cancel(id);
+
+        assert_eq!(
+            transport.pending_count(),
+            0,
+            "cancel must remove the pending entry"
+        );
     }
 }

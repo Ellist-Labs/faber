@@ -36,5 +36,9 @@ anyhow = "1"
 log = "0.4"
 url = "2"
 
+[[bin]]
+name = "echo_server"
+path = "src/bin/echo_server.rs"
+
 [dev-dependencies]
 tempfile = "3"

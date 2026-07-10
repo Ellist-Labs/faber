@@ -23,7 +23,7 @@ use gpui::{
 use crate::editor_view::{EditorEvent, EditorView};
 use crate::file_finder::FileFinderView;
 use crate::lsp_status::LspStatus;
-use crate::pane::{Pane, TabContent, TabMenu};
+use crate::pane::{Pane, TabKind, TabMenu};
 use crate::project_search_view::ProjectSearchView;
 use crate::settings_view::{SettingsStore, SettingsView};
 use crate::sidebar::{SidebarItem, SidebarItemKind, SidebarState, default_items};
@@ -40,8 +40,9 @@ use crate::{
     SaveFile, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleBottomPanel, ToggleRightPanel,
     ToggleSidebar,
 };
-use faber_lsp::adapter::RustAnalyzerAdapter;
-use faber_lsp::manager::{LanguageId as LspLanguageId, LspManager};
+use faber_lang::{LanguageId as LspLanguageId, LanguageRegistry};
+use faber_lsp::adapter::{LspAdapter, RustAnalyzerAdapter};
+use faber_lsp::manager::LspManager;
 
 // ── Index status ──────────────────────────────────────────────────────────────
 
@@ -262,7 +263,8 @@ impl Workspace {
             if let Some(root) = sess.root.as_deref() {
                 let root_path = PathBuf::from(root);
                 if root_path.exists() {
-                    ws.set_root_folder(root_path, cx);
+                    ws.set_root_folder(root_path.clone(), cx);
+                    ws.check_and_show_trust_modal(&root_path, window, cx);
                 }
             }
             for file in &sess.files {
@@ -328,13 +330,23 @@ impl Workspace {
                 ev.diagnostic_store = Some(store);
             });
         }
-        self.panes[&self.focused_pane].update(cx, |pane: &mut Pane, _| {
-            pane.push_tab(TabContent::Editor(editor.clone()));
+        self.panes[&self.focused_pane].update(cx, |pane: &mut Pane, cx| {
+            pane.push_editor_tab(editor.clone(), cx);
         });
         if let Some(mgr) = &self.lsp_manager {
+            let registry = cx.global::<crate::Registry>().0.clone();
             let (_version, path, text) = editor.read(cx).doc.lsp_sync_info();
-            if let Some((uri, lang_id)) = Self::doc_uri_and_lang(&path) {
-                mgr.on_document_opened(uri, lang_id, &text);
+            if let Some((uri, lang_id)) = Self::doc_uri_and_lang(&path, &registry) {
+                let root = self.root_folder.clone();
+                let mgr = Arc::clone(mgr);
+                std::thread::spawn(move || {
+                    if let Some(root) = root {
+                        if let Err(e) = mgr.ensure_server_for_language(&lang_id, &root) {
+                            log::error!("lsp: ensure failed: {e}");
+                        }
+                    }
+                    mgr.on_document_opened(uri, lang_id, &text);
+                });
             }
         }
     }
@@ -351,8 +363,9 @@ impl Workspace {
                 .and_then(|t| t.editor())
                 .cloned();
             if let Some(editor) = editor {
+                let registry = cx.global::<crate::Registry>().0.clone();
                 let (_version, path, text) = editor.read(cx).doc.lsp_sync_info();
-                if let Some((uri, _lang_id)) = Self::doc_uri_and_lang(&path) {
+                if let Some((uri, _lang_id)) = Self::doc_uri_and_lang(&path, &registry) {
                     mgr.on_document_changed(uri, &text);
                 }
             }
@@ -465,13 +478,9 @@ impl Workspace {
         // whether to notify LSP afterwards.
         let closing_path = {
             let pane = self.panes[&pane_id].read(cx);
-            pane.tab_at(ix).and_then(|tab| {
-                if let TabContent::Editor(editor) = &tab.content {
-                    Some(editor.read(cx).doc.path.clone())
-                } else {
-                    None
-                }
-            })
+            pane.tab_at(ix)
+                .and_then(|tab| tab.editor.as_ref())
+                .map(|e| e.read(cx).doc.path.clone())
         };
         self.panes[&pane_id].update(cx, |p: &mut Pane, _| {
             p.remove_tab(ix);
@@ -482,8 +491,11 @@ impl Workspace {
         if let Some(path) = closing_path
             && let Some(mgr) = &self.lsp_manager
         {
+            let registry = cx.global::<crate::Registry>().0.clone();
             let still_open_elsewhere = self.find_open_editor(&path, cx).is_some();
-            if !still_open_elsewhere && let Some((uri, _)) = Self::doc_uri_and_lang(&path) {
+            if !still_open_elsewhere
+                && let Some((uri, _)) = Self::doc_uri_and_lang(&path, &registry)
+            {
                 mgr.on_document_closed(uri);
             }
         }
@@ -609,6 +621,74 @@ impl Workspace {
         cx.notify();
     }
 
+    fn check_and_show_trust_modal(
+        &mut self,
+        folder: &PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app_state = cx.global::<AppStateStore>().0.clone();
+        if app_state.is_trusted(folder) {
+            // Already trusted — LSP manager was created with trusted=true.
+            return;
+        }
+        let folder = folder.clone();
+        self.show_confirm(
+            ConfirmSpec {
+                message: rust_i18n::t!("trust.message").into(),
+                buttons: vec![
+                    ConfirmButton {
+                        label: rust_i18n::t!("trust.btn_trust").into(),
+                    },
+                    ConfirmButton {
+                        label: rust_i18n::t!("trust.btn_restricted").into(),
+                    },
+                ],
+                default_ix: 0,
+                destructive_ix: None,
+                on_answer: Box::new(move |ws, ix, _window, cx| {
+                    if ix != 0 {
+                        return; // "Open Restricted" — leave LSP gated off
+                    }
+                    // Persist trust and unlock the manager.
+                    let folder_clone = folder.clone();
+                    ws.record_state_change(cx, move |s| s.trust_project(&folder_clone));
+                    if let Some(mgr) = &ws.lsp_manager {
+                        mgr.set_trusted(true);
+                        // Kick ensure+didOpen for any editor already open.
+                        let registry = cx.global::<crate::Registry>().0.clone();
+                        let root = ws.root_folder.clone();
+                        let mgr = Arc::clone(mgr);
+                        let open_docs: Vec<(url::Url, faber_lang::LanguageId, String)> = ws
+                            .panes
+                            .values()
+                            .flat_map(|pane| {
+                                pane.read(cx).all_editors().cloned().collect::<Vec<_>>()
+                            })
+                            .filter_map(|editor| {
+                                let (_v, path, text) = editor.read(cx).doc.lsp_sync_info();
+                                let (uri, lang_id) = Self::doc_uri_and_lang(&path, &registry)?;
+                                Some((uri, lang_id, text))
+                            })
+                            .collect();
+                        std::thread::spawn(move || {
+                            let Some(root) = root else { return };
+                            for (uri, lang_id, text) in open_docs {
+                                if let Err(e) = mgr.ensure_server_for_language(&lang_id, &root) {
+                                    log::error!("lsp: ensure after trust failed: {e}");
+                                    continue;
+                                }
+                                mgr.on_document_opened(uri, lang_id, &text);
+                            }
+                        });
+                    }
+                }),
+            },
+            window,
+            cx,
+        );
+    }
+
     fn record_state_change(
         &self,
         cx: &mut Context<Self>,
@@ -729,7 +809,7 @@ impl Workspace {
             .map(|r| app_state.is_trusted(r))
             .unwrap_or(false);
 
-        let manager = LspManager::new(vec![Box::new(RustAnalyzerAdapter)], settings, trusted);
+        let manager = LspManager::new(default_lsp_adapters(), settings, trusted);
         self.lsp_manager = Some(Arc::clone(&manager));
 
         let lsp_status = self.lsp_status.clone();
@@ -745,9 +825,16 @@ impl Workspace {
                     break;
                 };
                 let statuses = mgr.server_states();
+                let diag_store = mgr.diagnostic_store();
+                let error_count =
+                    diag_store.count_by_severity(faber_lsp::diagnostics::Severity::Error);
+                let warning_count =
+                    diag_store.count_by_severity(faber_lsp::diagnostics::Severity::Warning);
                 if lsp_status
                     .update(cx, |s, cx| {
                         s.statuses = statuses;
+                        s.error_count = error_count;
+                        s.warning_count = warning_count;
                         cx.notify();
                     })
                     .is_err()
@@ -755,7 +842,7 @@ impl Workspace {
                     break;
                 }
                 // Notify EditorViews to repaint if diagnostics changed.
-                let diag_gen = mgr.diagnostic_store().generation();
+                let diag_gen = diag_store.generation();
                 if diag_gen != last_diag_gen {
                     last_diag_gen = diag_gen;
                     let _ = this.update(cx, |ws, cx| {
@@ -776,16 +863,17 @@ impl Workspace {
         .detach();
     }
 
-    fn doc_uri_and_lang(path: &std::path::Path) -> Option<(url::Url, LspLanguageId)> {
+    fn doc_uri_and_lang(
+        path: &std::path::Path,
+        registry: &LanguageRegistry,
+    ) -> Option<(url::Url, LspLanguageId)> {
         let path_str = path.to_string_lossy();
         if path_str == "<memory>" || path.as_os_str().is_empty() {
             return None;
         }
         let uri = url::Url::from_file_path(path).ok()?;
-        let lang_id = match path.extension().and_then(|e| e.to_str()) {
-            Some("rs") => LspLanguageId::new("rust"),
-            _ => return None,
-        };
+        let lang = registry.language_for_path(path)?;
+        let lang_id = LspLanguageId::new(lang.id.as_str());
         Some((uri, lang_id))
     }
 
@@ -1186,8 +1274,11 @@ impl Workspace {
             let Some(folder) = paths.into_iter().next() else {
                 return;
             };
-            ws.update_in(cx, |ws, _, cx| ws.set_root_folder(folder, cx))
-                .ok();
+            ws.update_in(cx, |ws, window, cx| {
+                ws.set_root_folder(folder.clone(), cx);
+                ws.check_and_show_trust_modal(&folder, window, cx);
+            })
+            .ok();
         })
         .detach();
     }
@@ -1242,8 +1333,8 @@ impl Workspace {
             return;
         }
         let view = cx.new(SettingsView::new);
-        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| {
-            p.push_tab(TabContent::Settings(view));
+        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, cx| {
+            p.push_settings_tab(view, cx);
         });
         let new_ix = self.pane().read(cx).tab_count() - 1;
         self.activate_tab(new_ix, window, cx);
@@ -1263,8 +1354,8 @@ impl Workspace {
             }
             p
         });
-        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| {
-            p.push_tab(TabContent::Problems(panel));
+        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, cx| {
+            p.push_problems_tab(panel, cx);
         });
         let new_ix = self.pane().read(cx).tab_count() - 1;
         self.activate_tab(new_ix, window, cx);
@@ -1307,13 +1398,7 @@ impl Workspace {
             // Prefill query and focus.
             let ps_view = {
                 let pane = self.pane().read(cx);
-                pane.tab_at(ix).and_then(|t| {
-                    if let TabContent::ProjectSearch(v) = &t.content {
-                        Some(v.clone())
-                    } else {
-                        None
-                    }
-                })
+                pane.tab_at(ix).and_then(|t| t.project_search.clone())
             };
             if let Some(view) = ps_view {
                 if !prefill.is_empty() {
@@ -1326,8 +1411,8 @@ impl Workspace {
         }
         let ws_entity = cx.entity();
         let view = cx.new(|cx| ProjectSearchView::new(ws_entity.downgrade(), prefill, cx));
-        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| {
-            p.push_tab(TabContent::ProjectSearch(view.clone()));
+        self.panes[&self.focused_pane].update(cx, |p: &mut Pane, cx| {
+            p.push_project_search_tab(view.clone(), cx);
         });
         let new_ix = self.pane().read(cx).tab_count() - 1;
         self.activate_tab(new_ix, window, cx);
@@ -2011,8 +2096,8 @@ impl Workspace {
             ws.on_editor_edited(cx)
         })
         .detach();
-        new_pane.update(cx, |p: &mut Pane, _| {
-            p.push_tab(TabContent::Editor(editor));
+        new_pane.update(cx, |p: &mut Pane, cx| {
+            p.push_editor_tab(editor, cx);
         });
         self.panes.insert(new_pane_id, new_pane);
         self.pane_group.split(self.focused_pane, new_pane_id, dir);
@@ -2041,12 +2126,12 @@ impl Workspace {
             removed_tab = p.remove_tab(ix);
         });
         let Some(tab) = removed_tab else { return };
-        if let TabContent::Editor(ref e) = tab.content {
+        if let Some(e) = tab.editor.as_ref() {
             cx.subscribe(e, |ws, _, _: &EditorEvent, cx| ws.on_editor_edited(cx))
                 .detach();
         }
         self.panes[&target_pane].update(cx, |p: &mut Pane, _| {
-            p.push_tab(tab.content);
+            p.push_tab_raw(tab);
         });
         self.focused_pane = target_pane;
         let new_ix = self.panes[&target_pane].read(cx).tab_count() - 1;
@@ -2127,24 +2212,24 @@ impl Workspace {
             let tab = &pane.tabs[ix];
             let (title, dirty) = tab.title(cx);
             let is_active = pane.active == Some(ix);
-            let icon: AnyElement = match &tab.content {
-                TabContent::Editor(_) => img(crate::file_icons::icon_for_file(&title))
+            let icon: AnyElement = match tab.content.kind {
+                TabKind::Editor => img(crate::file_icons::icon_for_file(&title))
                     .size(px(14.0))
                     .flex_shrink_0()
                     .into_any_element(),
-                TabContent::Settings(_) => svg()
+                TabKind::Settings => svg()
                     .path(IconName::Settings.path())
                     .size(px(14.0))
                     .flex_shrink_0()
                     .text_color(t.text_muted)
                     .into_any_element(),
-                TabContent::ProjectSearch(_) => svg()
+                TabKind::ProjectSearch => svg()
                     .path(IconName::Search.path())
                     .size(px(14.0))
                     .flex_shrink_0()
                     .text_color(t.text_muted)
                     .into_any_element(),
-                TabContent::Problems(_) => svg()
+                TabKind::Problems => svg()
                     .path(IconName::Search.path())
                     .size(px(14.0))
                     .flex_shrink_0()
@@ -2320,12 +2405,8 @@ impl Workspace {
     ) -> AnyElement {
         let content: Option<AnyElement> = {
             let pane = self.panes[&pane_id].read(cx);
-            pane.active_tab().map(|tab| match &tab.content {
-                TabContent::Editor(e) => e.clone().into_any_element(),
-                TabContent::Settings(s) => s.clone().into_any_element(),
-                TabContent::ProjectSearch(p) => p.clone().into_any_element(),
-                TabContent::Problems(p) => p.clone().into_any_element(),
-            })
+            pane.active_tab()
+                .map(|tab| tab.content.view.clone().into_any_element())
         };
 
         let tab_bar = self.render_tab_bar_for(pane_id, t, cx);
@@ -2705,4 +2786,12 @@ impl Render for Workspace {
 
         root.into_any()
     }
+}
+
+/// All LSP adapters active by default. Add new language servers here — one line each.
+fn default_lsp_adapters() -> Vec<Box<dyn LspAdapter>> {
+    vec![
+        Box::new(RustAnalyzerAdapter),
+        // Box::new(TypeScriptLanguageServerAdapter),  // add future adapters here
+    ]
 }

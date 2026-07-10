@@ -555,4 +555,37 @@ mod tests {
             format!("line {}", MAX_LOG_LINES)
         );
     }
+
+    // ── Test 4: initialize error response returns Err ─────────────────────────
+
+    #[test]
+    fn initialize_error_response_returns_err() {
+        let (ls, mut server_writer, _client_rx) = make_pair();
+
+        // Inject an LSP error response for the initialize request (id=1).
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            let error_resp = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": -32002,
+                    "message": "server not ready"
+                }
+            })
+            .to_string();
+            inject(&mut server_writer, &frame(&error_resp));
+        });
+
+        let result = ls.initialize(None, Path::new("/tmp/workspace"), None);
+        assert!(
+            result.is_err(),
+            "initialize must return Err when server replies with an RPC error"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("server not ready"),
+            "error message should propagate: {msg}"
+        );
+    }
 }

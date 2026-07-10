@@ -235,3 +235,8 @@ no_results_hint = "No files matched your search in this project."
 open_file = "Open File"
 expand_above = "Show more above"
 expand_below = "Show more below"
+
+[trust]
+message = "Do you trust the authors of this folder?\n\nLanguage servers and project tooling only run in trusted folders."
+btn_trust = "Trust"
+btn_restricted = "Open Restricted"
