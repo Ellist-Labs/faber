@@ -85,6 +85,19 @@ impl From<std::io::Error> for InstallError {
 /// Abstracts network access so downloads can be exercised in tests without a network.
 pub trait Fetcher: Send {
     fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, InstallError>;
+
+    /// Like `fetch_bytes` but calls `on_progress(bytes_downloaded_so_far)` after each chunk.
+    /// Default impl fetches in full then calls the callback once at the end.
+    fn fetch_bytes_with_progress(
+        &self,
+        url: &str,
+        on_progress: &mut dyn FnMut(usize),
+    ) -> Result<Vec<u8>, InstallError> {
+        let buf = self.fetch_bytes(url)?;
+        on_progress(buf.len());
+        Ok(buf)
+    }
+
     fn fetch_string(&self, url: &str) -> Option<String>;
 }
 
@@ -93,7 +106,24 @@ pub struct UreqFetcher;
 
 impl Fetcher for UreqFetcher {
     fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, InstallError> {
-        let response = ureq::get(url)
+        self.fetch_bytes_with_progress(url, &mut |_| {})
+    }
+
+    fn fetch_bytes_with_progress(
+        &self,
+        url: &str,
+        on_progress: &mut dyn FnMut(usize),
+    ) -> Result<Vec<u8>, InstallError> {
+        // No global timeout: binaries can be 40-80 MB and users may have slow
+        // connections. We gate on connect (30s) and per-read-call (90s) so a
+        // stalled transfer still fails rather than hanging indefinitely.
+        let agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(30)))
+            .timeout_per_call(Some(std::time::Duration::from_secs(90)))
+            .build()
+            .new_agent();
+        let response = agent
+            .get(url)
             .call()
             .map_err(|e| InstallError::Http(Box::new(e)))?;
         let mut reader = response.into_body().into_reader();
@@ -107,12 +137,17 @@ impl Fetcher for UreqFetcher {
                 break;
             }
             buf.extend_from_slice(&tmp[..n]);
+            on_progress(buf.len());
         }
         Ok(buf)
     }
 
     fn fetch_string(&self, url: &str) -> Option<String> {
-        let mut body = ureq::get(url).call().ok()?.into_body();
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build()
+            .new_agent();
+        let mut body = agent.get(url).call().ok()?.into_body();
         let s = body.read_to_string().ok()?;
         Some(s.trim().to_owned())
     }
@@ -152,13 +187,12 @@ impl Installer {
             "https://github.com/rust-lang/rust-analyzer/releases/download/{version}/{artifact}"
         );
 
-        progress_cb("Downloading…");
         let gz_bytes = Self::download_with_progress(fetcher, &base_url, progress_cb)?;
 
-        progress_cb("Extracting…");
+        progress_cb("Extracting...");
         let binary_bytes = Self::decompress_gz(&gz_bytes)?;
 
-        progress_cb("Verifying…");
+        progress_cb("Verifying...");
         let actual_hex = hex_sha256(&binary_bytes);
 
         // Try to fetch the companion checksum file; non-fatal on failure.
@@ -279,15 +313,16 @@ impl Installer {
         base.join("rust-analyzer").join(version)
     }
 
-    /// Download `url` via the fetcher, emitting a single progress report on completion.
+    /// Download `url` via the fetcher, calling `progress_cb` with KB-count during the transfer.
     fn download_with_progress(
         fetcher: &dyn Fetcher,
         url: &str,
         progress_cb: &mut dyn FnMut(&str),
     ) -> Result<Vec<u8>, InstallError> {
-        let buf = fetcher.fetch_bytes(url)?;
-        let kb = (buf.len() as u64) / 1024;
-        progress_cb(&format!("Downloading… {kb} KB"));
+        progress_cb("Connecting...");
+        let buf = fetcher.fetch_bytes_with_progress(url, &mut |bytes| {
+            progress_cb(&format!("Downloading... {} KB", bytes / 1024));
+        })?;
         Ok(buf)
     }
 

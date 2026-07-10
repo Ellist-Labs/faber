@@ -36,6 +36,8 @@ pub struct ServerStatus {
     pub server_id: String,
     pub language_id: LanguageId,
     pub state: ServerState,
+    /// Live progress message during `Downloading` state; `None` for all other states.
+    pub download_msg: Option<String>,
 }
 
 // ── OpenDoc ───────────────────────────────────────────────────────────────────
@@ -56,6 +58,11 @@ pub struct LspManager {
     lang_servers: Mutex<HashMap<String, Vec<String>>>,
     /// Servers currently resolving/downloading: server_id → lang_id_str.
     downloading: Mutex<HashMap<String, String>>,
+    /// Live download progress messages: server_id → latest progress string.
+    download_msgs: Arc<Mutex<HashMap<String, String>>>,
+    /// Servers that permanently failed this process run: server_id → error message.
+    /// Prevents repeated re-attempts on every file open after an unrecoverable failure.
+    permanently_failed: Mutex<HashMap<String, String>>,
     diagnostic_store: Arc<DiagnosticStore>,
     settings: Arc<RwLock<LspSettings>>,
     trusted: Arc<AtomicBool>,
@@ -75,6 +82,8 @@ impl LspManager {
             servers: Mutex::new(HashMap::new()),
             lang_servers: Mutex::new(HashMap::new()),
             downloading: Mutex::new(HashMap::new()),
+            download_msgs: Arc::new(Mutex::new(HashMap::new())),
+            permanently_failed: Mutex::new(HashMap::new()),
             diagnostic_store: Arc::new(DiagnosticStore::new()),
             settings: Arc::new(RwLock::new(settings)),
             trusted: Arc::new(AtomicBool::new(trusted)),
@@ -141,25 +150,45 @@ impl LspManager {
         {
             let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
             let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
-            if servers.contains_key(&server_id) || dl.contains_key(&server_id) {
+            let failed = self
+                .permanently_failed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if servers.contains_key(&server_id)
+                || dl.contains_key(&server_id)
+                || failed.contains_key(&server_id)
+            {
                 return Ok(());
             }
             dl.insert(server_id.clone(), lang_id_str);
         }
         self.update_status();
 
-        // Resolve binary (may download ~60 s on first run).
+        // Resolve binary (may download on first run).
         let settings_guard = self.settings.read().unwrap_or_else(|p| p.into_inner());
-        let binary_path =
-            match adapter.resolve_binary(&settings_guard, &mut |msg| log::info!("{}", msg)) {
-                Ok(p) => p,
-                Err(e) => {
-                    let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
-                    dl.remove(&server_id);
-                    self.update_status();
-                    return Err(anyhow::anyhow!("resolve_binary failed: {e}"));
-                }
-            };
+        let download_msgs = Arc::clone(&self.download_msgs);
+        let server_id_for_cb = server_id.clone();
+        let mgr_for_cb = Arc::clone(self);
+        let binary_path = match adapter.resolve_binary(&settings_guard, &mut |msg: &str| {
+            log::info!("{}", msg);
+            download_msgs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(server_id_for_cb.clone(), msg.to_owned());
+            mgr_for_cb.update_status();
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
+                dl.remove(&server_id);
+                self.download_msgs
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&server_id);
+                self.update_status();
+                return Err(anyhow::anyhow!("resolve_binary failed: {e}"));
+            }
+        };
         drop(settings_guard);
 
         let init_options = adapter.init_options();
@@ -177,15 +206,37 @@ impl LspManager {
         let server = match LanguageServer::spawn(&binary_path, workspace_root, env_path) {
             Ok(s) => s,
             Err(e) => {
-                let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
-                dl.remove(&server_id);
+                log::error!("lsp: spawn failed for {server_id}: {e}");
+                self.downloading
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&server_id);
+                self.download_msgs
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&server_id);
+                self.permanently_failed
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(server_id.clone(), e.to_string());
                 self.update_status();
                 return Err(e);
             }
         };
         if let Err(e) = server.initialize(None, workspace_root, init_options) {
-            let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
-            dl.remove(&server_id);
+            log::error!("lsp: initialize failed for {server_id}: {e}");
+            self.downloading
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&server_id);
+            self.download_msgs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&server_id);
+            self.permanently_failed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(server_id.clone(), e.to_string());
             self.update_status();
             return Err(e);
         }
@@ -227,8 +278,42 @@ impl LspManager {
         {
             let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
             dl.remove(&server_id);
+            self.download_msgs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&server_id);
         }
         self.update_status();
+
+        // Re-send didOpen for all documents that were opened while this server was
+        // initializing (those calls hit on_document_opened before the server was
+        // in `servers`, so their notifications were dropped).
+        let lang_str = lang_id.as_str().to_owned();
+        let queued: Vec<(url::Url, String, i32, String)> = {
+            let docs = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
+            docs.iter()
+                .filter(|(_, d)| d.lang_id == lang_str)
+                .map(|(uri, d)| {
+                    (
+                        uri.clone(),
+                        d.lang_id.clone(),
+                        d.version,
+                        d.rope.to_string(),
+                    )
+                })
+                .collect()
+        };
+        for (uri, lid, version, text) in queued {
+            let params = serde_json::json!({
+                "textDocument": {
+                    "uri": uri.as_str(),
+                    "languageId": lid,
+                    "version": version,
+                    "text": text,
+                }
+            });
+            self.notify_servers_for_lang(&lang_str, "textDocument/didOpen", &params);
+        }
 
         Ok(())
     }
@@ -393,10 +478,8 @@ impl LspManager {
 
     // ── Restart ───────────────────────────────────────────────────────────────
 
-    pub fn restart_server(self: &Arc<Self>, server_id: &str) {
+    pub fn stop_server(self: &Arc<Self>, server_id: &str) {
         let server_id = server_id.to_owned();
-
-        // Remove from maps.
         {
             let mut guard = self.servers.lock().unwrap_or_else(|p| p.into_inner());
             guard.remove(&server_id);
@@ -407,6 +490,39 @@ impl LspManager {
                 ids.retain(|id| id != &server_id);
             }
         }
+        self.downloading
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&server_id);
+        self.download_msgs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&server_id);
+        self.permanently_failed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&server_id);
+        self.update_status();
+    }
+
+    pub fn restart_server(self: &Arc<Self>, server_id: &str) {
+        let server_id = server_id.to_owned();
+
+        // Remove from maps (including any prior failure state so ensure runs cleanly).
+        {
+            let mut guard = self.servers.lock().unwrap_or_else(|p| p.into_inner());
+            guard.remove(&server_id);
+        }
+        {
+            let mut guard = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
+            for ids in guard.values_mut() {
+                ids.retain(|id| id != &server_id);
+            }
+        }
+        self.permanently_failed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&server_id);
         self.update_status();
 
         let workspace_root = {
@@ -498,6 +614,30 @@ impl LspManager {
         Some(server.transport().request(method, params))
     }
 
+    /// Returns the negotiated position encoding for the server handling `uri`.
+    /// Defaults to UTF-16 (LSP protocol default) when no server is found.
+    pub fn position_encoding_for_uri(&self, uri: &url::Url) -> PositionEncoding {
+        let lang_id_str = {
+            let guard = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.get(uri) {
+                Some(d) => d.lang_id.clone(),
+                None => return PositionEncoding::Utf16,
+            }
+        };
+        let server_id = {
+            let guard = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.get(&lang_id_str).and_then(|v| v.first()) {
+                Some(id) => id.clone(),
+                None => return PositionEncoding::Utf16,
+            }
+        };
+        let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
+        servers
+            .get(&server_id)
+            .map(|s| s.capabilities().position_encoding)
+            .unwrap_or_default()
+    }
+
     // ── Private ───────────────────────────────────────────────────────────────
 
     /// Send a notification to every server registered for `lang_id_str`.
@@ -515,9 +655,26 @@ impl LspManager {
     }
 
     fn update_status(&self) {
+        // Pre-compute adapter server_id → first language; immutable, no lock needed.
+        let adapter_lang: HashMap<&str, &str> = self
+            .adapters
+            .iter()
+            .map(|a| {
+                (
+                    a.server_id(),
+                    a.languages().first().copied().unwrap_or_default(),
+                )
+            })
+            .collect();
+
         let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
         let lang_servers = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
         let downloading = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
+        let dl_msgs = self.download_msgs.lock().unwrap_or_else(|p| p.into_inner());
+        let failed = self
+            .permanently_failed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
 
         // Build a server_id → lang_id map for display.
         let mut server_to_lang: HashMap<String, String> = HashMap::new();
@@ -537,17 +694,36 @@ impl LspManager {
                     server_id: server_id.clone(),
                     language_id: LanguageId::new(&lang_str),
                     state: server.state(),
+                    download_msg: None,
                 }
             })
             .collect();
 
-        // Include in-flight downloads so the status bar can show Downloading.
+        // Include in-flight downloads so the status bar can show Downloading + progress.
         for (server_id, lang_str) in downloading.iter() {
             if !servers.contains_key(server_id) {
                 snapshot.push(ServerStatus {
                     server_id: server_id.clone(),
                     language_id: LanguageId::new(lang_str),
                     state: ServerState::Downloading,
+                    download_msg: dl_msgs.get(server_id).cloned(),
+                });
+            }
+        }
+
+        // Include permanently-failed servers so the overlay can show an error + Restart button.
+        for (server_id, msg) in failed.iter() {
+            if !servers.contains_key(server_id) && !downloading.contains_key(server_id) {
+                let lang_str = adapter_lang
+                    .get(server_id.as_str())
+                    .copied()
+                    .unwrap_or_default()
+                    .to_owned();
+                snapshot.push(ServerStatus {
+                    server_id: server_id.clone(),
+                    language_id: LanguageId::new(&lang_str),
+                    state: ServerState::Error(msg.clone()),
+                    download_msg: None,
                 });
             }
         }

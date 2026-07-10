@@ -92,7 +92,12 @@ pub struct FileFinderView {
 }
 
 impl FileFinderView {
-    pub fn new(workspace: WeakEntity<Workspace>, preview_on: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: WeakEntity<Workspace>,
+        index_status: gpui::Entity<crate::workspace::IndexStatus>,
+        preview_on: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut view = Self {
             workspace,
             focus_handle: cx.focus_handle(),
@@ -125,6 +130,19 @@ impl FileFinderView {
         // workspace back (for the index snapshot) must wait until it returns.
         view.schedule_filter_deferred(cx);
         view.reset_blink(cx);
+        // Re-filter when the index engine finishes its initial scan.
+        cx.observe(&index_status, |this, status, cx| {
+            let is_done = status
+                .read(cx)
+                .current_progress
+                .as_ref()
+                .map(|p| matches!(p, faber_index::progress::ProgressEvent::End { .. }))
+                .unwrap_or(false);
+            if is_done && this.rows.is_empty() {
+                this.schedule_filter(cx);
+            }
+        })
+        .detach();
         view
     }
 

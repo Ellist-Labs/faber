@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
-use gpui::{AnyView, Context, Entity, IntoElement, Render, Window, div, prelude::*, px};
+use gpui::{
+    AnyView, Context, Entity, IntoElement, MouseButton, Render, Window, div, prelude::*, px, svg,
+};
 use rust_i18n::t;
 
 use crate::lsp_status::LspStatus;
@@ -293,58 +295,91 @@ impl Render for IndexingStatusItem {
 
 pub struct LspStatusItem {
     lsp_status: gpui::Entity<LspStatus>,
+    ws: gpui::WeakEntity<crate::workspace::Workspace>,
 }
 
 impl LspStatusItem {
-    pub fn new(lsp_status: gpui::Entity<LspStatus>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        lsp_status: gpui::Entity<LspStatus>,
+        ws: gpui::WeakEntity<crate::workspace::Workspace>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&lsp_status, |_, _, cx| cx.notify()).detach();
-        Self { lsp_status }
+        Self { lsp_status, ws }
     }
 }
 
 impl Render for LspStatusItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::ui::icon::IconName;
         let t = cx.global::<RuntimeTheme>().clone();
         let lsp = self.lsp_status.read(cx);
 
-        let (state_label, text_color) = if lsp.statuses.is_empty() {
-            (t!("status_bar.lsp_idle").to_string(), t.text_subtle)
+        let (dot_color, label) = if lsp.statuses.is_empty() {
+            (t.text_subtle, None)
         } else {
-            let total_errors = lsp.error_count;
-            let total_warnings = lsp.warning_count;
-            let label = match &lsp.statuses[0].state {
-                ServerState::Downloading => t!("status_bar.lsp_downloading").to_string(),
-                ServerState::Starting | ServerState::Initializing => {
-                    t!("status_bar.lsp_starting").to_string()
-                }
+            let status = &lsp.statuses[0];
+            let color = match &status.state {
                 ServerState::Running => {
-                    if total_errors > 0 {
-                        format!("{} {}", total_errors, t!("status_bar.lsp_errors"))
-                    } else if total_warnings > 0 {
-                        format!("{} {}", total_warnings, t!("status_bar.lsp_warnings"))
+                    if lsp.error_count > 0 {
+                        t.error
+                    } else if lsp.warning_count > 0 {
+                        t.warning
                     } else {
-                        t!("status_bar.lsp_ready").to_string()
+                        t.success
                     }
                 }
-                ServerState::Restarting { attempt } => {
-                    format!("{} ({})", t!("status_bar.lsp_restarting"), attempt)
+                ServerState::Downloading
+                | ServerState::Starting
+                | ServerState::Initializing
+                | ServerState::Restarting { .. } => t.warning,
+                ServerState::Error(_) => t.error,
+                ServerState::Stopped => t.text_subtle,
+            };
+            let badge = match &status.state {
+                ServerState::Running if lsp.error_count > 0 => Some(lsp.error_count.to_string()),
+                ServerState::Running if lsp.warning_count > 0 => {
+                    Some(lsp.warning_count.to_string())
                 }
-                ServerState::Error(msg) => format!("{}: {}", t!("status_bar.lsp_error"), msg),
-                ServerState::Stopped => t!("status_bar.lsp_idle").to_string(),
+                _ => None,
             };
-            let color = if total_errors > 0 {
-                t.error
-            } else {
-                t.text_muted
-            };
-            (label, color)
+            (color, badge)
         };
 
+        let ws = self.ws.clone();
         div()
-            .text_color(text_color)
-            .text_size(px(t.font_size_caption))
-            .font_family(t.ui_family.clone())
-            .child(state_label)
+            .id("lsp-status-item")
+            .flex()
+            .items_center()
+            .gap(px(3.))
+            .px(px(4.))
+            .h_full()
+            .cursor_pointer()
+            .child(
+                svg()
+                    .path(IconName::Code.path())
+                    .size(px(13.))
+                    .text_color(dot_color),
+            )
+            .when_some(label, |el, badge| {
+                el.child(
+                    div()
+                        .text_size(px(t.font_size_caption))
+                        .font_family(t.ui_family.clone())
+                        .text_color(dot_color)
+                        .child(badge),
+                )
+            })
+            .on_mouse_down(MouseButton::Left, move |ev, _window, cx| {
+                if let Some(ws) = ws.upgrade() {
+                    let pos = ev.position;
+                    ws.update(cx, |ws, cx| {
+                        ws.lsp_overlay_open = !ws.lsp_overlay_open;
+                        ws.lsp_overlay_pos = pos;
+                        cx.notify();
+                    });
+                }
+            })
             .into_any_element()
     }
 }

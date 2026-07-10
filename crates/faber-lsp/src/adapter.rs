@@ -135,7 +135,7 @@ impl LspAdapter for RustAnalyzerAdapter {
         }
 
         // 3. Managed download.
-        progress_cb("Checking rust-analyzer cache…");
+        progress_cb("Checking cache...");
         let path = crate::install::Installer::install_or_check(
             RA_VERSION,
             progress_cb,

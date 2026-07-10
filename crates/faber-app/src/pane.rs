@@ -95,10 +95,9 @@ pub(crate) struct TabMenu {
 pub struct Tab {
     pub id: usize,
     pub content: TabItem,
-    // Concrete handle kept for editor-specific operations (subscribe, save, etc.).
     pub(crate) editor: Option<Entity<EditorView>>,
-    // Concrete handle kept for project-search operations (prefill, focus query bar).
     pub(crate) project_search: Option<Entity<ProjectSearchView>>,
+    pub(crate) problems: Option<Entity<DiagnosticsPanel>>,
 }
 
 impl Tab {
@@ -149,6 +148,7 @@ impl Pane {
             content,
             editor: Some(entity),
             project_search: None,
+            problems: None,
         });
         self.next_tab_id += 1;
         self.active = Some(self.tabs.len() - 1);
@@ -163,6 +163,7 @@ impl Pane {
             content,
             editor: None,
             project_search: None,
+            problems: None,
         });
         self.next_tab_id += 1;
         self.active = Some(self.tabs.len() - 1);
@@ -181,6 +182,7 @@ impl Pane {
             content,
             editor: None,
             project_search: Some(entity),
+            problems: None,
         });
         self.next_tab_id += 1;
         self.active = Some(self.tabs.len() - 1);
@@ -193,12 +195,13 @@ impl Pane {
         cx: &App,
     ) -> usize {
         let id = self.next_tab_id;
-        let content = TabItem::from_problems(entity, cx);
+        let content = TabItem::from_problems(entity.clone(), cx);
         self.tabs.push(Tab {
             id,
             content,
             editor: None,
             project_search: None,
+            problems: Some(entity),
         });
         self.next_tab_id += 1;
         self.active = Some(self.tabs.len() - 1);
@@ -304,6 +307,10 @@ impl Pane {
 
     pub(crate) fn all_editors(&self) -> impl Iterator<Item = &Entity<EditorView>> {
         self.tabs.iter().filter_map(|t| t.editor())
+    }
+
+    pub(crate) fn all_problems_panels(&self) -> impl Iterator<Item = &Entity<DiagnosticsPanel>> {
+        self.tabs.iter().filter_map(|t| t.problems.as_ref())
     }
 }
 
