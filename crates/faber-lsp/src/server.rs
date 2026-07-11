@@ -17,6 +17,8 @@ use crate::{position::PositionEncoding, transport::TransportLayer};
 const MAX_LOG_LINES: usize = 10_000;
 const MAX_LOG_BYTES_PER_LINE: usize = 4_096;
 
+type CrashCb = Arc<Mutex<Option<Box<dyn Fn() + Send + 'static>>>>;
+
 // ── ServerState ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +57,7 @@ pub struct LanguageServer {
     state: Arc<Mutex<ServerState>>,
     log_lines: Arc<Mutex<VecDeque<LogLine>>>,
     start_instant: Instant,
+    crash_cb: CrashCb,
 }
 
 impl LanguageServer {
@@ -65,15 +68,17 @@ impl LanguageServer {
         env_path: Option<&str>,
     ) -> anyhow::Result<Arc<Self>> {
         let mut cmd = Command::new(binary_path);
-        cmd.arg("--stdio")
-            .current_dir(workspace_root)
+        cmd.current_dir(workspace_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env_remove("RUST_LOG");
 
         if let Some(path) = env_path {
+            log::info!("lsp: spawning with PATH={path}");
             cmd.env("PATH", path);
+        } else {
+            log::info!("lsp: spawning without explicit PATH override");
         }
 
         let mut child = cmd.spawn()?;
@@ -106,6 +111,7 @@ impl LanguageServer {
                         } else {
                             text
                         };
+                        log::info!("lsp [stderr]: {text}");
                         let ms = start_instant.elapsed().as_millis() as u64;
                         let mut guard = log_lines_clone.lock().unwrap_or_else(|p| p.into_inner());
                         if guard.len() >= MAX_LOG_LINES {
@@ -127,7 +133,56 @@ impl LanguageServer {
             state: Arc::new(Mutex::new(ServerState::Starting)),
             log_lines,
             start_instant,
+            crash_cb: Arc::new(Mutex::new(None)),
         });
+
+        // Crash monitor: polls the child every 500ms and fires crash_cb on unexpected exit.
+        {
+            let child_arc = Arc::clone(&server.child);
+            let state_arc = Arc::clone(&server.state);
+            let cb_arc = Arc::clone(&server.crash_cb);
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(500));
+                    let exit_status = {
+                        let mut guard = child_arc.lock().unwrap_or_else(|p| p.into_inner());
+                        match &mut *guard {
+                            Some(child) => child.try_wait(),
+                            None => break,
+                        }
+                    };
+                    match exit_status {
+                        Ok(None) => continue,
+                        Ok(Some(_)) | Err(_) => {
+                            let should_notify = {
+                                let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+                                if !matches!(*s, ServerState::Stopped | ServerState::Error(_)) {
+                                    log::warn!("lsp: server process exited unexpectedly");
+                                    *s = ServerState::Error("server crashed".to_owned());
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if should_notify {
+                                // Take the callback out before invoking — releasing the lock
+                                // before calling f() prevents a re-entrant set_crash_callback
+                                // inside the handler from deadlocking.
+                                let cb_fn = {
+                                    let mut guard =
+                                        cb_arc.lock().unwrap_or_else(|p| p.into_inner());
+                                    guard.take()
+                                };
+                                if let Some(f) = cb_fn {
+                                    f();
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
         // Wire window/logMessage → log_lines.
         {
@@ -332,6 +387,17 @@ impl LanguageServer {
         &self.transport
     }
 
+    /// Set state to Stopped so the crash monitor's guard suppresses phantom callbacks
+    /// when the manager intentionally removes this server (stop / restart).
+    pub fn mark_stopped(&self) {
+        self.set_state(ServerState::Stopped);
+    }
+
+    pub fn set_crash_callback(&self, cb: Box<dyn Fn() + Send + 'static>) {
+        let mut guard = self.crash_cb.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = Some(cb);
+    }
+
     // ── Test constructor ──────────────────────────────────────────────────────
 
     #[cfg(test)]
@@ -343,6 +409,7 @@ impl LanguageServer {
             state: Arc::new(Mutex::new(ServerState::Starting)),
             log_lines: Arc::new(Mutex::new(VecDeque::new())),
             start_instant: Instant::now(),
+            crash_cb: Arc::new(Mutex::new(None)),
         })
     }
 }

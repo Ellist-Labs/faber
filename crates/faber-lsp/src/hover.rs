@@ -5,7 +5,8 @@ pub fn extract_hover_text(val: &serde_json::Value) -> Option<String> {
         s.to_owned()
     } else if let Some(obj) = contents.as_object() {
         obj.get("value")?.as_str()?.to_owned()
-    } else if let Some(arr) = contents.as_array() {
+    } else {
+        let arr = contents.as_array()?;
         arr.iter()
             .filter_map(|item| {
                 if let Some(s) = item.as_str() {
@@ -16,8 +17,6 @@ pub fn extract_hover_text(val: &serde_json::Value) -> Option<String> {
             })
             .collect::<Vec<_>>()
             .join("\n\n")
-    } else {
-        return None;
     };
     if text.trim().is_empty() {
         None

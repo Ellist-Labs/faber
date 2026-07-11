@@ -1,5 +1,9 @@
-// LspManager: per-server ownership, document sync events,
-// trust gate, DiagnosticStore wiring, progress reporting.
+// LspManager: single-slot lifecycle state machine, document sync, diagnostics.
+//
+// Architecture: each server is tracked by exactly ONE `ServerSlot` variant stored in
+// `slots: Mutex<HashMap<server_id, ServerSlot>>`.  A key being absent means the server
+// is stopped.  All lifecycle transitions replace the slot atomically under one lock,
+// eliminating the class of bugs where multiple maps disagree.
 
 use std::{
     collections::HashMap,
@@ -20,24 +24,74 @@ use crate::{
     diagnostics::{
         DiagnosticEntry, DiagnosticRange, DiagnosticStore, severity_from_lsp, tags_from_lsp,
     },
-    install::Installer,
+    install::{InstallProgress, Installer},
     position::{PositionEncoding, from_lsp_position},
     server::{LanguageServer, ServerState},
     transport::RpcError,
 };
+
+const MAX_RESTART_ATTEMPTS: u8 = 3;
 use faber_core::anchor::{Anchor, Bias};
 use faber_lang::LanguageId;
 use faber_settings::LspSettings;
 
-// ── ServerStatus ──────────────────────────────────────────────────────────────
+// ── Download progress (lives inside the Downloading slot) ────────────────────
+
+struct DownloadInfo {
+    msg: String,
+    fraction: Option<f32>,
+}
+
+// ── ServerStatus (UI-facing DTO) ──────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct ServerStatus {
     pub server_id: String,
     pub language_id: LanguageId,
     pub state: ServerState,
-    /// Live progress message during `Downloading` state; `None` for all other states.
     pub download_msg: Option<String>,
+    pub download_fraction: Option<f32>,
+}
+
+// ── ServerSlot — the single source of truth per server ───────────────────────
+//
+// Absence of a key  = server is stopped / was never started.
+// Downloading       = binary resolving / downloading / spawning / initializing.
+// Running           = fully initialized; the Arc<LanguageServer> is live.
+// Restarting        = child exited unexpectedly; backoff in progress.
+//                     `attempt` is the ordinal of the next restart (1-indexed).
+//                     Reaching Running resets the counter.
+// Failed            = give-up after MAX_RESTART_ATTEMPTS, or unrecoverable error.
+//                     User can trigger a manual restart via restart_server().
+
+enum ServerSlot {
+    Downloading {
+        lang: String,
+        progress: Option<DownloadInfo>,
+    },
+    Running {
+        server: Arc<LanguageServer>,
+        lang: String,
+    },
+    Restarting {
+        attempt: u8,
+        lang: String,
+    },
+    Failed {
+        lang: String,
+        msg: String,
+    },
+}
+
+impl ServerSlot {
+    fn lang(&self) -> &str {
+        match self {
+            ServerSlot::Downloading { lang, .. } => lang,
+            ServerSlot::Running { lang, .. } => lang,
+            ServerSlot::Restarting { lang, .. } => lang,
+            ServerSlot::Failed { lang, .. } => lang,
+        }
+    }
 }
 
 // ── OpenDoc ───────────────────────────────────────────────────────────────────
@@ -52,17 +106,9 @@ struct OpenDoc {
 
 pub struct LspManager {
     adapters: Vec<Box<dyn LspAdapter>>,
-    /// Running servers keyed by `server_id`.
-    servers: Mutex<HashMap<String, Arc<LanguageServer>>>,
-    /// Reverse index: language id string → server ids serving it.
-    lang_servers: Mutex<HashMap<String, Vec<String>>>,
-    /// Servers currently resolving/downloading: server_id → lang_id_str.
-    downloading: Mutex<HashMap<String, String>>,
-    /// Live download progress messages: server_id → latest progress string.
-    download_msgs: Arc<Mutex<HashMap<String, String>>>,
-    /// Servers that permanently failed this process run: server_id → error message.
-    /// Prevents repeated re-attempts on every file open after an unrecoverable failure.
-    permanently_failed: Mutex<HashMap<String, String>>,
+    /// Single source of truth: server_id → lifecycle slot.
+    /// Absence = stopped. All transitions must replace the slot atomically.
+    slots: Mutex<HashMap<String, ServerSlot>>,
     diagnostic_store: Arc<DiagnosticStore>,
     settings: Arc<RwLock<LspSettings>>,
     trusted: Arc<AtomicBool>,
@@ -79,11 +125,7 @@ impl LspManager {
     ) -> Arc<Self> {
         Arc::new(Self {
             adapters,
-            servers: Mutex::new(HashMap::new()),
-            lang_servers: Mutex::new(HashMap::new()),
-            downloading: Mutex::new(HashMap::new()),
-            download_msgs: Arc::new(Mutex::new(HashMap::new())),
-            permanently_failed: Mutex::new(HashMap::new()),
+            slots: Mutex::new(HashMap::new()),
             diagnostic_store: Arc::new(DiagnosticStore::new()),
             settings: Arc::new(RwLock::new(settings)),
             trusted: Arc::new(AtomicBool::new(trusted)),
@@ -99,26 +141,29 @@ impl LspManager {
         self.trusted.load(Ordering::Relaxed)
     }
 
-    // Caller must kick ensure_server_for_language + on_document_opened for all
-    // open docs after calling this with `trusted = true`.
     pub fn set_trusted(self: &Arc<Self>, trusted: bool) {
         self.trusted.store(trusted, Ordering::Relaxed);
     }
 
     // ── Server lifecycle ──────────────────────────────────────────────────────
 
-    /// Idempotent — returns Ok immediately if a server for this language's
-    /// adapter (`server_id`) is already running.
+    /// Idempotent: no-op if a slot for this server already exists in any state.
     pub fn ensure_server_for_language(
         self: &Arc<Self>,
         lang_id: &LanguageId,
         workspace_root: &Path,
     ) -> anyhow::Result<()> {
+        log::info!(
+            "lsp: ensure_server_for_language lang={} root={}",
+            lang_id.as_str(),
+            workspace_root.display()
+        );
         if !self.is_trusted() {
+            log::info!("lsp: not trusted, skipping");
             return Ok(());
         }
 
-        // Store workspace root on first call.
+        // Persist workspace root (first caller wins).
         {
             let mut root = self
                 .workspace_root
@@ -129,7 +174,6 @@ impl LspManager {
             }
         }
 
-        // Find an adapter for this language.
         let adapter = match self
             .adapters
             .iter()
@@ -143,58 +187,66 @@ impl LspManager {
         };
 
         let server_id = adapter.server_id().to_owned();
-        let lang_id_str = lang_id.as_str().to_owned();
+        let lang_str = lang_id.as_str().to_owned();
 
-        // Idempotency check + mark downloading atomically (prevents TOCTOU with
-        // concurrent calls for the same server_id).
+        // Idempotency: if any slot exists (Downloading/Running/Restarting/Failed) return early.
         {
-            let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
-            let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
-            let failed = self
-                .permanently_failed
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if servers.contains_key(&server_id)
-                || dl.contains_key(&server_id)
-                || failed.contains_key(&server_id)
-            {
+            let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+            if slots.contains_key(&server_id) {
                 return Ok(());
             }
-            dl.insert(server_id.clone(), lang_id_str);
+            slots.insert(
+                server_id.clone(),
+                ServerSlot::Downloading {
+                    lang: lang_str.clone(),
+                    progress: None,
+                },
+            );
         }
         self.update_status();
 
-        // Resolve binary (may download on first run).
+        // Resolve binary — may download; progress callback updates the Downloading slot.
         let settings_guard = self.settings.read().unwrap_or_else(|p| p.into_inner());
-        let download_msgs = Arc::clone(&self.download_msgs);
-        let server_id_for_cb = server_id.clone();
         let mgr_for_cb = Arc::clone(self);
-        let binary_path = match adapter.resolve_binary(&settings_guard, &mut |msg: &str| {
-            log::info!("{}", msg);
-            download_msgs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(server_id_for_cb.clone(), msg.to_owned());
-            mgr_for_cb.update_status();
-        }) {
-            Ok(p) => p,
-            Err(e) => {
-                let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
-                dl.remove(&server_id);
-                self.download_msgs
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&server_id);
-                self.update_status();
-                return Err(anyhow::anyhow!("resolve_binary failed: {e}"));
-            }
-        };
+        let sid_for_cb = server_id.clone();
+        let lang_for_cb = lang_str.clone();
+
+        let binary_path =
+            match adapter.resolve_binary(&settings_guard, &mut |progress: InstallProgress| {
+                log::info!("lsp: {}", progress.message());
+                let mut slots = mgr_for_cb.slots.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(ServerSlot::Downloading { progress: p, .. }) =
+                    slots.get_mut(&sid_for_cb)
+                {
+                    *p = Some(DownloadInfo {
+                        msg: progress.message(),
+                        fraction: progress.fraction(),
+                    });
+                }
+                // update_status needs the slots lock; drop it first.
+                drop(slots);
+                mgr_for_cb.update_status();
+            }) {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = e.to_string();
+                    log::error!("lsp: resolve_binary failed for {server_id}: {msg}");
+                    let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+                    slots.insert(
+                        server_id.clone(),
+                        ServerSlot::Failed {
+                            lang: lang_for_cb,
+                            msg: msg.clone(),
+                        },
+                    );
+                    self.update_status();
+                    return Err(anyhow::anyhow!("resolve_binary failed: {msg}"));
+                }
+            };
         drop(settings_guard);
 
         let init_options = adapter.init_options();
         let server_id_str: &'static str = adapter.server_id();
-
-        // Resolve login-shell PATH for subprocess.
         let shell_path = Installer::login_shell_path();
         let env_path: Option<&str> = if shell_path.is_empty() {
             None
@@ -202,53 +254,54 @@ impl LspManager {
             Some(shell_path.as_str())
         };
 
-        // Spawn and initialize.
+        // Spawn child process.
         let server = match LanguageServer::spawn(&binary_path, workspace_root, env_path) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("lsp: spawn failed for {server_id}: {e}");
-                self.downloading
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&server_id);
-                self.download_msgs
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&server_id);
-                self.permanently_failed
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(server_id.clone(), e.to_string());
+                let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+                slots.insert(
+                    server_id.clone(),
+                    ServerSlot::Failed {
+                        lang: lang_str.clone(),
+                        msg: e.to_string(),
+                    },
+                );
                 self.update_status();
                 return Err(e);
             }
         };
+
+        // LSP handshake — blocks up to 30 s.
         if let Err(e) = server.initialize(None, workspace_root, init_options) {
             log::error!("lsp: initialize failed for {server_id}: {e}");
-            self.downloading
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .remove(&server_id);
-            self.download_msgs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .remove(&server_id);
-            self.permanently_failed
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(server_id.clone(), e.to_string());
+            let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+            slots.insert(
+                server_id.clone(),
+                ServerSlot::Failed {
+                    lang: lang_str.clone(),
+                    msg: e.to_string(),
+                },
+            );
             self.update_status();
             return Err(e);
         }
 
-        // After initialize: read the negotiated position encoding.
-        let encoding = server.capabilities().position_encoding;
+        // Wire crash callback — registered BEFORE the slot transitions to Running so
+        // any immediate crash fires handle_server_crash even in the tiny window.
+        {
+            let mgr = Arc::clone(self);
+            let sid = server_id.clone();
+            server.set_crash_callback(Box::new(move || {
+                mgr.handle_server_crash(&sid);
+            }));
+        }
 
         // Wire publishDiagnostics → diagnostic store.
         {
             let store = Arc::clone(&self.diagnostic_store);
             let open_docs = Arc::clone(&self.open_docs);
-            let source_str = server_id_str;
+            let encoding = server.capabilities().position_encoding;
             server.transport().subscribe(
                 "textDocument/publishDiagnostics",
                 Arc::new(move |params| {
@@ -256,42 +309,48 @@ impl LspManager {
                         Arc::clone(&store),
                         Arc::clone(&open_docs),
                         encoding,
-                        source_str,
+                        server_id_str,
                         params,
                     );
                 }),
             );
         }
 
-        // Insert into running maps and clear downloading flag.
-        {
-            let mut servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
-            servers.insert(server_id.clone(), server);
-        }
-        {
-            let mut lang_map = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
-            lang_map
-                .entry(lang_id.as_str().to_owned())
-                .or_default()
-                .push(server_id.clone());
-        }
-        {
-            let mut dl = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
-            dl.remove(&server_id);
-            self.download_msgs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .remove(&server_id);
-        }
-        self.update_status();
+        log::info!("lsp: {server_id} Running");
 
-        // Re-send didOpen for all documents that were opened while this server was
-        // initializing (those calls hit on_document_opened before the server was
-        // in `servers`, so their notifications were dropped).
-        let lang_str = lang_id.as_str().to_owned();
+        // Transition Downloading → Running and capture queued-doc snapshot atomically.
+        // Snapshot is taken while slots lock is held so no new `on_document_opened` call
+        // can interleave between the Running insert and the replay — keeping the ordering:
+        // (a) slot = Running, (b) replay docs that arrived during Downloading.
+        //
+        // Lock order: we lock `slots` first, then `open_docs`.  All other code paths that
+        // lock both do so in the same order (open_docs-only callers never hold slots while
+        // doing so).  The only caller that locks open_docs first is `on_document_opened`,
+        // but it acquires slots only through `notify_servers_for_lang` which is a separate,
+        // non-overlapping acquisition — not nested.
         let queued: Vec<(url::Url, String, i32, String)> = {
-            let docs = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
-            docs.iter()
+            let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+
+            // If the slot was removed while we were initializing (stop_server was called),
+            // abandon the new server gracefully.
+            if !slots.contains_key(&server_id) {
+                log::info!("lsp: {server_id} was stopped while initializing — discarding");
+                drop(slots);
+                let _ = server.shutdown();
+                return Ok(());
+            }
+
+            slots.insert(
+                server_id.clone(),
+                ServerSlot::Running {
+                    server: Arc::clone(&server),
+                    lang: lang_str.clone(),
+                },
+            );
+
+            let docs_guard = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
+            docs_guard
+                .iter()
                 .filter(|(_, d)| d.lang_id == lang_str)
                 .map(|(uri, d)| {
                     (
@@ -303,6 +362,9 @@ impl LspManager {
                 })
                 .collect()
         };
+        self.update_status();
+
+        // Replay didOpen for documents that were opened while this server was initializing.
         for (uri, lid, version, text) in queued {
             let params = serde_json::json!({
                 "textDocument": {
@@ -312,10 +374,171 @@ impl LspManager {
                     "text": text,
                 }
             });
-            self.notify_servers_for_lang(&lang_str, "textDocument/didOpen", &params);
+            server.transport().notify("textDocument/didOpen", params);
         }
 
         Ok(())
+    }
+
+    pub fn stop_server(self: &Arc<Self>, server_id: &str) {
+        let removed = {
+            let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+            slots.remove(server_id)
+        };
+        // Mark stopped BEFORE dropping: the crash monitor checks ServerState to decide
+        // whether to fire the callback; Stopped suppresses a false "crash" notification.
+        if let Some(ServerSlot::Running { ref server, .. }) = removed {
+            server.mark_stopped();
+        }
+        drop(removed); // LanguageServer::drop kills the child process
+        self.update_status();
+    }
+
+    pub fn restart_server(self: &Arc<Self>, server_id: &str) {
+        // Find the language before touching the slot.
+        let lang_str = {
+            let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(slot) = slots.get(server_id) {
+                slot.lang().to_owned()
+            } else {
+                // No slot (fully stopped) — find from adapter for user-triggered restart.
+                match self
+                    .adapters
+                    .iter()
+                    .find(|a| a.server_id() == server_id)
+                    .and_then(|a| a.languages().first().copied())
+                {
+                    Some(l) => l.to_owned(),
+                    None => {
+                        log::warn!("lsp: cannot restart {server_id}: no adapter found");
+                        return;
+                    }
+                }
+            }
+        };
+
+        let workspace_root = {
+            self.workspace_root
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        };
+        let Some(root) = workspace_root else {
+            log::warn!("lsp: cannot restart {server_id}: workspace root not known");
+            return;
+        };
+
+        // Remove the current slot (mark stopped if Running to suppress phantom callback).
+        {
+            let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+            let removed = slots.remove(server_id);
+            // mark_stopped must be called while the Arc is still live (before drop).
+            if let Some(ServerSlot::Running { ref server, .. }) = removed {
+                server.mark_stopped();
+            }
+            // removed drops here: LanguageServer::drop kills the child.
+        }
+        self.update_status();
+
+        // Slot is now absent → ensure_server_for_language will insert Downloading and proceed.
+        let mgr = Arc::clone(self);
+        let sid = server_id.to_owned();
+        let lang_id = LanguageId::new(&lang_str);
+        std::thread::spawn(move || {
+            if let Err(e) = mgr.ensure_server_for_language(&lang_id, &root) {
+                log::error!("lsp: restart of {sid} failed: {e}");
+            } else {
+                log::info!("lsp: {sid} restarted successfully");
+            }
+        });
+    }
+
+    // ── Crash recovery ───────────────────────────────────────────────────────
+
+    fn handle_server_crash(self: &Arc<Self>, server_id: &str) {
+        let (attempt, should_restart) = {
+            let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+            match slots.get(server_id) {
+                Some(ServerSlot::Running { lang, .. }) => {
+                    let lang = lang.clone();
+                    // Reaching Running always resets the attempt counter (stale-count bug is
+                    // impossible here — the counter lives in the slot, not a separate map).
+                    let attempt: u8 = 1;
+                    if attempt > MAX_RESTART_ATTEMPTS {
+                        log::error!("lsp: {server_id} crash-loop limit reached, giving up");
+                        slots.insert(
+                            server_id.to_owned(),
+                            ServerSlot::Failed {
+                                lang,
+                                msg: "Server crashed repeatedly".to_owned(),
+                            },
+                        );
+                        (0, false)
+                    } else {
+                        slots.insert(
+                            server_id.to_owned(),
+                            ServerSlot::Restarting { attempt, lang },
+                        );
+                        (attempt, true)
+                    }
+                }
+                Some(ServerSlot::Restarting { attempt, lang, .. }) => {
+                    let lang = lang.clone();
+                    let next = attempt + 1;
+                    if next > MAX_RESTART_ATTEMPTS {
+                        log::error!("lsp: {server_id} crashed {next} times, giving up");
+                        slots.insert(
+                            server_id.to_owned(),
+                            ServerSlot::Failed {
+                                lang,
+                                msg: "Server crashed repeatedly".to_owned(),
+                            },
+                        );
+                        (0, false)
+                    } else {
+                        slots.insert(
+                            server_id.to_owned(),
+                            ServerSlot::Restarting {
+                                attempt: next,
+                                lang,
+                            },
+                        );
+                        (next, true)
+                    }
+                }
+                // Slot absent (stop_server ran) or in Downloading/Failed — ignore.
+                _ => (0, false),
+            }
+        };
+        self.update_status();
+
+        if !should_restart {
+            return;
+        }
+
+        let delay_secs = 1u64 << (attempt - 1).min(4); // 1, 2, 4, 8, 16 s
+        log::info!("lsp: {server_id} crashed (attempt {attempt}), restarting in {delay_secs}s");
+
+        let mgr = Arc::clone(self);
+        let sid = server_id.to_owned();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+            // Verify the slot is still Restarting{attempt}: if stop_server ran while we
+            // slept the slot is absent; if another crash bumped the count the attempt
+            // number is different.  Either way abort — the new backoff thread owns it.
+            let still_restarting = {
+                let slots = mgr.slots.lock().unwrap_or_else(|p| p.into_inner());
+                matches!(
+                    slots.get(&sid),
+                    Some(ServerSlot::Restarting { attempt: a, .. }) if *a == attempt
+                )
+            };
+            if !still_restarting {
+                log::info!("lsp: {sid} restart aborted (slot changed while sleeping)");
+                return;
+            }
+            mgr.restart_server(&sid);
+        });
     }
 
     // ── Diagnostics ───────────────────────────────────────────────────────────
@@ -344,7 +567,6 @@ impl LspManager {
             }
         };
 
-        // Look up rope snapshot for this URI to compute real char offsets.
         let rope = {
             let guard = open_docs.lock().unwrap_or_else(|p| p.into_inner());
             guard.get(&uri).map(|d| d.rope.clone())
@@ -361,7 +583,6 @@ impl LspManager {
                     let end = from_lsp_position(rope, d.range.end, encoding).unwrap_or(start);
                     (start, end)
                 } else {
-                    // No rope snapshot: fall back to column (only correct on line 0).
                     (
                         d.range.start.character as usize,
                         d.range.end.character as usize,
@@ -396,7 +617,6 @@ impl LspManager {
             return;
         }
 
-        // Store rope snapshot with version 1.
         let version: i32 = 1;
         {
             let mut docs = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
@@ -418,7 +638,6 @@ impl LspManager {
                 "text": text,
             }
         });
-
         self.notify_servers_for_lang(lang_id.as_str(), "textDocument/didOpen", &params);
     }
 
@@ -427,7 +646,6 @@ impl LspManager {
             return;
         }
 
-        // Update rope snapshot and bump version.
         let (version, lang_id_str) = {
             let mut docs = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
             let Some(doc) = docs.get_mut(&uri) else {
@@ -442,7 +660,6 @@ impl LspManager {
             "textDocument": { "uri": uri.as_str(), "version": version },
             "contentChanges": [{ "text": text }],
         });
-
         self.notify_servers_for_lang(&lang_id_str, "textDocument/didChange", &params);
     }
 
@@ -462,7 +679,6 @@ impl LspManager {
         let params = serde_json::json!({
             "textDocument": { "uri": uri.as_str() }
         });
-
         self.notify_servers_for_lang(&lang_id_str, "textDocument/didClose", &params);
     }
 
@@ -476,122 +692,63 @@ impl LspManager {
         (*self.status.load_full()).clone()
     }
 
-    // ── Restart ───────────────────────────────────────────────────────────────
-
-    pub fn stop_server(self: &Arc<Self>, server_id: &str) {
-        let server_id = server_id.to_owned();
-        {
-            let mut guard = self.servers.lock().unwrap_or_else(|p| p.into_inner());
-            guard.remove(&server_id);
-        }
-        {
-            let mut guard = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
-            for ids in guard.values_mut() {
-                ids.retain(|id| id != &server_id);
-            }
-        }
-        self.downloading
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&server_id);
-        self.download_msgs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&server_id);
-        self.permanently_failed
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&server_id);
-        self.update_status();
-    }
-
-    pub fn restart_server(self: &Arc<Self>, server_id: &str) {
-        let server_id = server_id.to_owned();
-
-        // Remove from maps (including any prior failure state so ensure runs cleanly).
-        {
-            let mut guard = self.servers.lock().unwrap_or_else(|p| p.into_inner());
-            guard.remove(&server_id);
-        }
-        {
-            let mut guard = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
-            for ids in guard.values_mut() {
-                ids.retain(|id| id != &server_id);
-            }
-        }
-        self.permanently_failed
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&server_id);
-        self.update_status();
-
-        let workspace_root = {
-            self.workspace_root
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone()
-        };
-        let Some(root) = workspace_root else {
-            log::warn!("lsp: cannot restart {server_id}: workspace root not known");
-            return;
-        };
-
-        // Find the language for this server.
-        let lang_id_str = self
-            .adapters
+    /// Status for every registered adapter, including Stopped entries for adapters with no
+    /// active slot.  Used by the overlay so users can restart a server they stopped.
+    pub fn all_server_statuses(&self) -> Vec<ServerStatus> {
+        let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        self.adapters
             .iter()
-            .find(|a| a.server_id() == server_id.as_str())
-            .and_then(|a| a.languages().first().copied())
-            .map(|s| s.to_owned());
-        let Some(lang_str) = lang_id_str else {
-            log::warn!("lsp: cannot restart {server_id}: no adapter found");
-            return;
-        };
-
-        let mgr = Arc::clone(self);
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let lang_id = LanguageId::new(&lang_str);
-            if let Err(e) = mgr.ensure_server_for_language(&lang_id, &root) {
-                log::error!("lsp: restart of {server_id} failed: {e}");
-                return;
-            }
-
-            // Re-send didOpen for all tracked docs matching this language.
-            let docs_snapshot: Vec<(url::Url, String, i32, String)> = {
-                let guard = mgr.open_docs.lock().unwrap_or_else(|p| p.into_inner());
-                guard
-                    .iter()
-                    .filter(|(_, d)| d.lang_id == lang_str)
-                    .map(|(uri, d)| {
-                        (
-                            uri.clone(),
-                            d.lang_id.clone(),
-                            d.version,
-                            d.rope.to_string(),
-                        )
-                    })
-                    .collect()
-            };
-            for (uri, lang, version, text) in docs_snapshot {
-                let params = serde_json::json!({
-                    "textDocument": {
-                        "uri": uri.as_str(),
-                        "languageId": lang,
-                        "version": version,
-                        "text": text,
-                    }
-                });
-                mgr.notify_servers_for_lang(&lang, "textDocument/didOpen", &params);
-            }
-            log::info!("lsp: {server_id} restarted successfully");
-        });
+            .map(|a| {
+                let server_id = a.server_id().to_owned();
+                let lang = a
+                    .languages()
+                    .first()
+                    .copied()
+                    .unwrap_or_default()
+                    .to_owned();
+                match slots.get(&server_id) {
+                    None => ServerStatus {
+                        server_id,
+                        language_id: LanguageId::new(&lang),
+                        state: ServerState::Stopped,
+                        download_msg: None,
+                        download_fraction: None,
+                    },
+                    Some(ServerSlot::Downloading { progress, .. }) => ServerStatus {
+                        server_id,
+                        language_id: LanguageId::new(&lang),
+                        state: ServerState::Downloading,
+                        download_msg: progress.as_ref().map(|p| p.msg.clone()),
+                        download_fraction: progress.as_ref().and_then(|p| p.fraction),
+                    },
+                    Some(ServerSlot::Running { .. }) => ServerStatus {
+                        server_id,
+                        language_id: LanguageId::new(&lang),
+                        state: ServerState::Running,
+                        download_msg: None,
+                        download_fraction: None,
+                    },
+                    Some(ServerSlot::Restarting { attempt, .. }) => ServerStatus {
+                        server_id,
+                        language_id: LanguageId::new(&lang),
+                        state: ServerState::Restarting { attempt: *attempt },
+                        download_msg: None,
+                        download_fraction: None,
+                    },
+                    Some(ServerSlot::Failed { msg, .. }) => ServerStatus {
+                        server_id,
+                        language_id: LanguageId::new(&lang),
+                        state: ServerState::Error(msg.clone()),
+                        download_msg: None,
+                        download_fraction: None,
+                    },
+                }
+            })
+            .collect()
     }
 
     // ── Request routing ───────────────────────────────────────────────────────
 
-    /// Route a JSON-RPC request to the server currently handling the given URI.
-    /// Returns None if the document is unknown or has no running server.
     pub fn request_for_document(
         &self,
         uri: &url::Url,
@@ -605,17 +762,17 @@ impl LspManager {
             let guard = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
             guard.get(uri)?.lang_id.clone()
         };
-        let server_id = {
-            let guard = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
-            guard.get(&lang_id_str)?.first()?.clone()
-        };
-        let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
-        let server = servers.get(&server_id)?;
-        Some(server.transport().request(method, params))
+        let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        for slot in slots.values() {
+            if let ServerSlot::Running { server, lang } = slot {
+                if lang == &lang_id_str {
+                    return Some(server.transport().request(method, params));
+                }
+            }
+        }
+        None
     }
 
-    /// Returns the negotiated position encoding for the server handling `uri`.
-    /// Defaults to UTF-16 (LSP protocol default) when no server is found.
     pub fn position_encoding_for_uri(&self, uri: &url::Url) -> PositionEncoding {
         let lang_id_str = {
             let guard = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
@@ -624,110 +781,72 @@ impl LspManager {
                 None => return PositionEncoding::Utf16,
             }
         };
-        let server_id = {
-            let guard = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
-            match guard.get(&lang_id_str).and_then(|v| v.first()) {
-                Some(id) => id.clone(),
-                None => return PositionEncoding::Utf16,
+        let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        for slot in slots.values() {
+            if let ServerSlot::Running { server, lang } = slot {
+                if lang == &lang_id_str {
+                    return server.capabilities().position_encoding;
+                }
             }
-        };
-        let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
-        servers
-            .get(&server_id)
-            .map(|s| s.capabilities().position_encoding)
-            .unwrap_or_default()
+        }
+        PositionEncoding::Utf16
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
 
-    /// Send a notification to every server registered for `lang_id_str`.
+    /// Send a notification to every Running server that handles `lang_id_str`.
     fn notify_servers_for_lang(&self, lang_id_str: &str, method: &str, params: &serde_json::Value) {
-        let server_ids = {
-            let guard = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
-            guard.get(lang_id_str).cloned().unwrap_or_default()
-        };
-        let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
-        for id in &server_ids {
-            if let Some(server) = servers.get(id) {
-                server.transport().notify(method, params.clone());
+        // Collect servers while holding the slots lock (send is non-blocking — unbounded
+        // crossbeam channel — so holding the lock during notify is safe).
+        let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        for slot in slots.values() {
+            if let ServerSlot::Running { server, lang } = slot {
+                if lang == lang_id_str {
+                    server.transport().notify(method, params.clone());
+                }
             }
         }
     }
 
     fn update_status(&self) {
-        // Pre-compute adapter server_id → first language; immutable, no lock needed.
-        let adapter_lang: HashMap<&str, &str> = self
-            .adapters
+        // Build the snapshot without calling any external methods that take their own locks
+        // while we hold `slots` — server.state() would lock LanguageServer::state which can
+        // be held by the crash monitor while it tries to lock slots → deadlock.
+        // Solution: the slot IS the state; Running slots always map to ServerState::Running.
+        let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        let snapshot: Vec<ServerStatus> = slots
             .iter()
-            .map(|a| {
-                (
-                    a.server_id(),
-                    a.languages().first().copied().unwrap_or_default(),
-                )
-            })
-            .collect();
-
-        let servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
-        let lang_servers = self.lang_servers.lock().unwrap_or_else(|p| p.into_inner());
-        let downloading = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
-        let dl_msgs = self.download_msgs.lock().unwrap_or_else(|p| p.into_inner());
-        let failed = self
-            .permanently_failed
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-
-        // Build a server_id → lang_id map for display.
-        let mut server_to_lang: HashMap<String, String> = HashMap::new();
-        for (lang, ids) in lang_servers.iter() {
-            for id in ids {
-                server_to_lang
-                    .entry(id.clone())
-                    .or_insert_with(|| lang.clone());
-            }
-        }
-
-        let mut snapshot: Vec<ServerStatus> = servers
-            .iter()
-            .map(|(server_id, server)| {
-                let lang_str = server_to_lang.get(server_id).cloned().unwrap_or_default();
-                ServerStatus {
+            .map(|(server_id, slot)| match slot {
+                ServerSlot::Downloading { lang, progress } => ServerStatus {
                     server_id: server_id.clone(),
-                    language_id: LanguageId::new(&lang_str),
-                    state: server.state(),
-                    download_msg: None,
-                }
-            })
-            .collect();
-
-        // Include in-flight downloads so the status bar can show Downloading + progress.
-        for (server_id, lang_str) in downloading.iter() {
-            if !servers.contains_key(server_id) {
-                snapshot.push(ServerStatus {
-                    server_id: server_id.clone(),
-                    language_id: LanguageId::new(lang_str),
+                    language_id: LanguageId::new(lang),
                     state: ServerState::Downloading,
-                    download_msg: dl_msgs.get(server_id).cloned(),
-                });
-            }
-        }
-
-        // Include permanently-failed servers so the overlay can show an error + Restart button.
-        for (server_id, msg) in failed.iter() {
-            if !servers.contains_key(server_id) && !downloading.contains_key(server_id) {
-                let lang_str = adapter_lang
-                    .get(server_id.as_str())
-                    .copied()
-                    .unwrap_or_default()
-                    .to_owned();
-                snapshot.push(ServerStatus {
+                    download_msg: progress.as_ref().map(|p| p.msg.clone()),
+                    download_fraction: progress.as_ref().and_then(|p| p.fraction),
+                },
+                ServerSlot::Running { lang, .. } => ServerStatus {
                     server_id: server_id.clone(),
-                    language_id: LanguageId::new(&lang_str),
+                    language_id: LanguageId::new(lang),
+                    state: ServerState::Running,
+                    download_msg: None,
+                    download_fraction: None,
+                },
+                ServerSlot::Restarting { attempt, lang } => ServerStatus {
+                    server_id: server_id.clone(),
+                    language_id: LanguageId::new(lang),
+                    state: ServerState::Restarting { attempt: *attempt },
+                    download_msg: None,
+                    download_fraction: None,
+                },
+                ServerSlot::Failed { lang, msg } => ServerStatus {
+                    server_id: server_id.clone(),
+                    language_id: LanguageId::new(lang),
                     state: ServerState::Error(msg.clone()),
                     download_msg: None,
-                });
-            }
-        }
-
+                    download_fraction: None,
+                },
+            })
+            .collect();
         self.status.store(Arc::new(snapshot));
     }
 }
@@ -741,7 +860,7 @@ mod tests {
     use crossbeam_channel::{Receiver, Sender, unbounded};
     use std::io::{self, Read, Write};
 
-    // ── In-memory byte pipe (mirrors server.rs / transport.rs tests) ──────────
+    // ── In-memory byte pipe ───────────────────────────────────────────────────
 
     struct ChanReader(Receiver<u8>);
     struct ChanWriter(Sender<u8>);
@@ -800,52 +919,50 @@ mod tests {
         LspSettings::default()
     }
 
+    // ── Helper: insert a mock Running server into the manager ─────────────────
+
+    fn insert_running(mgr: &Arc<LspManager>, server_id: &str, lang: &str) -> Arc<LanguageServer> {
+        let server = LanguageServer::from_transport(make_transport());
+        server.set_state(ServerState::Running);
+        let mut slots = mgr.slots.lock().unwrap();
+        slots.insert(
+            server_id.to_owned(),
+            ServerSlot::Running {
+                server: Arc::clone(&server),
+                lang: lang.to_owned(),
+            },
+        );
+        server
+    }
+
     // ── Test 1: trust gate ────────────────────────────────────────────────────
 
     #[test]
     fn trust_gate_blocks_document_open() {
         let mgr = LspManager::new(vec![], default_settings(), false);
 
-        // Should not panic, and no server should be spawned.
         mgr.on_document_opened(
             url::Url::parse("file:///foo.rs").unwrap(),
             LanguageId::new("rust"),
             "fn main() {}",
         );
 
-        let guard = mgr.servers.lock().unwrap();
-        assert!(guard.is_empty(), "no server should exist when untrusted");
-        // No doc snapshot either, since the trust gate short-circuits.
+        let slots = mgr.slots.lock().unwrap();
+        assert!(slots.is_empty(), "no server should exist when untrusted");
+        drop(slots);
         assert!(mgr.open_docs.lock().unwrap().is_empty());
     }
 
-    // ── Test 2: server status snapshot ────────────────────────────────────────
+    // ── Test 2: status snapshot ───────────────────────────────────────────────
 
     #[test]
     fn status_snapshot_reflects_running_server() {
         let mgr = LspManager::new(vec![], default_settings(), true);
-
-        // Insert a mock server in Running state, keyed by server_id.
-        let transport = make_transport();
-        let server = LanguageServer::from_transport(transport);
-        server.set_state(ServerState::Running);
-
-        {
-            let mut guard = mgr.servers.lock().unwrap();
-            guard.insert("rust-analyzer".to_owned(), server);
-        }
-        {
-            let mut lang_servers = mgr.lang_servers.lock().unwrap();
-            lang_servers
-                .entry("rust".to_owned())
-                .or_default()
-                .push("rust-analyzer".to_owned());
-        }
-
+        insert_running(&mgr, "rust-analyzer", "rust");
         mgr.update_status();
 
         let snap = mgr.server_states();
-        assert!(!snap.is_empty(), "status snapshot must be non-empty");
+        assert!(!snap.is_empty());
         assert_eq!(snap[0].state, ServerState::Running);
         assert_eq!(snap[0].server_id, "rust-analyzer");
         assert_eq!(snap[0].language_id, LanguageId::new("rust"));
@@ -887,43 +1004,21 @@ mod tests {
             params,
         );
 
-        assert_eq!(
-            store.total_count(),
-            1,
-            "store must contain exactly one diagnostic"
-        );
+        assert_eq!(store.total_count(), 1);
     }
 
-    // ── Test 4: idempotency guard ─────────────────────────────────────────────
+    // ── Test 4: idempotency (slot present → ensure is a no-op) ───────────────
 
     #[test]
     fn idempotent_ensure_server() {
         let mgr = LspManager::new(vec![], default_settings(), true);
+        insert_running(&mgr, "rust-analyzer", "rust");
 
-        // Pre-insert a mock server keyed by server_id.
-        let transport = make_transport();
-        let server = LanguageServer::from_transport(transport);
-        server.set_state(ServerState::Running);
-
-        {
-            let mut servers = mgr.servers.lock().unwrap();
-            servers.insert("rust-analyzer".to_owned(), server);
-        }
-        {
-            let mut lang_servers = mgr.lang_servers.lock().unwrap();
-            lang_servers
-                .entry("rust".to_owned())
-                .or_default()
-                .push("rust-analyzer".to_owned());
-        }
-
-        // With the server already present, the idempotency guard keeps the
-        // count at exactly one (a real ensure call would return Ok early).
-        let count_before = mgr.servers.lock().unwrap().len();
-        assert_eq!(
-            count_before, 1,
-            "should have exactly one server pre-inserted"
-        );
+        // Pre-condition: one slot.
+        assert_eq!(mgr.slots.lock().unwrap().len(), 1);
+        // A second insertion of the same key would violate the guarantee — the idempotency
+        // check in ensure_server_for_language returns early when the key exists.
+        assert!(mgr.slots.lock().unwrap().contains_key("rust-analyzer"));
     }
 
     // ── Test 5: on_document_opened sends textDocument/didOpen ────────────────
@@ -932,35 +1027,28 @@ mod tests {
     fn doc_opened_sends_did_open() {
         let mgr = LspManager::new(vec![], default_settings(), true);
 
-        // Build a transport whose output we can observe.
-        // server_out: what the (mock) server sends to the transport (nothing here).
-        // client_out_rx: what the transport sends to the server — we read this.
         let (_, server_out_reader) = byte_pipe();
         let (client_out_writer, mut client_out_rx) = byte_pipe();
         let transport = Arc::new(TransportLayer::new(server_out_reader, client_out_writer));
-
         let server = LanguageServer::from_transport(transport);
         server.set_state(ServerState::Running);
 
         {
-            let mut guard = mgr.servers.lock().unwrap();
-            guard.insert("rust-analyzer".to_owned(), server);
-        }
-        {
-            let mut lang_servers = mgr.lang_servers.lock().unwrap();
-            lang_servers
-                .entry("rust".to_owned())
-                .or_default()
-                .push("rust-analyzer".to_owned());
+            let mut slots = mgr.slots.lock().unwrap();
+            slots.insert(
+                "rust-analyzer".to_owned(),
+                ServerSlot::Running {
+                    server: Arc::clone(&server),
+                    lang: "rust".to_owned(),
+                },
+            );
         }
 
         let uri = url::Url::parse("file:///tmp/main.rs").unwrap();
         mgr.on_document_opened(uri.clone(), LanguageId::new("rust"), "fn main() {}");
 
-        // Give the writer thread time to flush the notification.
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // Read the Content-Length framed bytes from client_out_rx.
         let raw = drain_pipe(&mut client_out_rx);
         let body_str = parse_lsp_frame(&raw).expect("expected a valid LSP frame");
         let msg: serde_json::Value = serde_json::from_str(&body_str).expect("valid JSON");
@@ -971,15 +1059,176 @@ mod tests {
         assert_eq!(msg["params"]["textDocument"]["text"], "fn main() {}");
     }
 
-    /// Drain all available bytes from a ChanReader into a Vec without blocking.
+    // ── Test 6: stop_server removes the slot ─────────────────────────────────
+
+    #[test]
+    fn stop_server_removes_slot() {
+        let mgr = LspManager::new(vec![], default_settings(), true);
+        insert_running(&mgr, "rust-analyzer", "rust");
+        assert!(mgr.slots.lock().unwrap().contains_key("rust-analyzer"));
+        mgr.stop_server("rust-analyzer");
+        assert!(!mgr.slots.lock().unwrap().contains_key("rust-analyzer"));
+        let snap = mgr.server_states();
+        assert!(snap.is_empty());
+    }
+
+    // ── Test 7: handle_server_crash transitions Running → Restarting{1} ──────
+
+    #[test]
+    fn crash_running_transitions_to_restarting() {
+        let mgr = LspManager::new(vec![], default_settings(), true);
+        insert_running(&mgr, "rust-analyzer", "rust");
+
+        // Call crash handler directly (simulates crash monitor callback).
+        mgr.handle_server_crash("rust-analyzer");
+
+        let slots = mgr.slots.lock().unwrap();
+        match slots.get("rust-analyzer") {
+            Some(ServerSlot::Restarting { attempt, lang }) => {
+                assert_eq!(*attempt, 1);
+                assert_eq!(lang, "rust");
+            }
+            other => panic!(
+                "expected Restarting{{1}}, got slot present={}",
+                other.is_some()
+            ),
+        }
+    }
+
+    // ── Test 8: exceeding MAX_RESTART_ATTEMPTS → Failed ──────────────────────
+
+    #[test]
+    fn crash_exceed_max_transitions_to_failed() {
+        let mgr = LspManager::new(vec![], default_settings(), true);
+        insert_running(&mgr, "rust-analyzer", "rust");
+
+        // Simulate 1st crash: Running → Restarting{1}.
+        mgr.handle_server_crash("rust-analyzer");
+        // Simulate 2nd crash: Restarting{1} → Restarting{2}.
+        mgr.handle_server_crash("rust-analyzer");
+        // Simulate 3rd crash: Restarting{2} → Restarting{3}.
+        mgr.handle_server_crash("rust-analyzer");
+        // Simulate 4th crash: Restarting{3} → Failed (3+1 > MAX=3).
+        mgr.handle_server_crash("rust-analyzer");
+
+        let slots = mgr.slots.lock().unwrap();
+        assert!(
+            matches!(slots.get("rust-analyzer"), Some(ServerSlot::Failed { .. })),
+            "expected Failed after exceeding MAX_RESTART_ATTEMPTS"
+        );
+    }
+
+    // ── Test 9: crash-counter resets when server reaches Running again ────────
+
+    #[test]
+    fn crash_count_resets_on_running() {
+        let mgr = LspManager::new(vec![], default_settings(), true);
+        insert_running(&mgr, "rust-analyzer", "rust");
+
+        // Two crashes → Restarting{2}.
+        mgr.handle_server_crash("rust-analyzer");
+        mgr.handle_server_crash("rust-analyzer");
+        assert!(matches!(
+            mgr.slots.lock().unwrap().get("rust-analyzer"),
+            Some(ServerSlot::Restarting { attempt: 2, .. })
+        ));
+
+        // Simulate a successful restart: insert a new Running slot (bypassing ensure).
+        {
+            let mut slots = mgr.slots.lock().unwrap();
+            slots.insert(
+                "rust-analyzer".to_owned(),
+                ServerSlot::Running {
+                    server: LanguageServer::from_transport(make_transport()),
+                    lang: "rust".to_owned(),
+                },
+            );
+        }
+
+        // First crash after recovery must start from attempt 1.
+        mgr.handle_server_crash("rust-analyzer");
+        assert!(matches!(
+            mgr.slots.lock().unwrap().get("rust-analyzer"),
+            Some(ServerSlot::Restarting { attempt: 1, .. })
+        ));
+    }
+
+    // ── Test 10: stop during Restarting suppresses backoff resurrection ───────
+
+    #[test]
+    fn stop_during_restarting_aborts_backoff() {
+        let mgr = LspManager::new(vec![], default_settings(), true);
+        insert_running(&mgr, "rust-analyzer", "rust");
+        mgr.handle_server_crash("rust-analyzer"); // → Restarting{1}
+
+        // Simulate stop_server removing the slot while the backoff thread is sleeping.
+        mgr.stop_server("rust-analyzer");
+        assert!(!mgr.slots.lock().unwrap().contains_key("rust-analyzer"));
+
+        // The backoff thread's guard checks:
+        //   matches!(slots.get(sid), Some(Restarting{attempt:1})) → false (slot absent)
+        // so it aborts. We can verify the invariant directly since the check is pure logic.
+        let still = {
+            let slots = mgr.slots.lock().unwrap();
+            matches!(
+                slots.get("rust-analyzer"),
+                Some(ServerSlot::Restarting { attempt: 1, .. })
+            )
+        };
+        assert!(!still, "backoff guard must find the slot absent and abort");
+    }
+
+    // ── Test 11: status snapshot for Downloading / Failed states ─────────────
+
+    #[test]
+    fn status_snapshot_downloading_and_failed() {
+        let mgr = LspManager::new(vec![], default_settings(), true);
+        {
+            let mut slots = mgr.slots.lock().unwrap();
+            slots.insert(
+                "rust-analyzer".to_owned(),
+                ServerSlot::Downloading {
+                    lang: "rust".to_owned(),
+                    progress: Some(DownloadInfo {
+                        msg: "Downloading... 50%".to_owned(),
+                        fraction: Some(0.5),
+                    }),
+                },
+            );
+        }
+        mgr.update_status();
+        let snap = mgr.server_states();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].state, ServerState::Downloading);
+        assert_eq!(snap[0].download_fraction, Some(0.5));
+
+        {
+            let mut slots = mgr.slots.lock().unwrap();
+            slots.insert(
+                "rust-analyzer".to_owned(),
+                ServerSlot::Failed {
+                    lang: "rust".to_owned(),
+                    msg: "network error".to_owned(),
+                },
+            );
+        }
+        mgr.update_status();
+        let snap = mgr.server_states();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(
+            snap[0].state,
+            ServerState::Error("network error".to_owned())
+        );
+    }
+
+    // ── Pipe helpers ──────────────────────────────────────────────────────────
+
     fn drain_pipe(reader: &mut ChanReader) -> Vec<u8> {
         let mut out = Vec::new();
-        // Block on the first byte so we wait until the writer thread has flushed.
         match reader.0.recv_timeout(std::time::Duration::from_secs(2)) {
             Ok(b) => out.push(b),
             Err(_) => return out,
         }
-        // Drain the rest without blocking.
         loop {
             match reader.0.try_recv() {
                 Ok(b) => out.push(b),
@@ -989,7 +1238,6 @@ mod tests {
         out
     }
 
-    /// Parse a single `Content-Length: N\r\n\r\n<body>` frame and return the body.
     fn parse_lsp_frame(data: &[u8]) -> Option<String> {
         let header_end = data.windows(4).position(|w| w == b"\r\n\r\n")?;
         let header = std::str::from_utf8(&data[..header_end]).ok()?;

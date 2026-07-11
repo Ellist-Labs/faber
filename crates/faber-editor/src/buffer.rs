@@ -118,6 +118,32 @@ impl Document {
         }
     }
 
+    /// Change the language for this document: rebuild the syntax tree, grammar, and
+    /// caches. Triggers a full re-highlight on the next render.
+    pub fn set_language(&mut self, lang: Option<Arc<Language>>) {
+        let source = self.rope.to_string();
+        self.grammar = lang.as_ref().map(|l| Arc::new(l.build_grammar()));
+        self.syntax = lang.as_ref().map(|l| {
+            let mut parser = l.make_parser();
+            let tree = parse_source(&mut parser, &source);
+            SyntaxState { parser, tree }
+        });
+        self.highlight_cache = HighlightCache::default();
+        self.highlight_cache.setup(self.grammar.as_ref());
+        self.outline_cache = OutlineCache::default();
+        self.outline_cache.setup(self.grammar.as_ref());
+        self.outline = Arc::new(
+            self.syntax
+                .as_ref()
+                .map(|syn| self.outline_cache.compute(&syn.tree, &source))
+                .unwrap_or_default(),
+        );
+        if let Some(ref syn) = self.syntax {
+            self.highlight_cache.compute(&syn.tree, &source);
+        }
+        self.language = lang;
+    }
+
     /// Empty in-memory document with no path yet (File > New).
     pub fn empty_untitled() -> Self {
         Self {

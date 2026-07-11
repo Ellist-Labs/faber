@@ -214,6 +214,20 @@ impl TransportLayer {
 
                 route_message(msg, &pending, &subscriptions);
             }
+
+            // Drain all pending requests with a "server exited" error so callers
+            // don't block on recv() after the server process exits.
+            let drained: Vec<ResponseHandler> = {
+                let mut guard = pending.lock().unwrap_or_else(|p| p.into_inner());
+                std::mem::take(&mut *guard).into_values().collect()
+            };
+            for handler in drained {
+                handler(Err(RpcError {
+                    code: -32603,
+                    message: "server exited".into(),
+                    data: None,
+                }));
+            }
         })
     }
 

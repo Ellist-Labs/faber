@@ -79,6 +79,59 @@ impl From<std::io::Error> for InstallError {
 }
 
 // ---------------------------------------------------------------------------
+// InstallProgress
+// ---------------------------------------------------------------------------
+
+/// Structured progress events emitted during binary installation.
+#[derive(Debug, Clone)]
+pub enum InstallProgress {
+    CheckingCache,
+    Connecting,
+    Downloading { received: u64, total: Option<u64> },
+    Extracting,
+    Verifying,
+}
+
+impl InstallProgress {
+    pub fn message(&self) -> String {
+        match self {
+            InstallProgress::CheckingCache => "Checking cache...".to_owned(),
+            InstallProgress::Connecting => "Connecting...".to_owned(),
+            InstallProgress::Downloading {
+                received,
+                total: Some(total),
+            } => {
+                let pct = (*received as f64 / *total as f64 * 100.0) as u32;
+                format!(
+                    "Downloading... {pct}% ({} KB / {} KB)",
+                    received / 1024,
+                    total / 1024
+                )
+            }
+            InstallProgress::Downloading {
+                received,
+                total: None,
+            } => {
+                format!("Downloading... {} KB", received / 1024)
+            }
+            InstallProgress::Extracting => "Extracting...".to_owned(),
+            InstallProgress::Verifying => "Verifying...".to_owned(),
+        }
+    }
+
+    /// Download fraction [0.0, 1.0], or None when not in Downloading state or total unknown.
+    pub fn fraction(&self) -> Option<f32> {
+        match self {
+            InstallProgress::Downloading {
+                received,
+                total: Some(total),
+            } if *total > 0 => Some((*received as f32 / *total as f32).clamp(0.0, 1.0)),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Fetcher
 // ---------------------------------------------------------------------------
 
@@ -86,15 +139,15 @@ impl From<std::io::Error> for InstallError {
 pub trait Fetcher: Send {
     fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, InstallError>;
 
-    /// Like `fetch_bytes` but calls `on_progress(bytes_downloaded_so_far)` after each chunk.
-    /// Default impl fetches in full then calls the callback once at the end.
+    /// Like `fetch_bytes` but calls `on_progress(bytes_received, total_bytes)` after each chunk.
+    /// `total_bytes` is None when the server does not send Content-Length.
     fn fetch_bytes_with_progress(
         &self,
         url: &str,
-        on_progress: &mut dyn FnMut(usize),
+        on_progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<Vec<u8>, InstallError> {
         let buf = self.fetch_bytes(url)?;
-        on_progress(buf.len());
+        on_progress(buf.len() as u64, Some(buf.len() as u64));
         Ok(buf)
     }
 
@@ -106,17 +159,14 @@ pub struct UreqFetcher;
 
 impl Fetcher for UreqFetcher {
     fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, InstallError> {
-        self.fetch_bytes_with_progress(url, &mut |_| {})
+        self.fetch_bytes_with_progress(url, &mut |_, _| {})
     }
 
     fn fetch_bytes_with_progress(
         &self,
         url: &str,
-        on_progress: &mut dyn FnMut(usize),
+        on_progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<Vec<u8>, InstallError> {
-        // No global timeout: binaries can be 40-80 MB and users may have slow
-        // connections. We gate on connect (30s) and per-read-call (90s) so a
-        // stalled transfer still fails rather than hanging indefinitely.
         let agent = ureq::Agent::config_builder()
             .timeout_connect(Some(std::time::Duration::from_secs(30)))
             .timeout_per_call(Some(std::time::Duration::from_secs(90)))
@@ -126,8 +176,20 @@ impl Fetcher for UreqFetcher {
             .get(url)
             .call()
             .map_err(|e| InstallError::Http(Box::new(e)))?;
+
+        // Read Content-Length if present (enables progress percentage).
+        let total_bytes: Option<u64> = response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok());
+
         let mut reader = response.into_body().into_reader();
-        let mut buf = Vec::new();
+        let mut buf = if let Some(total) = total_bytes {
+            Vec::with_capacity(total as usize)
+        } else {
+            Vec::new()
+        };
         let mut tmp = [0u8; 65536];
         loop {
             let n = reader
@@ -137,7 +199,7 @@ impl Fetcher for UreqFetcher {
                 break;
             }
             buf.extend_from_slice(&tmp[..n]);
-            on_progress(buf.len());
+            on_progress(buf.len() as u64, total_bytes);
         }
         Ok(buf)
     }
@@ -167,7 +229,7 @@ impl Installer {
     ///   `~/.cache/faber/lsp/rust-analyzer/<version>/rust-analyzer.sha256`
     pub fn install_or_check(
         version: &str,
-        progress_cb: &mut dyn FnMut(&str),
+        progress_cb: &mut dyn FnMut(InstallProgress),
         cache_root: Option<&Path>,
         fetcher: &dyn Fetcher,
     ) -> Result<PathBuf, InstallError> {
@@ -177,7 +239,12 @@ impl Installer {
         let sha256_path = cache_dir.join("rust-analyzer.sha256");
 
         // Cache hit path.
+        progress_cb(InstallProgress::CheckingCache);
         if let Some(p) = check_cache(&bin_path, &sha256_path) {
+            log::info!(
+                "lsp: cache hit for rust-analyzer {version} at {}",
+                p.display()
+            );
             return Ok(p);
         }
 
@@ -187,12 +254,17 @@ impl Installer {
             "https://github.com/rust-lang/rust-analyzer/releases/download/{version}/{artifact}"
         );
 
+        log::info!("lsp: downloading rust-analyzer {version} from {base_url}");
         let gz_bytes = Self::download_with_progress(fetcher, &base_url, progress_cb)?;
 
-        progress_cb("Extracting...");
+        progress_cb(InstallProgress::Extracting);
+        log::info!(
+            "lsp: extracting rust-analyzer ({} KB compressed)",
+            gz_bytes.len() / 1024
+        );
         let binary_bytes = Self::decompress_gz(&gz_bytes)?;
 
-        progress_cb("Verifying...");
+        progress_cb(InstallProgress::Verifying);
         let actual_hex = hex_sha256(&binary_bytes);
 
         // Try to fetch the companion checksum file; non-fatal on failure.
@@ -200,7 +272,6 @@ impl Installer {
         let maybe_expected = Self::fetch_checksum(fetcher, &sha256_url);
 
         if let Some(expected_line) = maybe_expected {
-            // The .sha256 file may be "<hash>  filename" or just "<hash>".
             let expected_hex = expected_line
                 .split_whitespace()
                 .next()
@@ -214,28 +285,41 @@ impl Installer {
                 });
             }
         } else {
-            log::warn!("rust-analyzer: no checksum file available — skipping verification");
+            log::warn!("lsp: no checksum file for rust-analyzer {version} — skipping verification");
         }
 
-        // Persist atomically: write the binary to a temp path, chmod it, then rename
-        // into place. The rename is atomic on POSIX, so a crash before it leaves only a
-        // stray `.tmp` (no `.bin`, no `.sha256`) and the next start re-downloads cleanly.
+        // Persist atomically: write to .tmp, chmod, then rename.
         std::fs::create_dir_all(&cache_dir)?;
         let tmp_path = bin_path.with_extension("tmp");
-        std::fs::write(&tmp_path, &binary_bytes)?;
+
+        if let Err(e) = std::fs::write(&tmp_path, &binary_bytes) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(InstallError::Io(e));
+        }
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&tmp_path)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&tmp_path, perms)?;
+            if let Err(e) = std::fs::metadata(&tmp_path).and_then(|m| {
+                let mut perms = m.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&tmp_path, perms)
+            }) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(InstallError::Io(e));
+            }
         }
 
-        std::fs::rename(&tmp_path, &bin_path)?;
+        if let Err(e) = std::fs::rename(&tmp_path, &bin_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(InstallError::Io(e));
+        }
 
-        // Cache the checksum for future runs.
         std::fs::write(&sha256_path, actual_hex.as_bytes())?;
+        log::info!(
+            "lsp: rust-analyzer {version} installed at {}",
+            bin_path.display()
+        );
 
         Ok(bin_path)
     }
@@ -313,17 +397,15 @@ impl Installer {
         base.join("rust-analyzer").join(version)
     }
 
-    /// Download `url` via the fetcher, calling `progress_cb` with KB-count during the transfer.
     fn download_with_progress(
         fetcher: &dyn Fetcher,
         url: &str,
-        progress_cb: &mut dyn FnMut(&str),
+        progress_cb: &mut dyn FnMut(InstallProgress),
     ) -> Result<Vec<u8>, InstallError> {
-        progress_cb("Connecting...");
-        let buf = fetcher.fetch_bytes_with_progress(url, &mut |bytes| {
-            progress_cb(&format!("Downloading... {} KB", bytes / 1024));
-        })?;
-        Ok(buf)
+        progress_cb(InstallProgress::Connecting);
+        fetcher.fetch_bytes_with_progress(url, &mut |received, total| {
+            progress_cb(InstallProgress::Downloading { received, total });
+        })
     }
 
     /// Fetch a checksum URL; returns `None` if not found or on error.
@@ -377,7 +459,6 @@ fn hex_sha256(data: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    // 1. Cache hit: binary + matching .sha256 file → returns path without HTTP.
     #[test]
     fn test_cache_hit_matching_checksum() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -394,8 +475,6 @@ mod tests {
         assert_eq!(result, Some(bin_path));
     }
 
-    // Cache hit: sidecar present → binary trusted without re-hashing, regardless of the
-    // stored hash value. Verification runs only once, right after a fresh download.
     #[test]
     fn test_cache_hit_sidecar_present() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -403,7 +482,6 @@ mod tests {
         let sha256_path = dir.path().join("rust-analyzer.sha256");
 
         std::fs::write(&bin_path, b"fake binary").unwrap();
-        // A non-matching hash: `check_cache` no longer re-verifies, so this is still a hit.
         std::fs::write(
             &sha256_path,
             b"0000000000000000000000000000000000000000000000000000000000000000",
@@ -418,7 +496,6 @@ mod tests {
         );
     }
 
-    // Cache hit: no .sha256 file → accepted as-is.
     #[test]
     fn test_cache_hit_no_sha256_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -431,11 +508,9 @@ mod tests {
         assert_eq!(result, Some(bin_path));
     }
 
-    // 2. Platform detection: must not panic or return UnsupportedPlatform on CI.
     #[test]
     fn test_platform_current() {
         let result = Platform::current();
-        // On macOS/Linux CI this should succeed; other platforms get UnsupportedPlatform.
         match result {
             Ok(p) => {
                 let name = p.artifact_name();
@@ -444,27 +519,19 @@ mod tests {
                     "unexpected artifact: {name}"
                 );
             }
-            Err(InstallError::UnsupportedPlatform) => {
-                // Acceptable — just make sure it didn't panic.
-            }
+            Err(InstallError::UnsupportedPlatform) => {}
             Err(e) => panic!("unexpected error: {e}"),
         }
     }
 
-    // 3. Shell whitelist: unknown shell path falls back without panicking.
     #[test]
     fn test_login_shell_path_invalid_shell() {
-        // Point $SHELL at a non-whitelisted name; login_shell_path must not panic.
         let original = std::env::var("SHELL").ok();
-        // SAFETY: single-threaded test; no other thread reads $SHELL concurrently.
         unsafe { std::env::set_var("SHELL", "/usr/bin/fish") };
 
         let path = Installer::login_shell_path();
-        // Should return something (the current PATH at minimum).
-        let _ = path; // just ensure no panic
+        let _ = path;
 
-        // Restore.
-        // SAFETY: same as above.
         unsafe {
             match original {
                 Some(v) => std::env::set_var("SHELL", v),
@@ -473,7 +540,6 @@ mod tests {
         }
     }
 
-    // Download path is exercised end-to-end without a network via a fake fetcher.
     #[test]
     fn test_install_with_fake_fetcher() {
         use flate2::Compression;
@@ -492,16 +558,25 @@ mod tests {
             fn fetch_bytes(&self, _url: &str) -> Result<Vec<u8>, InstallError> {
                 Ok(self.gz.clone())
             }
+            fn fetch_bytes_with_progress(
+                &self,
+                _url: &str,
+                on_progress: &mut dyn FnMut(u64, Option<u64>),
+            ) -> Result<Vec<u8>, InstallError> {
+                let data = self.gz.clone();
+                on_progress(data.len() as u64, Some(data.len() as u64));
+                Ok(data)
+            }
             fn fetch_string(&self, _url: &str) -> Option<String> {
-                None // no checksum file
+                None
             }
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let mut progress_msgs = vec![];
+        let mut progress_events: Vec<String> = vec![];
         let result = Installer::install_or_check(
             "test-version",
-            &mut |msg| progress_msgs.push(msg.to_owned()),
+            &mut |p: InstallProgress| progress_events.push(p.message()),
             Some(dir.path()),
             &FakeFetcher { gz: gz_bytes },
         );
@@ -511,13 +586,78 @@ mod tests {
         assert!(bin_path.exists());
         let content = std::fs::read(&bin_path).unwrap();
         assert_eq!(content, fake_binary);
+        assert!(progress_events.iter().any(|m| m.contains("Downloading")));
+        assert!(progress_events.iter().any(|m| m.contains("Extracting")));
     }
 
-    // login_shell_path with a valid shell (zsh/bash) returns a non-empty PATH.
     #[test]
     fn test_login_shell_path_valid_shell() {
         let path = Installer::login_shell_path();
-        // Should be non-empty on any developer machine.
         assert!(!path.is_empty());
+    }
+
+    #[test]
+    fn test_checksum_mismatch_cleans_tmp() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let fake_binary = b"fake binary for checksum test";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(fake_binary).unwrap();
+        let gz_bytes = encoder.finish().unwrap();
+
+        struct MismatchFetcher {
+            gz: Vec<u8>,
+        }
+        impl Fetcher for MismatchFetcher {
+            fn fetch_bytes(&self, _url: &str) -> Result<Vec<u8>, InstallError> {
+                Ok(self.gz.clone())
+            }
+            fn fetch_bytes_with_progress(
+                &self,
+                _url: &str,
+                on_progress: &mut dyn FnMut(u64, Option<u64>),
+            ) -> Result<Vec<u8>, InstallError> {
+                let d = self.gz.clone();
+                on_progress(d.len() as u64, Some(d.len() as u64));
+                Ok(d)
+            }
+            fn fetch_string(&self, _url: &str) -> Option<String> {
+                Some("0000000000000000000000000000000000000000000000000000000000000000".to_owned())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let result = Installer::install_or_check(
+            "mismatch-version",
+            &mut |_: InstallProgress| {},
+            Some(dir.path()),
+            &MismatchFetcher { gz: gz_bytes },
+        );
+        assert!(matches!(result, Err(InstallError::ChecksumMismatch { .. })));
+        let tmp = dir
+            .path()
+            .join("rust-analyzer")
+            .join("mismatch-version")
+            .join("rust-analyzer.tmp");
+        assert!(
+            !tmp.exists(),
+            "stray .tmp must be cleaned up on checksum mismatch"
+        );
+    }
+
+    #[test]
+    fn test_progress_fraction_with_known_total() {
+        let p = InstallProgress::Downloading {
+            received: 50,
+            total: Some(100),
+        };
+        assert_eq!(p.fraction(), Some(0.5));
+        let msg = p.message();
+        assert!(
+            msg.contains("50%"),
+            "message should contain percentage: {msg}"
+        );
     }
 }
