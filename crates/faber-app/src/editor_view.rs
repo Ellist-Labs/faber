@@ -755,6 +755,7 @@ impl EditorView {
         .detach();
     }
 
+    #[allow(dead_code)]
     pub fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
         self.hover_timer = None;
         if self.hover_content.is_some() {

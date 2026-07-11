@@ -46,6 +46,11 @@ impl LanguageRegistry {
     pub fn language_by_id(&self, id: &LanguageId) -> Option<Arc<Language>> {
         self.languages.iter().find(|l| &l.id == id).cloned()
     }
+
+    /// Enumerate all registered languages (for pickers and dropdowns).
+    pub fn languages(&self) -> &[Arc<Language>] {
+        &self.languages
+    }
 }
 
 impl Default for LanguageRegistry {

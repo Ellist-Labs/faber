@@ -1165,7 +1165,10 @@ impl Workspace {
 
         // ── server rows ───────────────────────────────────────────────────────
         // Always show all registered adapters so users can restart a stopped server.
-        let all_statuses = mgr.as_ref().map(|m| m.all_server_statuses()).unwrap_or_default();
+        let all_statuses = mgr
+            .as_ref()
+            .map(|m| m.all_server_statuses())
+            .unwrap_or_default();
         let rows: Vec<AnyElement> = if all_statuses.is_empty() {
             vec![
                 div()
@@ -1274,11 +1277,14 @@ impl Workspace {
                                                         rust_i18n::t!("lsp_overlay.start")
                                                             .to_string(),
                                                     )
-                                                    .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
-                                                        if let Some(m) = &mgr {
-                                                            m.restart_server(&sid);
-                                                        }
-                                                    }),
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        move |_, _, _cx| {
+                                                            if let Some(m) = &mgr {
+                                                                m.restart_server(&sid);
+                                                            }
+                                                        },
+                                                    ),
                                             )
                                         })
                                         // Restart — when Running or Error
@@ -1295,11 +1301,14 @@ impl Workspace {
                                                         rust_i18n::t!("lsp_overlay.restart")
                                                             .to_string(),
                                                     )
-                                                    .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
-                                                        if let Some(m) = &mgr {
-                                                            m.restart_server(&sid);
-                                                        }
-                                                    }),
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        move |_, _, _cx| {
+                                                            if let Some(m) = &mgr {
+                                                                m.restart_server(&sid);
+                                                            }
+                                                        },
+                                                    ),
                                             )
                                         })
                                         // Stop — only when Running

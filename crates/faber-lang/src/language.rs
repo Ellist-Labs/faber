@@ -251,6 +251,8 @@ pub struct Grammar {
 /// A supported language: its id, file extensions, and how to build a parser.
 pub struct Language {
     pub id: LanguageId,
+    /// Human-readable display name (e.g. `"Rust"`, `"Markdown"`).
+    pub name: String,
     /// Lowercase file extensions without the leading dot (e.g. `["rs"]`).
     pub extensions: Vec<String>,
     /// Returns the tree-sitter grammar for this language.
@@ -270,8 +272,17 @@ impl Language {
         extensions: impl IntoIterator<Item = impl Into<String>>,
         grammar: fn() -> TsLanguage,
     ) -> Self {
+        let id_str: String = id.into();
+        let name = {
+            let mut c = id_str.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        };
         Self {
-            id: LanguageId::new(id),
+            id: LanguageId::new(id_str),
+            name,
             extensions: extensions.into_iter().map(Into::into).collect(),
             grammar,
             highlights_query: None,
@@ -295,6 +306,12 @@ impl Language {
     /// Attach a language-specific capture-name → token override table.
     pub fn with_token_map(mut self, map_fn: TokenMapFn) -> Self {
         self.token_map = Some(map_fn);
+        self
+    }
+
+    /// Override the display name (default: id with first letter capitalized).
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
         self
     }
 
@@ -384,6 +401,7 @@ pub fn markdown() -> Language {
     })
     .with_highlights(|| tree_sitter_md::HIGHLIGHT_QUERY_BLOCK)
     .with_token_map(markdown_token_map)
+    .with_name("Markdown")
 }
 
 /// Built-in Rust language definition.
@@ -391,6 +409,7 @@ pub fn rust() -> Language {
     Language::new("rust", ["rs"], || tree_sitter_rust::LANGUAGE.into())
         .with_highlights(|| tree_sitter_rust::HIGHLIGHTS_QUERY)
         .with_outline(|| include_str!("../queries/rust/outline.scm"))
+        .with_name("Rust")
 }
 
 #[cfg(test)]

@@ -211,15 +211,12 @@ impl LspManager {
         let sid_for_cb = server_id.clone();
         let lang_for_cb = lang_str.clone();
 
-        let binary_path = match adapter.resolve_binary(
-            &settings_guard,
-            &mut |progress: InstallProgress| {
+        let binary_path =
+            match adapter.resolve_binary(&settings_guard, &mut |progress: InstallProgress| {
                 log::info!("lsp: {}", progress.message());
                 let mut slots = mgr_for_cb.slots.lock().unwrap_or_else(|p| p.into_inner());
-                if let Some(ServerSlot::Downloading {
-                    progress: p,
-                    ..
-                }) = slots.get_mut(&sid_for_cb)
+                if let Some(ServerSlot::Downloading { progress: p, .. }) =
+                    slots.get_mut(&sid_for_cb)
                 {
                     *p = Some(DownloadInfo {
                         msg: progress.message(),
@@ -229,24 +226,23 @@ impl LspManager {
                 // update_status needs the slots lock; drop it first.
                 drop(slots);
                 mgr_for_cb.update_status();
-            },
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                let msg = e.to_string();
-                log::error!("lsp: resolve_binary failed for {server_id}: {msg}");
-                let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
-                slots.insert(
-                    server_id.clone(),
-                    ServerSlot::Failed {
-                        lang: lang_for_cb,
-                        msg: msg.clone(),
-                    },
-                );
-                self.update_status();
-                return Err(anyhow::anyhow!("resolve_binary failed: {msg}"));
-            }
-        };
+            }) {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = e.to_string();
+                    log::error!("lsp: resolve_binary failed for {server_id}: {msg}");
+                    let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+                    slots.insert(
+                        server_id.clone(),
+                        ServerSlot::Failed {
+                            lang: lang_for_cb,
+                            msg: msg.clone(),
+                        },
+                    );
+                    self.update_status();
+                    return Err(anyhow::anyhow!("resolve_binary failed: {msg}"));
+                }
+            };
         drop(settings_guard);
 
         let init_options = adapter.init_options();
@@ -490,9 +486,7 @@ impl LspManager {
                     let lang = lang.clone();
                     let next = attempt + 1;
                     if next > MAX_RESTART_ATTEMPTS {
-                        log::error!(
-                            "lsp: {server_id} crashed {next} times, giving up"
-                        );
+                        log::error!("lsp: {server_id} crashed {next} times, giving up");
                         slots.insert(
                             server_id.to_owned(),
                             ServerSlot::Failed {
@@ -523,9 +517,7 @@ impl LspManager {
         }
 
         let delay_secs = 1u64 << (attempt - 1).min(4); // 1, 2, 4, 8, 16 s
-        log::info!(
-            "lsp: {server_id} crashed (attempt {attempt}), restarting in {delay_secs}s"
-        );
+        log::info!("lsp: {server_id} crashed (attempt {attempt}), restarting in {delay_secs}s");
 
         let mgr = Arc::clone(self);
         let sid = server_id.to_owned();
@@ -558,14 +550,14 @@ impl LspManager {
         source_str: &'static str,
         params_value: serde_json::Value,
     ) {
-        let params: lsp_types::PublishDiagnosticsParams =
-            match serde_json::from_value(params_value) {
-                Ok(p) => p,
-                Err(e) => {
-                    log::warn!("publishDiagnostics: failed to deserialize params: {e}");
-                    return;
-                }
-            };
+        let params: lsp_types::PublishDiagnosticsParams = match serde_json::from_value(params_value)
+        {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("publishDiagnostics: failed to deserialize params: {e}");
+                return;
+            }
+        };
 
         let uri = match params.uri.as_str().parse::<url::Url>() {
             Ok(u) => u,
@@ -708,7 +700,12 @@ impl LspManager {
             .iter()
             .map(|a| {
                 let server_id = a.server_id().to_owned();
-                let lang = a.languages().first().copied().unwrap_or_default().to_owned();
+                let lang = a
+                    .languages()
+                    .first()
+                    .copied()
+                    .unwrap_or_default()
+                    .to_owned();
                 match slots.get(&server_id) {
                     None => ServerStatus {
                         server_id,
@@ -798,12 +795,7 @@ impl LspManager {
     // ── Private ───────────────────────────────────────────────────────────────
 
     /// Send a notification to every Running server that handles `lang_id_str`.
-    fn notify_servers_for_lang(
-        &self,
-        lang_id_str: &str,
-        method: &str,
-        params: &serde_json::Value,
-    ) {
+    fn notify_servers_for_lang(&self, lang_id_str: &str, method: &str, params: &serde_json::Value) {
         // Collect servers while holding the slots lock (send is non-blocking — unbounded
         // crossbeam channel — so holding the lock during notify is safe).
         let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
@@ -1096,7 +1088,10 @@ mod tests {
                 assert_eq!(*attempt, 1);
                 assert_eq!(lang, "rust");
             }
-            other => panic!("expected Restarting{{1}}, got slot present={}", other.is_some()),
+            other => panic!(
+                "expected Restarting{{1}}, got slot present={}",
+                other.is_some()
+            ),
         }
     }
 

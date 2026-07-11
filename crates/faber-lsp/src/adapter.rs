@@ -3,13 +3,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::install::InstallProgress;
+
 // ---------------------------------------------------------------------------
 // AdapterError
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub enum AdapterError {
-    NotFound,
     Install(crate::install::InstallError),
     Io(std::io::Error),
 }
@@ -17,7 +18,6 @@ pub enum AdapterError {
 impl std::fmt::Display for AdapterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AdapterError::NotFound => write!(f, "language server binary not found"),
             AdapterError::Install(e) => write!(f, "install error: {e}"),
             AdapterError::Io(e) => write!(f, "I/O error: {e}"),
         }
@@ -49,12 +49,11 @@ pub trait LspAdapter: Send + Sync {
     /// Language IDs this adapter handles (e.g. ["rust"]).
     fn languages(&self) -> &[&'static str];
 
-    /// Resolve the binary path: user override > PATH search > managed download.
-    /// `progress_cb` is called with human-readable status strings during download.
+    /// Resolve the binary path: user override → managed download (no PATH search).
     fn resolve_binary(
         &self,
         settings: &faber_settings::LspSettings,
-        progress_cb: &mut dyn FnMut(&str),
+        progress_cb: &mut dyn FnMut(InstallProgress),
     ) -> Result<PathBuf, AdapterError>;
 
     /// Optional initialization options passed in the LSP `initialize` request.
@@ -75,7 +74,7 @@ pub trait LspAdapter: Send + Sync {
 pub struct RustAnalyzerAdapter;
 
 // Pinned version — bump this to trigger re-download on next start.
-const RA_VERSION: &str = "2025-07-07";
+const RA_VERSION: &str = "2026-07-06";
 
 impl LspAdapter for RustAnalyzerAdapter {
     fn server_id(&self) -> &'static str {
@@ -89,7 +88,7 @@ impl LspAdapter for RustAnalyzerAdapter {
     fn resolve_binary(
         &self,
         settings: &faber_settings::LspSettings,
-        progress_cb: &mut dyn FnMut(&str),
+        progress_cb: &mut dyn FnMut(InstallProgress),
     ) -> Result<PathBuf, AdapterError> {
         // 1. User-configured override.
         if let Some(path) = settings
@@ -98,44 +97,19 @@ impl LspAdapter for RustAnalyzerAdapter {
             .and_then(|c| c.binary_path.as_ref())
         {
             if path.exists() {
-                log::info!("Using user-configured rust-analyzer at {}", path.display());
+                log::info!(
+                    "lsp: using user-configured rust-analyzer at {}",
+                    path.display()
+                );
                 return Ok(path.clone());
             }
             log::warn!(
-                "User-configured rust-analyzer path does not exist: {}; falling through",
+                "lsp: user-configured rust-analyzer path does not exist: {}; falling through to managed download",
                 path.display()
             );
         }
 
-        // 2. Search PATH.
-        let path_var = std::env::var("PATH").unwrap_or_default();
-        for dir in std::env::split_paths(&path_var) {
-            if dir.as_os_str().is_empty() {
-                continue;
-            }
-            let candidate = dir.join("rust-analyzer");
-            let is_executable = {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    candidate
-                        .metadata()
-                        .map(|m| m.permissions().mode() & 0o111 != 0)
-                        .unwrap_or(false)
-                }
-                #[cfg(not(unix))]
-                {
-                    candidate.metadata().is_ok()
-                }
-            };
-            if is_executable {
-                log::info!("Found rust-analyzer in PATH at {}", candidate.display());
-                return Ok(candidate);
-            }
-        }
-
-        // 3. Managed download.
-        progress_cb("Checking cache...");
+        // 2. Managed download (Zed-style: no PATH search).
         let path = crate::install::Installer::install_or_check(
             RA_VERSION,
             progress_cb,
@@ -146,7 +120,7 @@ impl LspAdapter for RustAnalyzerAdapter {
     }
 
     fn init_options(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({ "checkOnSave": { "command": "clippy" } }))
+        Some(serde_json::json!({ "check": { "command": "clippy" } }))
     }
 }
 
@@ -194,25 +168,21 @@ mod tests {
         );
     }
 
-    // 2. User override points to nonexistent path: falls through to PATH search
-    //    (no error returned for a missing user-configured path).
+    // 2. User override points to nonexistent path: falls through to managed download
+    //    (no error returned for a missing user-configured path itself).
     #[test]
     fn test_user_override_missing_falls_through() {
         let nonexistent = PathBuf::from("/nonexistent/path/rust-analyzer-fake-test-binary");
         let settings = settings_with_binary(Some(nonexistent));
         let adapter = RustAnalyzerAdapter;
 
-        // We expect either Ok (found in PATH) or a download error/NotFound —
-        // never an Io/panic just because the user path doesn't exist.
+        // We expect either Ok (managed cache hit) or an Install error from the download.
+        // Never an Io error just because the user path doesn't exist.
         let result = adapter.resolve_binary(&settings, &mut |_| {});
         match result {
-            // Found in PATH or managed cache — valid.
             Ok(_) => {}
-            // Install/NotFound is acceptable — what matters is it didn't return Io
-            // for the missing user-configured path.
-            Err(AdapterError::Install(_)) | Err(AdapterError::NotFound) => {}
+            Err(AdapterError::Install(_)) => {}
             Err(AdapterError::Io(e)) => {
-                // Should not surface an Io error for the missing override path.
                 panic!("unexpected Io error from missing user override: {e}");
             }
         }

@@ -193,7 +193,6 @@ plain_text = "Plain Text"
 
 [language_picker]
 title = "Select Language Mode"
-placeholder = "Filter languages…"
 hint_select = "Select"
 hint_dismiss = "Dismiss"
 

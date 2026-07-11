@@ -27,6 +27,7 @@ pub struct TabItem {
     pub focus_handle: FocusHandle,
     pub view: AnyView,
     pub(crate) kind: TabKind,
+    #[allow(clippy::type_complexity)]
     title_fn: Box<dyn Fn(&App) -> (String, bool) + Send + Sync>,
 }
 

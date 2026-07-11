@@ -6,11 +6,11 @@ use gpui::{
 };
 use rust_i18n::t;
 
-use crate::{OpenLanguagePicker, OpenProblems};
 use crate::lsp_status::LspStatus;
 use crate::theme::RuntimeTheme;
 use crate::ui::h_flex;
 use crate::workspace::IndexStatus;
+use crate::{OpenLanguagePicker, OpenProblems};
 use faber_lang::Language;
 use faber_lsp::server::ServerState;
 
@@ -461,14 +461,22 @@ impl Render for DiagnosticsStatusItem {
                 div()
                     .text_size(px(t.font_size_caption))
                     .font_family(t.ui_family.clone())
-                    .text_color(if error_count > 0 { t.error } else { t.text_subtle })
+                    .text_color(if error_count > 0 {
+                        t.error
+                    } else {
+                        t.text_subtle
+                    })
                     .child(format!("✕ {}", error_count)),
             )
             .child(
                 div()
                     .text_size(px(t.font_size_caption))
                     .font_family(t.ui_family.clone())
-                    .text_color(if warning_count > 0 { t.warning } else { t.text_subtle })
+                    .text_color(if warning_count > 0 {
+                        t.warning
+                    } else {
+                        t.text_subtle
+                    })
                     .child(format!("⚠ {}", warning_count)),
             )
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {

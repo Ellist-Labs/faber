@@ -8,6 +8,7 @@ mod file_icons;
 mod file_preview;
 mod i18n;
 mod input_helpers;
+mod language_picker;
 mod lsp_status;
 mod markdown_preview;
 mod pane;
@@ -144,6 +145,7 @@ actions!(
         OpenSymbolFinder,
         OpenProblems,
         ToggleLspStatus,
+        OpenLanguagePicker,
         Quit,
         SplitLeft,
         SplitRight,
@@ -151,6 +153,11 @@ actions!(
         SplitDown,
         ReindexProject,
     ]
+);
+
+actions!(
+    language_picker,
+    [LpDismiss, LpConfirm, LpSelectNext, LpSelectPrev,]
 );
 
 actions!(
@@ -395,6 +402,16 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-right", PsInputMoveEnd, Some("ProjectSearch")),
         KeyBinding::new("home", PsInputMoveStart, Some("ProjectSearch")),
         KeyBinding::new("end", PsInputMoveEnd, Some("ProjectSearch")),
+        // LSP / language
+        KeyBinding::new("cmd-shift-l", ToggleLspStatus, Some("Workspace")),
+        KeyBinding::new("cmd-k m", OpenLanguagePicker, Some("Workspace")),
+        // Language picker
+        KeyBinding::new("escape", LpDismiss, Some("LanguagePicker")),
+        KeyBinding::new("enter", LpConfirm, Some("LanguagePicker")),
+        KeyBinding::new("down", LpSelectNext, Some("LanguagePicker")),
+        KeyBinding::new("up", LpSelectPrev, Some("LanguagePicker")),
+        KeyBinding::new("ctrl-n", LpSelectNext, Some("LanguagePicker")),
+        KeyBinding::new("ctrl-p", LpSelectPrev, Some("LanguagePicker")),
         // Confirm modal
         KeyBinding::new("enter", CfConfirm, Some("ConfirmModal")),
         KeyBinding::new("escape", CfDismiss, Some("ConfirmModal")),
