@@ -48,14 +48,14 @@ const OUTLINE_BODY_H: f32 = OUTLINE_MODAL_H - OUTLINE_INPUT_ROW_H - OUTLINE_FOOT
 
 use crate::{
     Backspace, BoldSelection, CloseSearch, Copy, Cut, Delete, DeleteLine, DeleteToLineEnd,
-    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, InputMoveEnd,
-    InputMoveLeft, InputMoveRight, InputMoveStart, ItalicSelection, MoveDocEnd, MoveDocStart,
-    MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown, MovePageUp, MoveRight, MoveUp,
-    MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste, ProjectRoot, Redo, ReplaceAll,
-    ReplaceBackspace, ReplaceOne, SearchBackspace, SelectAll, SelectDocEnd, SelectDocStart,
-    SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft,
-    SelectWordRight, Tab, ToggleCheckbox, TogglePreview, ToggleReplace, ToggleSearchCase,
-    ToggleSearchRegex, ToggleSearchWholeWord, Undo,
+    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, GoToDefinition,
+    InputMoveEnd, InputMoveLeft, InputMoveRight, InputMoveStart, ItalicSelection, MoveDocEnd,
+    MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown, MovePageUp,
+    MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste, ProjectRoot,
+    Redo, ReplaceAll, ReplaceBackspace, ReplaceOne, SearchBackspace, SelectAll, SelectDocEnd,
+    SelectDocStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectRight, SelectUp,
+    SelectWordLeft, SelectWordRight, Tab, ToggleCheckbox, TogglePreview, ToggleReplace,
+    ToggleSearchCase, ToggleSearchRegex, ToggleSearchWholeWord, Undo,
 };
 
 // ── EditorView ─────────────────────────────────────────────────────────────────
@@ -142,8 +142,9 @@ pub struct EditorView {
     // LSP diagnostics — set by Workspace after LspManager is wired up.
     pub diagnostic_store: Option<std::sync::Arc<faber_lsp::diagnostics::DiagnosticStore>>,
 
-    // LSP hover
+    // LSP — set by Workspace after push_editor_tab wires the handles.
     pub lsp_manager: Option<std::sync::Arc<faber_lsp::manager::LspManager>>,
+    pub ws_handle: Option<gpui::WeakEntity<crate::workspace::Workspace>>,
     hover_timer: Option<gpui::Task<()>>,
     /// Pixel Y of the last mouse-over; anchors the popover vertically.
     hover_pixel_y: f32,
@@ -216,6 +217,7 @@ impl EditorView {
             flash_line: None,
             diagnostic_store: None,
             lsp_manager: None,
+            ws_handle: None,
             hover_timer: None,
             hover_pixel_y: 0.0,
             hover_char_offset: None,
@@ -574,6 +576,14 @@ impl EditorView {
             return;
         };
 
+        // Cmd+click → go-to-definition (takes precedence over selection).
+        if ev.click_count == 1 && ev.modifiers.platform && !ev.modifiers.shift {
+            self.sel = Selection::collapsed(offset, &self.doc.rope);
+            cx.notify();
+            self.trigger_go_to_definition(window, cx);
+            return;
+        }
+
         match ev.click_count {
             2 => {
                 let sel = cursor::word_at(&self.doc.rope, offset);
@@ -762,6 +772,94 @@ impl EditorView {
             self.hover_content = None;
             cx.notify();
         }
+    }
+
+    // ── Go-to-Definition ──────────────────────────────────────────────────────
+
+    fn on_go_to_definition(
+        &mut self,
+        _: &GoToDefinition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.trigger_go_to_definition(window, cx);
+    }
+
+    fn trigger_go_to_definition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mgr) = self.lsp_manager.clone() else {
+            return;
+        };
+        let path = self.doc.path.clone();
+        let uri = match url::Url::from_file_path(&path) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+        let offset = self.sel.head;
+        let encoding = mgr.position_encoding_for_uri(&uri);
+        let lsp_pos = faber_lsp::position::to_lsp_position(&self.doc.rope, offset, encoding);
+        let params_json = serde_json::json!({
+            "textDocument": { "uri": uri.as_str() },
+            "position": { "line": lsp_pos.line, "character": lsp_pos.character }
+        });
+        let Some(rx) = mgr.request_for_document(&uri, "textDocument/definition", params_json)
+        else {
+            return;
+        };
+        let ws_handle = self.ws_handle.clone();
+        cx.spawn_in(window, async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rx.recv_timeout(std::time::Duration::from_secs(5)) })
+                .await;
+            let locations = match result {
+                Ok(Ok(val)) => parse_definition_locations(&val),
+                _ => return,
+            };
+            let Some(first) = locations.first() else {
+                return;
+            };
+            let def_path = first.0.clone();
+            let def_line = first.1;
+            let def_char = first.2;
+
+            let same_file = view
+                .update(cx, |ev, _cx| ev.doc.path == def_path)
+                .unwrap_or(false);
+            if same_file {
+                let _ = view.update(cx, |ev, cx| {
+                    let char_idx = ev
+                        .line_starts
+                        .get(def_line)
+                        .map(|&ls| ls + def_char)
+                        .unwrap_or(ev.doc.rope.len_chars().saturating_sub(1));
+                    ev.sel.head = char_idx;
+                    ev.sel.anchor = char_idx;
+                    ev.scroll_handle
+                        .scroll_to_item(def_line, gpui::ScrollStrategy::Center);
+                    ev.flash_line = Some(def_line);
+                    let epoch = ev.cursor_blink_epoch;
+                    cx.spawn(async move |view, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(800))
+                            .await;
+                        view.update(cx, |ev, cx| {
+                            if ev.cursor_blink_epoch == epoch {
+                                ev.flash_line = None;
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                    cx.notify();
+                });
+            } else if let Some(ws) = ws_handle.and_then(|h| h.upgrade()) {
+                let _ = ws.update_in(cx, |ws, window, cx| {
+                    ws.navigate_to(&def_path, def_line, def_char, window, cx);
+                });
+            }
+        })
+        .detach();
     }
 
     fn update_matches(&mut self) {
@@ -2869,6 +2967,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_bold_selection))
             .on_action(cx.listener(Self::on_italic_selection))
             .on_action(cx.listener(Self::on_toggle_checkbox))
+            .on_action(cx.listener(Self::on_go_to_definition))
             .when(is_dragging || self.mouse_selecting, |el| {
                 el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, window, cx| {
                     if let Some(ref drag) = view.scrollbar_drag {
@@ -3231,4 +3330,38 @@ impl EditorView {
         .with_priority(2)
         .into_any()
     }
+}
+
+/// Parse a `textDocument/definition` response into (path, line, char) tuples.
+/// Handles Location, LocationLink, and arrays of either.
+fn parse_definition_locations(val: &serde_json::Value) -> Vec<(std::path::PathBuf, usize, usize)> {
+    let items: Vec<&serde_json::Value> = if val.is_array() {
+        val.as_array().unwrap().iter().collect()
+    } else if val.is_object() {
+        vec![val]
+    } else {
+        return Vec::new();
+    };
+
+    items
+        .into_iter()
+        .filter_map(|item| {
+            // LocationLink has targetUri/targetRange; Location has uri/range.
+            let uri_str = item
+                .get("targetUri")
+                .or_else(|| item.get("uri"))
+                .and_then(|v| v.as_str())?;
+            let range = item
+                .get("targetSelectionRange")
+                .or_else(|| item.get("targetRange"))
+                .or_else(|| item.get("range"))
+                .and_then(|r| r.as_object())?;
+            let start = range.get("start").and_then(|s| s.as_object())?;
+            let line = start.get("line").and_then(|l| l.as_u64())? as usize;
+            let character = start.get("character").and_then(|c| c.as_u64())? as usize;
+            let url = url::Url::parse(uri_str).ok()?;
+            let path = url.to_file_path().ok()?;
+            Some((path, line, character))
+        })
+        .collect()
 }

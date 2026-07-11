@@ -353,7 +353,11 @@ impl Workspace {
             ws.on_editor_edited(cx)
         })
         .detach();
-        // Wire the shared diagnostic store and LSP manager so squiggles + hover work.
+        // Wire shared diagnostic store, LSP manager, and workspace handle.
+        let ws_weak = cx.weak_entity();
+        editor.update(cx, |ev, _cx| {
+            ev.ws_handle = Some(ws_weak);
+        });
         if let Some(mgr) = &self.lsp_manager {
             let store = mgr.diagnostic_store();
             let mgr_arc = Arc::clone(mgr);
@@ -2527,6 +2531,10 @@ impl Workspace {
             ws.on_editor_edited(cx)
         })
         .detach();
+        let ws_weak = cx.weak_entity();
+        editor.update(cx, |ev, _cx| {
+            ev.ws_handle = Some(ws_weak);
+        });
         new_pane.update(cx, |p: &mut Pane, cx| {
             p.push_editor_tab(editor, cx);
         });
