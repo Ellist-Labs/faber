@@ -35,10 +35,10 @@ use crate::ui::{
 use crate::welcome_view::render_welcome;
 use crate::{
     AppStateStore, CfConfirm, CfDismiss, CloseFile, CloseFolder, CloseTab, CloseWindow, NewFile,
-    NextTab, OpenFile, OpenFileFinder, OpenFileFinderPreview, OpenFolder, OpenProblems,
-    OpenProjectSearch, OpenSettings, PrevTab, ProjectRoot, Quit, ReindexProject, SaveAll, SaveAs,
-    SaveFile, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleBottomPanel, ToggleLspStatus,
-    ToggleRightPanel, ToggleSidebar,
+    NextTab, OpenFile, OpenFileFinder, OpenFileFinderPreview, OpenFolder, OpenLanguagePicker,
+    OpenProblems, OpenProjectSearch, OpenSettings, PrevTab, ProjectRoot, Quit, ReindexProject,
+    SaveAll, SaveAs, SaveFile, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleBottomPanel,
+    ToggleLspStatus, ToggleRightPanel, ToggleSidebar,
 };
 use faber_lang::{LanguageId as LspLanguageId, LanguageRegistry};
 use faber_lsp::adapter::{LspAdapter, RustAnalyzerAdapter};
@@ -198,6 +198,8 @@ pub struct Workspace {
     drop_hover: Option<(PaneId, DropZone)>,
     pub(crate) lsp_overlay_open: bool,
     pub(crate) lsp_overlay_pos: gpui::Point<gpui::Pixels>,
+    active_doc_info: Entity<crate::status_bar::ActiveDocInfo>,
+    language_picker: Option<Entity<crate::language_picker::LanguagePickerView>>,
 }
 
 impl Workspace {
@@ -214,6 +216,7 @@ impl Workspace {
 
         let index_status = cx.new(|_| IndexStatus::new());
         let lsp_status = cx.new(|_| LspStatus::new());
+        let active_doc_info = cx.new(|_| crate::status_bar::ActiveDocInfo::new());
         let status_bar = cx.new(|_| crate::status_bar::StatusBar::new());
         {
             let item =
@@ -222,8 +225,20 @@ impl Workspace {
         }
         {
             let ws_weak = cx.entity().downgrade();
+            let item = cx.new(|cx| {
+                crate::status_bar::LanguageStatusItem::new(active_doc_info.clone(), ws_weak, cx)
+            });
+            status_bar.update(cx, |bar, _| bar.push_right(item.into()));
+        }
+        {
+            let ws_weak = cx.entity().downgrade();
             let item =
                 cx.new(|cx| crate::status_bar::LspStatusItem::new(lsp_status.clone(), ws_weak, cx));
+            status_bar.update(cx, |bar, _| bar.push_right(item.into()));
+        }
+        {
+            let item =
+                cx.new(|cx| crate::status_bar::DiagnosticsStatusItem::new(lsp_status.clone(), cx));
             status_bar.update(cx, |bar, _| bar.push_right(item.into()));
         }
 
@@ -259,12 +274,21 @@ impl Workspace {
             drop_hover: None,
             lsp_overlay_open: false,
             lsp_overlay_pos: gpui::point(gpui::px(0.), gpui::px(0.)),
+            active_doc_info,
+            language_picker: None,
         };
         if !paths.is_empty() {
+            // Detect project root from the first path so the LSP can start.
+            if let Some(first) = paths.first() {
+                let root = Self::detect_project_root(Path::new(first));
+                ws.set_root_folder(root.clone(), cx);
+                ws.check_and_show_trust_modal(&root, window, cx);
+            }
             for path in paths {
                 let editor = cx.new(|cx| EditorView::new(path, cx));
                 ws.push_editor_tab(editor, cx);
             }
+            ws.activate_tab(0, window, cx);
         } else if let Some(sess) = session {
             if let Some(root) = sess.root.as_deref() {
                 let root_path = PathBuf::from(root);
@@ -348,10 +372,10 @@ impl Workspace {
                 let root = self.root_folder.clone();
                 let mgr = Arc::clone(mgr);
                 std::thread::spawn(move || {
-                    if let Some(root) = root {
-                        if let Err(e) = mgr.ensure_server_for_language(&lang_id, &root) {
-                            log::error!("lsp: ensure failed: {e}");
-                        }
+                    if let Some(root) = root
+                        && let Err(e) = mgr.ensure_server_for_language(&lang_id, &root)
+                    {
+                        log::error!("lsp: ensure failed: {e}");
                     }
                     mgr.on_document_opened(uri, lang_id, &text);
                 });
@@ -471,6 +495,7 @@ impl Workspace {
         }
         self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| p.set_active(Some(ix)));
         self.right_open = self.active_is_markdown(cx);
+        self.update_active_doc_info(cx);
         self.focus_active(window, cx);
         cx.notify();
         // Reveal the newly active file in the explorer tree.
@@ -607,6 +632,22 @@ impl Workspace {
 
     // ── folder / explorer ──────────────────────────────────────────────────────
 
+    /// Walk up from `file` looking for a directory that contains `.git` or
+    /// `Cargo.toml`; if nothing is found returns the file's parent directory.
+    fn detect_project_root(file: &Path) -> PathBuf {
+        let start = file.parent().unwrap_or(file);
+        let mut dir = start;
+        loop {
+            if dir.join(".git").exists() || dir.join("Cargo.toml").exists() {
+                return dir.to_path_buf();
+            }
+            match dir.parent() {
+                Some(p) => dir = p,
+                None => return start.to_path_buf(),
+            }
+        }
+    }
+
     pub(crate) fn set_root_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         match FileTree::new(folder.clone()) {
             Ok(tree) => {
@@ -621,6 +662,7 @@ impl Workspace {
                 self.symbols_handle = None;
                 self._fs_watcher = None; // drops the old watcher threads
                 self.start_index_engine(cx);
+                self.start_lsp_manager(cx);
                 let abs = folder.to_string_lossy().to_string();
                 self.record_state_change(cx, move |s| s.record_recent_project(&abs));
             }
@@ -805,7 +847,6 @@ impl Workspace {
             }
         })
         .detach();
-        self.start_lsp_manager(cx);
     }
 
     pub(crate) fn start_lsp_manager(&mut self, cx: &mut Context<Self>) {
@@ -947,6 +988,101 @@ impl Workspace {
         }
     }
 
+    // ── Language picker ────────────────────────────────────────────────────────
+
+    pub(crate) fn open_language_picker(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::FocusHandle> {
+        if self.language_picker.is_some() {
+            return None;
+        }
+        let registry = cx.global::<crate::Registry>().0.clone();
+        let mut languages: Vec<_> = registry.languages().to_vec();
+        languages.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let current_lang = self.active_doc_info.read(cx).language.clone();
+        let current_lang_id = current_lang.map(|l| l.id.clone());
+
+        let ws = cx.entity().downgrade();
+        let picker = cx.new(|cx| {
+            crate::language_picker::LanguagePickerView::new(languages, current_lang_id, ws, cx)
+        });
+        let fh = picker.read(cx).focus_handle.clone();
+        self.language_picker = Some(picker);
+        cx.notify();
+        Some(fh)
+    }
+
+    pub(crate) fn close_language_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.language_picker.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn apply_language_override(
+        &mut self,
+        lang: Option<std::sync::Arc<faber_lang::Language>>,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self
+            .pane()
+            .read(cx)
+            .active_tab()
+            .and_then(|t| t.editor())
+            .cloned();
+        let Some(editor) = editor else { return };
+
+        editor.update(cx, |ev, _cx| {
+            ev.doc.set_language(lang.clone());
+        });
+
+        // Update active doc info.
+        self.active_doc_info.update(cx, |info, cx| {
+            info.language = lang.clone();
+            cx.notify();
+        });
+
+        // Re-trigger LSP for new language.
+        if let Some(mgr) = &self.lsp_manager {
+            let registry = cx.global::<crate::Registry>().0.clone();
+            let (_version, path, text) = editor.read(cx).doc.lsp_sync_info();
+            if let Some((uri, lang_id)) = Self::doc_uri_and_lang(&path, &registry) {
+                let root = self.root_folder.clone();
+                let mgr = Arc::clone(mgr);
+                std::thread::spawn(move || {
+                    if let Some(root) = root
+                        && let Err(e) = mgr.ensure_server_for_language(&lang_id, &root)
+                    {
+                        log::error!("lsp: ensure failed after language override: {e}");
+                    }
+                    mgr.on_document_opened(uri, lang_id, &text);
+                });
+            }
+        }
+
+        cx.notify();
+    }
+
+    fn update_active_doc_info(&mut self, cx: &mut Context<Self>) {
+        let editor = self
+            .pane()
+            .read(cx)
+            .active_tab()
+            .and_then(|t| t.editor())
+            .cloned();
+        let lang = editor.and_then(|e| {
+            let doc = &e.read(cx).doc;
+            let registry = cx.global::<crate::Registry>().0.clone();
+            registry.language_for_path(&doc.path)
+        });
+        self.active_doc_info.update(cx, |info, cx| {
+            info.language = lang;
+            cx.notify();
+        });
+    }
+
     // ── Confirm modal ──────────────────────────────────────────────────────────
 
     fn show_confirm(&mut self, spec: ConfirmSpec, window: &mut Window, cx: &mut Context<Self>) {
@@ -991,7 +1127,6 @@ impl Workspace {
         }
 
         use faber_lsp::server::ServerState;
-        let statuses = self.lsp_status.read(cx).statuses.clone();
         let mgr = self.lsp_manager.clone();
         let ws_entity = cx.entity().downgrade();
 
@@ -1029,7 +1164,9 @@ impl Workspace {
             );
 
         // ── server rows ───────────────────────────────────────────────────────
-        let rows: Vec<AnyElement> = if statuses.is_empty() {
+        // Always show all registered adapters so users can restart a stopped server.
+        let all_statuses = mgr.as_ref().map(|m| m.all_server_statuses()).unwrap_or_default();
+        let rows: Vec<AnyElement> = if all_statuses.is_empty() {
             vec![
                 div()
                     .font_family(t.ui_family.clone())
@@ -1040,7 +1177,7 @@ impl Workspace {
                     .into_any_element(),
             ]
         } else {
-            statuses
+            all_statuses
                 .iter()
                 .map(|s| {
                     let (state_text, dot_color) = match &s.state {
@@ -1070,6 +1207,10 @@ impl Workspace {
                     let server_id = s.server_id.clone();
                     let mgr_btn = mgr.clone();
                     let ws_stop = ws_entity.clone();
+
+                    let is_running = matches!(s.state, ServerState::Running);
+                    let is_error = matches!(s.state, ServerState::Error(_));
+                    let is_stopped = matches!(s.state, ServerState::Stopped);
 
                     div()
                         .flex()
@@ -1119,51 +1260,78 @@ impl Workspace {
                                         .flex()
                                         .items_center()
                                         .gap(px(8.))
-                                        .child(
-                                            div()
-                                                .cursor_pointer()
-                                                .text_size(px(t.font_size_caption))
-                                                .font_family(t.ui_family.clone())
-                                                .text_color(t.text_muted)
-                                                .child(
-                                                    rust_i18n::t!("lsp_overlay.restart")
-                                                        .to_string(),
-                                                )
-                                                .on_mouse_down(MouseButton::Left, {
-                                                    let sid = server_id.clone();
-                                                    let mgr = mgr_btn.clone();
-                                                    move |_, _, _cx| {
+                                        // Start — only when Stopped
+                                        .when(is_stopped, |el| {
+                                            let sid = server_id.clone();
+                                            let mgr = mgr_btn.clone();
+                                            el.child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .text_size(px(t.font_size_caption))
+                                                    .font_family(t.ui_family.clone())
+                                                    .text_color(t.text_muted)
+                                                    .child(
+                                                        rust_i18n::t!("lsp_overlay.start")
+                                                            .to_string(),
+                                                    )
+                                                    .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
                                                         if let Some(m) = &mgr {
                                                             m.restart_server(&sid);
                                                         }
-                                                    }
-                                                }),
-                                        )
-                                        .child(
-                                            div()
-                                                .cursor_pointer()
-                                                .text_size(px(t.font_size_caption))
-                                                .font_family(t.ui_family.clone())
-                                                .text_color(t.text_muted)
-                                                .child(
-                                                    rust_i18n::t!("lsp_overlay.stop").to_string(),
-                                                )
-                                                .on_mouse_down(MouseButton::Left, {
-                                                    let sid = server_id.clone();
-                                                    let mgr = mgr_btn.clone();
-                                                    move |_, _, cx| {
+                                                    }),
+                                            )
+                                        })
+                                        // Restart — when Running or Error
+                                        .when(is_running || is_error, |el| {
+                                            let sid = server_id.clone();
+                                            let mgr = mgr_btn.clone();
+                                            el.child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .text_size(px(t.font_size_caption))
+                                                    .font_family(t.ui_family.clone())
+                                                    .text_color(t.text_muted)
+                                                    .child(
+                                                        rust_i18n::t!("lsp_overlay.restart")
+                                                            .to_string(),
+                                                    )
+                                                    .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
                                                         if let Some(m) = &mgr {
-                                                            m.stop_server(&sid);
+                                                            m.restart_server(&sid);
                                                         }
-                                                        if let Some(ws) = ws_stop.upgrade() {
-                                                            ws.update(cx, |ws, cx| {
-                                                                ws.lsp_overlay_open = false;
-                                                                cx.notify();
-                                                            });
+                                                    }),
+                                            )
+                                        })
+                                        // Stop — only when Running
+                                        .when(is_running, |el| {
+                                            let sid = server_id.clone();
+                                            let mgr = mgr_btn.clone();
+                                            el.child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .text_size(px(t.font_size_caption))
+                                                    .font_family(t.ui_family.clone())
+                                                    .text_color(t.text_muted)
+                                                    .child(
+                                                        rust_i18n::t!("lsp_overlay.stop")
+                                                            .to_string(),
+                                                    )
+                                                    .on_mouse_down(MouseButton::Left, {
+                                                        let ws = ws_stop.clone();
+                                                        move |_, _, cx| {
+                                                            if let Some(m) = &mgr {
+                                                                m.stop_server(&sid);
+                                                            }
+                                                            if let Some(ws) = ws.upgrade() {
+                                                                ws.update(cx, |ws, cx| {
+                                                                    ws.lsp_overlay_open = false;
+                                                                    cx.notify();
+                                                                });
+                                                            }
                                                         }
-                                                    }
-                                                }),
-                                        ),
+                                                    }),
+                                            )
+                                        }),
                                 ),
                         )
                         .into_any_element()
@@ -1580,6 +1748,17 @@ impl Workspace {
             self.lsp_overlay_pos = gpui::point(size.width - px(8.), size.height - px(30.));
         }
         cx.notify();
+    }
+
+    fn on_open_language_picker(
+        &mut self,
+        _: &OpenLanguagePicker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(fh) = self.open_language_picker(cx) {
+            window.focus(&fh);
+        }
     }
 
     fn on_open_problems(&mut self, _: &OpenProblems, window: &mut Window, cx: &mut Context<Self>) {
@@ -2870,6 +3049,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_open_problems))
             .on_action(cx.listener(Self::on_toggle_lsp_status))
+            .on_action(cx.listener(Self::on_open_language_picker))
             .on_action(cx.listener(Self::on_reindex_project))
             .on_action(cx.listener(Self::on_open_project_search))
             .on_action(cx.listener(Self::on_open_file_finder))
@@ -2979,6 +3159,9 @@ impl Render for Workspace {
                 .when_some(self.symbol_finder.clone(), |el, finder| {
                     el.relative().child(finder)
                 })
+                .when_some(self.language_picker.clone(), |el, picker| {
+                    el.relative().child(picker)
+                })
                 .map(|el| match self.render_confirm_modal(&t, cx) {
                     Some(modal) => el.relative().child(modal),
                     None => el,
@@ -3027,6 +3210,7 @@ impl Render for Workspace {
             })
             .when_some(self.file_finder.clone(), |el, finder| el.child(finder))
             .when_some(self.symbol_finder.clone(), |el, finder| el.child(finder))
+            .when_some(self.language_picker.clone(), |el, picker| el.child(picker))
             .map(|el| match self.render_confirm_modal(&t, cx) {
                 Some(modal) => el.child(modal),
                 None => el,

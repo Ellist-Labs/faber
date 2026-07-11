@@ -189,6 +189,13 @@ lsp_errors = "errors"
 lsp_warnings = "warnings"
 lsp_restarting = "Restarting"
 lsp_error = "rust-analyzer error"
+plain_text = "Plain Text"
+
+[language_picker]
+title = "Select Language Mode"
+placeholder = "Filter languages…"
+hint_select = "Select"
+hint_dismiss = "Dismiss"
 
 [search]
 placeholder = "Search…"
@@ -212,6 +219,7 @@ error = "Error"
 stopped = "Stopped"
 restart = "Restart"
 stop = "Stop"
+start = "Start"
 
 [dashboard]
 problems_title = "Problems"
