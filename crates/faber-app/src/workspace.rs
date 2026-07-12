@@ -865,6 +865,22 @@ impl Workspace {
         let manager = LspManager::new(default_lsp_adapters(), settings, trusted);
         self.lsp_manager = Some(Arc::clone(&manager));
 
+        // Wire already-open editors that were pushed before trust was granted.
+        let store = manager.diagnostic_store();
+        let existing_editors: Vec<_> = self
+            .panes
+            .values()
+            .flat_map(|pane| pane.read(cx).all_editors().cloned().collect::<Vec<_>>())
+            .collect();
+        for ev_entity in existing_editors {
+            let mgr_arc = Arc::clone(&manager);
+            let store2 = Arc::clone(&store);
+            ev_entity.update(cx, |ev, _cx| {
+                ev.lsp_manager = Some(mgr_arc);
+                ev.diagnostic_store = Some(store2);
+            });
+        }
+
         let lsp_status = self.lsp_status.clone();
         let manager_weak = Arc::downgrade(&manager);
 

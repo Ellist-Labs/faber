@@ -14,16 +14,31 @@ use crate::outline::OutlineItem;
 /// `rope` is used to convert byte offsets to line numbers for scroll sync.
 /// `registry` resolves fenced-code-block language tags for syntax highlighting.
 pub fn parse_markdown(source: &str, rope: &Rope, registry: &LanguageRegistry) -> MarkdownDoc {
+    parse_markdown_with_fallback(source, rope, registry, None)
+}
+
+/// Like [`parse_markdown`], but bare ``` fences fall back to `fallback_ext`
+/// for syntax highlighting (LSP hover responses often omit the fence tag).
+pub fn parse_markdown_with_fallback(
+    source: &str,
+    rope: &Rope,
+    registry: &LanguageRegistry,
+    fallback_ext: Option<&str>,
+) -> MarkdownDoc {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_FOOTNOTES;
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_GFM
+        | Options::ENABLE_SMART_PUNCTUATION
+        | Options::ENABLE_HEADING_ATTRIBUTES;
 
     let parser = CmarkParser::new_ext(source, options).into_offset_iter();
     let mut ctx = ParseCtx {
         source,
         rope,
         registry,
+        fallback_ext,
         outline: Vec::new(),
         block_ix_counter: 0,
     };
@@ -41,6 +56,7 @@ struct ParseCtx<'a> {
     source: &'a str,
     rope: &'a Rope,
     registry: &'a LanguageRegistry,
+    fallback_ext: Option<&'a str>,
     outline: Vec<OutlineItem>,
     block_ix_counter: usize,
 }
@@ -123,7 +139,8 @@ fn collect_blocks(
                 };
                 // Consume Text events until End.
                 let (text, skip) = collect_code_text(&events[i + 1..]);
-                let highlights = highlight_code(&text, lang.as_deref(), ctx.registry);
+                let highlights =
+                    highlight_code(&text, lang.as_deref().or(ctx.fallback_ext), ctx.registry);
                 blocks.push(Block {
                     kind: BlockKind::CodeBlock {
                         lang,
@@ -315,6 +332,7 @@ fn collect_inlines(
                 inlines.push(InlineRun::Image {
                     alt,
                     dest: dest_url.to_string(),
+                    link: link_stack.last().cloned(),
                 });
                 i += 1;
                 continue;
@@ -518,6 +536,13 @@ fn highlight_code(
         return empty_line_vecs(text);
     };
 
+    // rustdoc-style fences carry attributes: ```rust,no_run,compile_fail —
+    // only the first token names the language.
+    let tag = tag.split([',', ' ', '\t']).next().unwrap_or(tag).trim();
+    if tag.is_empty() {
+        return empty_line_vecs(text);
+    }
+
     // Map common tags to file extensions.
     let ext = match tag {
         "rust" | "rs" => "rs",
@@ -575,6 +600,22 @@ mod tests {
         let rope = Rope::from_str(src);
         let registry = LanguageRegistry::default();
         parse_markdown(src, &rope, &registry)
+    }
+
+    #[test]
+    fn fence_attributes_still_highlight() {
+        // rustdoc fences: only the first comma-separated token is the language.
+        let src = "```rust,no_run,compile_fail\nfn main() {}\n```\n";
+        let rope = Rope::from_str(src);
+        let registry = LanguageRegistry::with_defaults();
+        let md = parse_markdown(src, &rope, &registry);
+        let BlockKind::CodeBlock { highlights, .. } = &md.blocks[0].kind else {
+            panic!("expected code block");
+        };
+        assert!(
+            highlights.first().is_some_and(|l| !l.is_empty()),
+            "fence with attributes should still resolve the rust grammar"
+        );
     }
 
     fn item_text(item: &ListItem) -> String {

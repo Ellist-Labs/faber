@@ -1,7 +1,7 @@
 pub mod edit;
 pub mod parse;
 
-pub use parse::parse_markdown;
+pub use parse::{parse_markdown, parse_markdown_with_fallback};
 
 use crate::highlight::HighlightSpan;
 pub use crate::outline::OutlineItem;
@@ -74,6 +74,9 @@ pub enum InlineRun {
     Image {
         alt: String,
         dest: String,
+        /// Enclosing link target when the image is wrapped in a link
+        /// (`[![alt](img)](url)` — the badge pattern).
+        link: Option<String>,
     },
     SoftBreak,
     HardBreak,

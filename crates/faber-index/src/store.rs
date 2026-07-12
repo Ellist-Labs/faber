@@ -138,6 +138,16 @@ fn open_env(dir: &Path, map_size: usize) -> Result<Env> {
     Ok(env)
 }
 
+/// True for resource-exhaustion failures that a short backoff can resolve —
+/// matched on the rendered chain because heed/LMDB wrap the underlying errno.
+fn is_transient_open_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("Resource temporarily unavailable") // EAGAIN (os error 35)
+        || msg.contains("Too many open files") // EMFILE (os error 24)
+        || msg.contains("os error 35")
+        || msg.contains("os error 24")
+}
+
 /// The storage handle; the engine holds one per project. `heed::Env` is itself
 /// `Send + Sync` and its read/write/resize methods take `&self`, so no lock wraps
 /// it. `map_size` is behind a lock only to serialize concurrent map-full grows.
@@ -158,15 +168,40 @@ impl IndexStore {
 
         let dir = cache_root().join(project_dir_name(root));
 
-        let store = match Self::open_at(&dir, INITIAL_MAP_SIZE) {
-            Ok(store) => store,
-            Err(err) => {
-                log::warn!("index env at {dir:?} unrecoverable ({err:#}); rebuilding fresh");
-                let _ = std::fs::remove_dir_all(&dir);
-                let store = Self::open_at(&dir, INITIAL_MAP_SIZE)
-                    .context("reopen fresh index env after wipe")?;
-                store.record_rebuild_reason("corrupt env: reset")?;
-                store
+        // Transient resource errors (EAGAIN from exhausted SysV semaphores on
+        // macOS, EMFILE) are NOT corruption: wiping on them destroys a healthy
+        // index and the reopen fails identically. Retry with backoff instead;
+        // wipe only for genuinely unrecoverable (corrupt) envs.
+        let mut store = None;
+        let mut last_transient: Option<anyhow::Error> = None;
+        for attempt in 0u32..4 {
+            match Self::open_at(&dir, INITIAL_MAP_SIZE) {
+                Ok(s) => {
+                    store = Some(s);
+                    break;
+                }
+                Err(err) if is_transient_open_error(&err) => {
+                    log::warn!("index env open transient failure (attempt {attempt}): {err:#}");
+                    last_transient = Some(err);
+                    std::thread::sleep(std::time::Duration::from_millis(50u64 << attempt));
+                }
+                Err(err) => {
+                    log::warn!("index env at {dir:?} unrecoverable ({err:#}); rebuilding fresh");
+                    let _ = std::fs::remove_dir_all(&dir);
+                    let s = Self::open_at(&dir, INITIAL_MAP_SIZE)
+                        .context("reopen fresh index env after wipe")?;
+                    s.record_rebuild_reason("corrupt env: reset")?;
+                    store = Some(s);
+                    break;
+                }
+            }
+        }
+        let store = match store {
+            Some(s) => s,
+            None => {
+                return Err(last_transient
+                    .expect("retry loop exits with either a store or an error")
+                    .context("open index env: transient failure persisted"));
             }
         };
 

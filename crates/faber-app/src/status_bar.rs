@@ -341,16 +341,9 @@ impl Render for LspStatusItem {
                 None
             };
 
+            // Server health only — diagnostics counts live in DiagnosticsStatusItem.
             let color = match &status.state {
-                ServerState::Running => {
-                    if lsp.error_count > 0 {
-                        t.error
-                    } else if lsp.warning_count > 0 {
-                        t.warning
-                    } else {
-                        t.success
-                    }
-                }
+                ServerState::Running => t.success,
                 ServerState::Downloading
                 | ServerState::Starting
                 | ServerState::Initializing
@@ -419,16 +412,12 @@ impl Render for LspStatusItem {
 /// Status bar item showing error/warning counts; tapping opens the Problems tab.
 pub struct DiagnosticsStatusItem {
     lsp_status: gpui::Entity<LspStatus>,
-    focus_handle: gpui::FocusHandle,
 }
 
 impl DiagnosticsStatusItem {
     pub fn new(lsp_status: gpui::Entity<LspStatus>, cx: &mut Context<Self>) -> Self {
         cx.observe(&lsp_status, |_, _, cx| cx.notify()).detach();
-        Self {
-            lsp_status,
-            focus_handle: cx.focus_handle(),
-        }
+        Self { lsp_status }
     }
 }
 
@@ -447,7 +436,6 @@ impl Render for DiagnosticsStatusItem {
 
         let error_count = lsp.error_count;
         let warning_count = lsp.warning_count;
-        let fh = self.focus_handle.clone();
 
         div()
             .id("diagnostics-status-item")
@@ -480,7 +468,8 @@ impl Render for DiagnosticsStatusItem {
                     .child(format!("⚠ {}", warning_count)),
             )
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                fh.dispatch_action(&OpenProblems, window, cx);
+                log::debug!("status_bar: diagnostics item clicked → OpenProblems");
+                window.dispatch_action(Box::new(OpenProblems), cx);
             })
             .into_any_element()
     }
@@ -503,7 +492,6 @@ impl ActiveDocInfo {
 
 pub struct LanguageStatusItem {
     active_doc: Entity<ActiveDocInfo>,
-    focus_handle: gpui::FocusHandle,
 }
 
 impl LanguageStatusItem {
@@ -513,10 +501,7 @@ impl LanguageStatusItem {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&active_doc, |_, _, cx| cx.notify()).detach();
-        Self {
-            active_doc,
-            focus_handle: cx.focus_handle(),
-        }
+        Self { active_doc }
     }
 }
 
@@ -531,7 +516,6 @@ impl Render for LanguageStatusItem {
             .map(|l| l.name.clone())
             .unwrap_or_else(|| t!("status_bar.plain_text").to_string());
 
-        let fh = self.focus_handle.clone();
         div()
             .id("language-status-item")
             .flex()
@@ -544,7 +528,7 @@ impl Render for LanguageStatusItem {
             .text_color(t.text_muted)
             .child(lang_name)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                fh.dispatch_action(&OpenLanguagePicker, window, cx);
+                window.dispatch_action(Box::new(OpenLanguagePicker), cx);
             })
             .into_any_element()
     }

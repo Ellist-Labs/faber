@@ -256,6 +256,10 @@ impl LanguageServer {
                         }),
                         ..Default::default()
                     }),
+                    hover: Some(lsp_types::HoverClientCapabilities {
+                        dynamic_registration: None,
+                        content_format: Some(vec![lsp_types::MarkupKind::Markdown]),
+                    }),
                     ..Default::default()
                 }),
                 general: Some(lsp_types::GeneralClientCapabilities {
