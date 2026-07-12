@@ -306,10 +306,7 @@ fn push_block(block: &Block, t: &RuntimeTheme, cx: &SegCx, segments: &mut Vec<Se
             }
         }
         BlockKind::Blockquote { children } => {
-            let qcx = SegCx {
-                quote: true,
-                ..*cx
-            };
+            let qcx = SegCx { quote: true, ..*cx };
             for (ix, child) in children.iter().enumerate() {
                 let gap = if ix == 0 { 0.0 } else { BLOCK_GAP / 2.0 };
                 push_block_with_gap(child, t, &qcx, gap, segments);
@@ -375,10 +372,7 @@ fn push_block(block: &Block, t: &RuntimeTheme, cx: &SegCx, segments: &mut Vec<Se
             let mut push_row = |cells: &[Vec<InlineRun>], row_ix: usize, bold: bool| {
                 for col in 0..n_cols {
                     let inlines = cells.get(col).map(|c| c.as_slice()).unwrap_or(&[]);
-                    let ccx = SegCx {
-                        bold,
-                        ..*cx
-                    };
+                    let ccx = SegCx { bold, ..*cx };
                     let mut cell = build_inline_segment(inlines, t, "", &ccx);
                     cell.table_cell = Some((row_ix, col, n_cols));
                     cell.quote = cx.quote;

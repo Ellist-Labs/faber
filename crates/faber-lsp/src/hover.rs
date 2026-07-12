@@ -49,10 +49,7 @@ pub fn extract_hover_text(val: &serde_json::Value) -> Option<String> {
 
     // Log the raw contents format and the actual kind value so we can diagnose
     // rendering mismatches (e.g. "plaintext" vs "markdown").
-    let markup_kind = contents
-        .get("kind")
-        .and_then(|k| k.as_str())
-        .unwrap_or("");
+    let markup_kind = contents.get("kind").and_then(|k| k.as_str()).unwrap_or("");
     log::debug!(
         "hover: contents format={} markup_kind={:?}",
         if contents.is_string() {
@@ -92,9 +89,7 @@ pub fn extract_hover_text(val: &serde_json::Value) -> Option<String> {
                 if let Some(s) = item.as_str() {
                     // Plain MarkedString — already markdown.
                     Some(s.to_owned())
-                } else if let Some(lang) =
-                    item.get("language").and_then(|l| l.as_str())
-                {
+                } else if let Some(lang) = item.get("language").and_then(|l| l.as_str()) {
                     // MarkedString object with language — wrap in a code fence
                     // so the markdown parser can syntax-highlight the block.
                     let val = item.get("value")?.as_str()?;

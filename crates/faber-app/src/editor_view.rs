@@ -1049,19 +1049,23 @@ impl EditorView {
                             md.blocks
                                 .iter()
                                 .map(|b| match &b.kind {
-                                    faber_editor::markdown::BlockKind::Heading { level, .. } =>
-                                        format!("H{level}"),
+                                    faber_editor::markdown::BlockKind::Heading {
+                                        level, ..
+                                    } => format!("H{level}"),
                                     faber_editor::markdown::BlockKind::Paragraph { .. } =>
                                         "P".into(),
-                                    faber_editor::markdown::BlockKind::CodeBlock { lang, .. } =>
-                                        format!("Code({})", lang.as_deref().unwrap_or("?")),
+                                    faber_editor::markdown::BlockKind::CodeBlock {
+                                        lang, ..
+                                    } => format!("Code({})", lang.as_deref().unwrap_or("?")),
                                     faber_editor::markdown::BlockKind::Blockquote { .. } =>
                                         "Quote".into(),
                                     faber_editor::markdown::BlockKind::List { ordered, .. } =>
                                         if *ordered { "OL" } else { "UL" }.into(),
-                                    faber_editor::markdown::BlockKind::Table { .. } => "Table".into(),
+                                    faber_editor::markdown::BlockKind::Table { .. } =>
+                                        "Table".into(),
                                     faber_editor::markdown::BlockKind::Rule => "HR".into(),
-                                    faber_editor::markdown::BlockKind::HtmlBlock { .. } => "HTML".into(),
+                                    faber_editor::markdown::BlockKind::HtmlBlock { .. } =>
+                                        "HTML".into(),
                                 })
                                 .collect::<Vec<_>>()
                                 .join(" ")
@@ -1101,10 +1105,8 @@ impl EditorView {
                     let t = cx.global::<RuntimeTheme>().clone();
                     ev.hover.anchor = ev.hover_anchor_for_offset(range.start, &t, window);
                     crate::hover_popover::rebuild_segments(&ev.hover.segments, &md, &t);
-                    ev.hover.estimated_height = crate::hover_popover::estimate_height(
-                        &ev.hover.segments.borrow(),
-                        &t,
-                    );
+                    ev.hover.estimated_height =
+                        crate::hover_popover::estimate_height(&ev.hover.segments.borrow(), &t);
                     ev.hover.content = Some(md);
                     ev.hover.symbol_range = Some(range);
                     ev.hover.closest_distance = None;
