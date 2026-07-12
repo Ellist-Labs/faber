@@ -120,6 +120,7 @@ actions!(
         InputMoveStart,
         InputMoveEnd,
         GoToDefinition,
+        FindReferences,
     ]
 );
 
@@ -357,6 +358,7 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-shift-x", ToggleCheckbox, Some("Editor && markdown")),
         // LSP navigation
         KeyBinding::new("f12", GoToDefinition, Some("Editor")),
+        KeyBinding::new("shift-f12", FindReferences, Some("Editor")),
         // Project search
         KeyBinding::new("cmd-shift-f", OpenProjectSearch, Some("Workspace")),
         // Symbol finder

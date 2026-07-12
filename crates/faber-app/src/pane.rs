@@ -6,6 +6,7 @@ use faber_core::pane_tree::PaneId;
 
 use crate::editor_view::EditorView;
 use crate::panels::diagnostics_panel::DiagnosticsPanel;
+use crate::panels::references_panel::ReferencesPanel;
 use crate::project_search_view::ProjectSearchView;
 use crate::settings_view::SettingsView;
 
@@ -18,6 +19,7 @@ pub(crate) enum TabKind {
     Settings,
     ProjectSearch,
     Problems,
+    References,
 }
 
 /// Type-erased tab content: renderable view + focus handle + title closure.
@@ -86,6 +88,17 @@ impl TabItem {
             title_fn: Box::new(|_cx| (rust_i18n::t!("tab.problems").to_string(), false)),
         }
     }
+
+    pub(crate) fn from_references(entity: Entity<ReferencesPanel>, cx: &App) -> Self {
+        let focus = entity.read(cx).focus_handle.clone();
+        let view = AnyView::from(entity);
+        TabItem {
+            focus_handle: focus,
+            view,
+            kind: TabKind::References,
+            title_fn: Box::new(|_cx| (rust_i18n::t!("tab.references").to_string(), false)),
+        }
+    }
 }
 
 pub(crate) struct TabMenu {
@@ -99,6 +112,7 @@ pub struct Tab {
     pub(crate) editor: Option<Entity<EditorView>>,
     pub(crate) project_search: Option<Entity<ProjectSearchView>>,
     pub(crate) problems: Option<Entity<DiagnosticsPanel>>,
+    pub(crate) references: Option<Entity<ReferencesPanel>>,
 }
 
 impl Tab {
@@ -150,6 +164,7 @@ impl Pane {
             editor: Some(entity),
             project_search: None,
             problems: None,
+            references: None,
         });
         self.next_tab_id += 1;
         self.active = Some(self.tabs.len() - 1);
@@ -165,6 +180,7 @@ impl Pane {
             editor: None,
             project_search: None,
             problems: None,
+            references: None,
         });
         self.next_tab_id += 1;
         self.active = Some(self.tabs.len() - 1);
@@ -184,6 +200,7 @@ impl Pane {
             editor: None,
             project_search: Some(entity),
             problems: None,
+            references: None,
         });
         self.next_tab_id += 1;
         self.active = Some(self.tabs.len() - 1);
@@ -203,6 +220,27 @@ impl Pane {
             editor: None,
             project_search: None,
             problems: Some(entity),
+            references: None,
+        });
+        self.next_tab_id += 1;
+        self.active = Some(self.tabs.len() - 1);
+        id
+    }
+
+    pub(crate) fn push_references_tab(
+        &mut self,
+        entity: Entity<ReferencesPanel>,
+        cx: &App,
+    ) -> usize {
+        let id = self.next_tab_id;
+        let content = TabItem::from_references(entity.clone(), cx);
+        self.tabs.push(Tab {
+            id,
+            content,
+            editor: None,
+            project_search: None,
+            problems: None,
+            references: Some(entity),
         });
         self.next_tab_id += 1;
         self.active = Some(self.tabs.len() - 1);
@@ -304,6 +342,16 @@ impl Pane {
         self.tabs
             .iter()
             .position(|t| t.content.kind == TabKind::Problems)
+    }
+
+    pub(crate) fn find_references_tab(&self) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|t| t.content.kind == TabKind::References)
+    }
+
+    pub(crate) fn references_panel_at(&self, ix: usize) -> Option<&Entity<ReferencesPanel>> {
+        self.tabs.get(ix).and_then(|t| t.references.as_ref())
     }
 
     pub(crate) fn all_editors(&self) -> impl Iterator<Item = &Entity<EditorView>> {

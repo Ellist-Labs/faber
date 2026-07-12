@@ -54,7 +54,8 @@ const OUTLINE_BODY_H: f32 = OUTLINE_MODAL_H - OUTLINE_INPUT_ROW_H - OUTLINE_FOOT
 
 use crate::{
     Backspace, BoldSelection, CloseSearch, Copy, Cut, Delete, DeleteLine, DeleteToLineEnd,
-    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, GoToDefinition,
+    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, FindReferences,
+    GoToDefinition,
     InputMoveEnd, InputMoveLeft, InputMoveRight, InputMoveStart, ItalicSelection, MoveDocEnd,
     MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown, MovePageUp,
     MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste, ProjectRoot,
@@ -1414,6 +1415,64 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.trigger_go_to_definition(window, cx);
+    }
+
+    // ── Find References ───────────────────────────────────────────────────────
+
+    fn on_find_references(
+        &mut self,
+        _: &FindReferences,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.trigger_find_references(window, cx);
+    }
+
+    fn trigger_find_references(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mgr) = self.lsp_manager.clone() else {
+            return;
+        };
+        let path = self.doc.path.clone();
+        let uri = match url::Url::from_file_path(&path) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+        let offset = self.sel.head;
+        let encoding = mgr.position_encoding_for_uri(&uri);
+        let lsp_pos = faber_lsp::position::to_lsp_position(&self.doc.rope, offset, encoding);
+        let params_json = serde_json::json!({
+            "textDocument": { "uri": uri.as_str() },
+            "position": { "line": lsp_pos.line, "character": lsp_pos.character },
+            "context": { "includeDeclaration": true }
+        });
+        let Some(rx) = mgr.request_for_document(&uri, "textDocument/references", params_json)
+        else {
+            return;
+        };
+        cx.spawn_in(window, async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rx.recv_timeout(std::time::Duration::from_secs(5)) })
+                .await;
+            let locations = match result {
+                Ok(Ok(val)) => parse_definition_locations(&val),
+                _ => return,
+            };
+            if locations.is_empty() {
+                return;
+            }
+            log::debug!("find_references: {} location(s)", locations.len());
+            let _ = view.update_in(cx, |ev, window, cx| {
+                if let Some(ws) = ev.ws_handle.clone().and_then(|h| h.upgrade()) {
+                    window.defer(cx, move |window, cx| {
+                        ws.update(cx, |ws, cx| {
+                            ws.open_references(locations, window, cx);
+                        });
+                    });
+                }
+            });
+        })
+        .detach();
     }
 
     fn trigger_go_to_definition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3670,6 +3729,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_italic_selection))
             .on_action(cx.listener(Self::on_toggle_checkbox))
             .on_action(cx.listener(Self::on_go_to_definition))
+            .on_action(cx.listener(Self::on_find_references))
             .on_modifiers_changed(cx.listener(
                 |view, ev: &gpui::ModifiersChangedEvent, window, cx| {
                     let cmd = ev.modifiers.platform;
