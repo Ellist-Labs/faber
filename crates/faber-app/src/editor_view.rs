@@ -29,7 +29,8 @@ use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
 use crate::ui::scrollbar::{start_drag, update_drag};
 use crate::ui::{
-    IconName, ScrollbarDrag, modal_backdrop, modal_container, modal_footer, render_scrollbar,
+    IconName, ScrollbarDrag, glass_surface, modal_backdrop, modal_container, modal_footer,
+    render_scrollbar,
 };
 use rust_i18n::t;
 
@@ -639,7 +640,7 @@ impl EditorView {
         } else {
             // Pre-first-paint fallback (nothing visible yet, click is inert).
             let gutter_px = if show_line_numbers {
-                (GUTTER_COLS + 2.0) * t.char_w_code
+                (GUTTER_COLS * t.char_w_code).max(54.0)
             } else {
                 0.0
             };
@@ -2550,19 +2551,27 @@ impl EditorView {
 
         let row = make_row(hl_this_line, is_flash, cursor_on_line, t);
         let row = if show_line_numbers {
+            let gutter_w = (GUTTER_COLS * t.char_w_code).max(54.0);
             row.child(
                 div()
                     .flex_shrink_0()
-                    .w(px(GUTTER_COLS * t.char_w_code))
+                    .w(px(gutter_w))
+                    .h_full()
+                    .bg(t.bg_sunken)
+                    .border_r_1()
+                    .border_color(t.border)
+                    .pr(px(13.))
+                    .flex()
+                    .items_center()
+                    .justify_end()
                     .text_size(px(t.font_size_gutter))
                     .text_color(if cursor_on_line {
                         t.gutter_active
                     } else {
                         t.gutter
                     })
-                    .child(format!("{:>4}", line_idx + 1)),
+                    .child(format!("{}", line_idx + 1)),
             )
-            .child(div().flex_shrink_0().w(px(2.0 * t.char_w_code)))
         } else {
             row
         };
@@ -2652,10 +2661,11 @@ impl EditorView {
         let show_replace = self.show_replace;
 
         // Theme values captured by value for closures.
-        let hover_bg = t.line_highlight;
+        let hover_bg = t.bg_raised;
         let sep_color = t.separator;
         let radius = t.radius_sm;
         let radius_md = t.radius_md;
+        let border_focus = t.border_focus;
 
         let cursor_h = t.font_size_code + 2.;
 
@@ -2760,7 +2770,7 @@ impl EditorView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(t.gutter)
+                    .text_color(t.text_muted)
                     .text_size(px(t.font_size_caption))
                     .child(match_info),
             )
@@ -2806,15 +2816,13 @@ impl EditorView {
                 .flex_1()
                 .min_w(px(80.))
                 .h(px(24.))
-                .bg(if focused {
-                    t.line_highlight
-                } else {
-                    t.bg_sunken
-                })
+                .bg(t.bg_sunken)
                 .px_2()
                 .flex()
                 .items_center()
-                .rounded(px(radius))
+                .rounded(px(radius_md))
+                .border_1()
+                .border_color(if focused { border_focus } else { t.bg_sunken })
                 .font_family(t.mono_family.clone())
                 .text_size(px(t.font_size_code))
         };
@@ -2827,7 +2835,7 @@ impl EditorView {
             .flex()
             .items_center()
             .rounded(px(radius_md))
-            .bg(t.bg_overlay)
+            .bg(t.bg_raised)
             .text_color(t.text)
             .text_size(px(t.font_size_body))
             .font_family(t.ui_family.clone())
@@ -2847,7 +2855,7 @@ impl EditorView {
             .flex()
             .items_center()
             .rounded(px(radius_md))
-            .bg(t.bg_overlay)
+            .bg(t.bg_raised)
             .text_color(t.text)
             .text_size(px(t.font_size_body))
             .font_family(t.ui_family.clone())
@@ -3054,8 +3062,8 @@ impl EditorView {
 
         div()
             .border_b_1()
-            .border_color(t.separator)
-            .bg(t.bg)
+            .border_color(t.border)
+            .bg(t.bg_elevated)
             .key_context("SearchBar")
             .track_focus(&self.search_handle)
             .child(search_row)
@@ -3856,7 +3864,7 @@ impl EditorView {
                     el.font_family(t.ui_family.clone()).pb(px(2.))
                 })
                 .text_size(px(seg.text_size))
-                .text_color(t.text)
+                .text_color(if is_code { t.text } else { t.text_muted })
                 .child(
                     canvas(
                         |_, _, _| (),
@@ -3892,7 +3900,7 @@ impl EditorView {
                             .w_full()
                             .mt(px(gap))
                             .bg(t.bg_sunken)
-                            .rounded(px(t.radius_sm))
+                            .rounded(px(t.radius_xs))
                             .px(px(t.sp3))
                             .py(px(t.sp2))
                             .children(std::mem::take(group))
@@ -3989,13 +3997,8 @@ impl EditorView {
                     Bucket::Plain => {
                         let seg = &mut segments[ix];
                         if seg.kind == SegmentKind::Rule {
-                            content_children.push(
-                                div()
-                                    .h(px(1.))
-                                    .my(px(6.))
-                                    .bg(t.separator)
-                                    .into_any_element(),
-                            );
+                            content_children
+                                .push(div().h(px(1.)).my(px(6.)).bg(t.border).into_any_element());
                         } else {
                             content_children.push(seg_wrapper(seg, sel_range, None, t));
                         }
@@ -4083,15 +4086,11 @@ impl EditorView {
             )
         };
 
-        let popover = div()
+        let popover = glass_surface(t)
             .id("hover-popover")
             .occlude()
             .cursor(CursorStyle::IBeam)
-            .bg(t.bg_elevated)
-            .border_1()
-            .border_color(t.border)
-            .rounded(px(t.radius_md))
-            .shadow_lg()
+            .rounded(px(t.radius_lg))
             .on_mouse_move(cx.listener(|ev, e: &MouseMoveEvent, _, cx| {
                 // Inside the popover: never hide; extend an active selection.
                 ev.last_mouse_pos = Some(e.position);
@@ -4186,7 +4185,8 @@ impl EditorView {
                             .max_w(px(HOVER_MAX_W))
                             .max_h(px(HOVER_MAX_H))
                             .track_scroll(&scroll)
-                            .p(px(10.))
+                            .py(px(13.))
+                            .px(px(15.))
                             .children(content_children),
                     )
                     .child(render_scrollbar(
@@ -4403,15 +4403,18 @@ impl EditorView {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .px(px(12. + indent))
-                        .py(px(6.))
+                        .mx(px(5.))
+                        .my(px(1.))
+                        .px(px(8. + indent))
+                        .h(px(34.))
                         .gap_2()
+                        .rounded(px(t.radius_md))
                         .font_family(t.ui_family.clone())
-                        .text_size(px(t.font_size_caption))
+                        .text_size(px(13.))
                         .text_color(t.text)
-                        .when(is_hovered, |el| el.bg(t.line_highlight))
+                        .when(is_hovered, |el| el.bg(t.accent_muted))
                         .cursor_pointer()
-                        .hover(|el| el.bg(t_clone.line_highlight))
+                        .hover(|el| el.bg(t_clone.bg_raised))
                         .on_mouse_move(cx.listener(move |view, _, _, cx| {
                             if view.outline_hover != Some(list_idx) {
                                 view.outline_hover = Some(list_idx);
@@ -4435,7 +4438,7 @@ impl EditorView {
                             el.child(
                                 div()
                                     .text_color(t.text_muted)
-                                    .text_size(px(t.font_size_caption - 1.))
+                                    .text_size(px(11.))
                                     .child(ctx)
                                     .flex_shrink_0(),
                             )

@@ -75,6 +75,7 @@ impl Button {
 
     /// Left-align content and stretch to the parent's full width. Used for
     /// list-style rows (icon + label + trailing hint).
+    #[allow(dead_code)] // reserved for list-style rows; welcome view now hand-rolls its rows
     pub fn full_width(mut self) -> Self {
         self.full_width = true;
         self
@@ -108,7 +109,7 @@ impl RenderOnce for Button {
             (false, ButtonVariant::Primary) => {
                 (theme.accent, theme.accent_hover, theme.text_on_accent)
             }
-            (false, ButtonVariant::Ghost) => (theme.bg_overlay, theme.line_highlight, theme.text),
+            (false, ButtonVariant::Ghost) => (theme.bg_raised, theme.line_highlight, theme.text),
             (false, ButtonVariant::List) => {
                 (gpui::transparent_black(), theme.line_highlight, theme.text)
             }

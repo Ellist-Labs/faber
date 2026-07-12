@@ -45,6 +45,42 @@ pub fn icon_for_file(name: &str) -> &'static str {
     DEFAULT_FILE
 }
 
+/// Language brand color for the 7px tab/tree dot (spec §5.2), keyed by file
+/// extension. `None` ⇒ caller renders the dot in `text_muted`.
+/// Sorted for binary search.
+const LANGUAGE_DOT_COLORS: &[(&str, u32)] = &[
+    ("c", 0x555555FF),
+    ("cpp", 0xF34B7DFF),
+    ("css", 0x663399FF),
+    ("go", 0x00ADD8FF),
+    ("html", 0xE34C26FF),
+    ("js", 0xF1E05AFF),
+    ("json", 0x8A9A5BFF),
+    ("jsx", 0xF1E05AFF),
+    ("kt", 0xA97BFFFF),
+    ("md", 0x519ABAFF),
+    ("py", 0x3572A5FF),
+    ("rb", 0x701516FF),
+    ("rs", 0xDEA584FF),
+    ("swift", 0xF05138FF),
+    ("toml", 0x9C4221FF),
+    ("ts", 0x3178C6FF),
+    ("tsx", 0x3178C6FF),
+    ("yaml", 0xCB171EFF),
+    ("yml", 0xCB171EFF),
+];
+
+pub fn language_dot_color(file_name: &str) -> Option<u32> {
+    let mut buf = [0u8; LOWER_BUF];
+    let lower = lowered(file_name, &mut buf)?;
+    let ext = lower.rsplit('.').next()?;
+    LANGUAGE_DOT_COLORS
+        .binary_search_by(|(k, _)| (*k).cmp(ext))
+        .ok()
+        .map(|ix| LANGUAGE_DOT_COLORS[ix].1)
+}
+
+#[allow(dead_code)] // tree rows now use language dots; kept for future folder-icon use
 pub fn icon_for_folder(name: &str, open: bool) -> &'static str {
     let mut buf = [0u8; LOWER_BUF];
     if let Some(lower) = lowered(name, &mut buf)
@@ -69,6 +105,14 @@ mod tests {
         assert!(FILE_NAMES.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(FILE_EXTENSIONS.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(FOLDER_NAMES.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(LANGUAGE_DOT_COLORS.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    #[test]
+    fn language_dot_lookup() {
+        assert_eq!(language_dot_color("main.rs"), Some(0xDEA584FF));
+        assert_eq!(language_dot_color("App.swift"), Some(0xF05138FF));
+        assert_eq!(language_dot_color("mystery.xyz"), None);
     }
 
     #[test]

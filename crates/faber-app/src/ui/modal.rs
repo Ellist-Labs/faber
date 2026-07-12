@@ -4,8 +4,8 @@
 //! stay consistent across the whole app.
 
 use gpui::{
-    AnyElement, Div, ElementId, Hsla, MouseButton, SharedString, Stateful, div, hsla, prelude::*,
-    px,
+    AnyElement, BoxShadow, Div, ElementId, Hsla, MouseButton, SharedString, Stateful, div, hsla,
+    point, prelude::*, px, rgba,
 };
 
 use crate::theme::RuntimeTheme;
@@ -14,6 +14,44 @@ use crate::ui::{KeyHint, h_flex};
 /// Scrim color sourced from the theme — eliminates inline `hsla(0,0,0,…)` literals.
 pub fn scrim_color(t: &RuntimeTheme) -> Hsla {
     hsla(0., 0., 0., t.scrim)
+}
+
+/// Glass material (spec §3.2): translucent black surface, `border_focus` hairline,
+/// layered drop shadows. Border radius is applied by the caller (per-surface, §3.3).
+pub fn glass_surface(t: &RuntimeTheme) -> Div {
+    div()
+        .bg(t.bg_overlay)
+        .border_1()
+        .border_color(t.border_focus)
+        .shadow(vec![
+            BoxShadow {
+                color: rgba(0x000000A6).into(),
+                blur_radius: px(40.),
+                spread_radius: px(0.),
+                offset: point(px(0.), px(10.)),
+            },
+            BoxShadow {
+                color: rgba(0x00000080).into(),
+                blur_radius: px(16.),
+                spread_radius: px(0.),
+                offset: point(px(0.), px(4.)),
+            },
+        ])
+}
+
+/// Backdrop with NO scrim tint (spec §5.5 — the palette sits directly over the
+/// editor; glass provides the separation). Anchors its child near the top with
+/// `pad_top` pixels of offset. Same dismiss wiring contract as `modal_backdrop`.
+pub fn modal_backdrop_clear(id: impl Into<ElementId>, pad_top: f32) -> Stateful<Div> {
+    div()
+        .id(id)
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .flex_col()
+        .items_center()
+        .pt(px(pad_top))
 }
 
 /// Full-window backdrop that **centers its child both horizontally and vertically**
@@ -40,15 +78,11 @@ pub fn modal_backdrop(id: impl Into<ElementId>, t: &RuntimeTheme) -> Stateful<Di
 /// The caller must add `.key_context`, `.track_focus`, `.on_action`, `.on_key_down`,
 /// size constraints (`w`, `max_h`, …), and `.child(…)` for content sections.
 pub fn modal_container(id: impl Into<ElementId>, t: &RuntimeTheme) -> Stateful<Div> {
-    div()
+    glass_surface(t)
         .id(id)
         .occlude()
         .relative()
-        .bg(t.bg_elevated)
-        .rounded_lg()
-        .border_1()
-        .border_color(t.border)
-        .shadow_lg()
+        .rounded(px(t.radius_xl))
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -59,14 +93,10 @@ pub fn modal_container(id: impl Into<ElementId>, t: &RuntimeTheme) -> Stateful<D
 /// Intended for use inside `deferred(anchored().position(pos).snap_to_window().child(…))`.
 /// Uses `bg_elevated` (not `bg_overlay`) for visual consistency with centered modals.
 pub fn popover_container(id: impl Into<ElementId>, t: &RuntimeTheme) -> Stateful<Div> {
-    div()
+    glass_surface(t)
         .id(id)
         .occlude()
-        .bg(t.bg_elevated)
-        .border_1()
-        .border_color(t.border)
-        .rounded(px(t.radius_md))
-        .shadow_lg()
+        .rounded(px(t.radius_lg))
         .overflow_hidden()
 }
 

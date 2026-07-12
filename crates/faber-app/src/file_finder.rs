@@ -20,7 +20,8 @@ use crate::input_helpers::{
 use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
 use crate::ui::{
-    IconName, h_flex, modal_backdrop, modal_container, modal_footer, render_matched_text, v_flex,
+    IconName, h_flex, modal_backdrop_clear, modal_container, modal_footer, popover_container,
+    render_matched_text, v_flex,
 };
 use crate::workspace::Workspace;
 use crate::{
@@ -35,8 +36,7 @@ const PREVIEW_DEBOUNCE_MS: u64 = 100;
 
 // ── modal geometry ─────────────────────────────────────────────────────────────
 const INPUT_ROW_H: f32 = 45.;
-const FOOTER_H: f32 = 30.; // py(6)*2 + KeyHint 18px — used for dropdown top calculation
-const MODAL_W_COLLAPSED: f32 = 640.;
+const MODAL_W_COLLAPSED: f32 = 540.;
 const MODAL_BODY_H_COLLAPSED: f32 = 440.;
 const MODAL_W_SIDE: f32 = 1060.;
 const MODAL_BODY_H_SIDE: f32 = 480.;
@@ -555,9 +555,9 @@ impl FileFinderView {
         let is_empty = self.query.is_empty();
         let caret_h = t.font_size_code + 4.;
         let radius = t.radius_sm;
-        let hover_bg = t.line_highlight;
+        // Spec §5.5: chip hover = white 6%, active = accent bg + white text
+        let hover_bg = gpui::rgba(0xFFFFFF0F);
 
-        // Same chip pattern as the search bars.
         let chip = |id: &'static str, label: &'static str, active: bool, t: &RuntimeTheme| {
             div()
                 .id(id)
@@ -577,7 +577,9 @@ impl FileFinderView {
                     let accent_hover = t.accent_hover;
                     move |el| el.bg(accent).hover(move |s| s.bg(accent_hover))
                 })
-                .when(!active, move |el| el.hover(move |s| s.bg(hover_bg)))
+                .when(!active, move |el| {
+                    el.hover(move |s| s.bg(gpui::Hsla::from(hover_bg)))
+                })
                 .child(label)
         };
 
@@ -658,7 +660,7 @@ impl FileFinderView {
                 move |el| el.bg(accent).hover(move |s| s.bg(accent_hover))
             })
             .when(!self.include_ignored, move |el| {
-                el.hover(move |s| s.bg(hover_bg))
+                el.hover(move |s| s.bg(gpui::Hsla::from(hover_bg)))
             })
             .child(
                 svg()
@@ -677,13 +679,13 @@ impl FileFinderView {
 
         h_flex()
             .id("ff-input-row")
-            .px_4()
-            .py(px(10.))
+            .px(px(15.))
+            .py(px(13.))
             .gap_2()
             .border_b_1()
             .border_color(t.separator)
             .font_family(t.mono_family.clone())
-            .text_size(px(t.font_size_code))
+            .text_size(px(14.))
             .text_color(t.text)
             .child(
                 svg()
@@ -729,7 +731,7 @@ impl FileFinderView {
             Some(ext) => format!("*.{ext}"),
             None => t!("file_finder.mask_all").to_string(),
         };
-        let hover_bg = t.line_highlight;
+        let hover_bg = gpui::rgba(0xFFFFFF0F);
         h_flex()
             .id("ff-mask")
             .px_2()
@@ -746,7 +748,7 @@ impl FileFinderView {
                 move |el| el.bg(accent).hover(move |s| s.bg(accent_hover))
             })
             .when(self.mask.is_none(), move |el| {
-                el.hover(move |s| s.bg(hover_bg))
+                el.hover(move |s| s.bg(gpui::Hsla::from(hover_bg)))
             })
             .text_color(if self.mask.is_some() {
                 t.text_on_accent
@@ -784,7 +786,7 @@ impl FileFinderView {
         let mut items: Vec<AnyElement> = Vec::new();
 
         let row = |id: usize, label: String, count: Option<u32>, active: bool, t: &RuntimeTheme| {
-            let hover_bg = t.line_highlight;
+            let hover_bg = gpui::rgba(0xFFFFFF0F);
             h_flex()
                 .id(("ff-mask-item", id))
                 .px_3()
@@ -794,7 +796,7 @@ impl FileFinderView {
                 .font_family(t.mono_family.clone())
                 .text_size(px(t.font_size_caption))
                 .text_color(if active { t.accent } else { t.text })
-                .hover(move |s| s.bg(hover_bg))
+                .hover(move |s| s.bg(gpui::Hsla::from(hover_bg)))
                 .child(div().flex_1().child(label))
                 .when_some(count, |el, n| {
                     el.child(div().text_color(t.text_subtle).child(format!("{n}")))
@@ -830,16 +832,10 @@ impl FileFinderView {
             );
         }
 
-        div()
-            .id("ff-mask-dropdown")
+        popover_container("ff-mask-dropdown", t)
             .w(px(200.))
             .max_h(px(320.))
             .overflow_y_scroll()
-            .bg(t.bg_elevated)
-            .border_1()
-            .border_color(t.border)
-            .rounded(px(t.radius_sm))
-            .shadow_lg()
             .flex()
             .flex_col()
             .children(items)
@@ -886,26 +882,36 @@ impl FileFinderView {
         }
 
         let selected = self.selected;
+        // Spec §5.5: rows ~34px, mx 5, rounded 8, accent_muted selected, white 6% hover
+        let hover_bg_row = gpui::rgba(0xFFFFFF0F);
         let entries: Vec<AnyElement> = self
             .rows
             .iter()
             .enumerate()
             .map(|(ix, row)| {
                 let is_selected = ix == selected;
-                let hover_bg = t.line_highlight;
+                let accent_muted = t.accent_muted;
                 div()
                     .id(("ff-row", ix))
                     .flex()
                     .flex_row()
                     .items_center()
-                    .px_3()
-                    .py(px(5.))
+                    .mx(px(5.))
+                    .px_2()
+                    .py(px(7.))
                     .gap_2()
+                    .rounded(px(t.radius_md))
                     .font_family(t.ui_family.clone())
                     .text_size(px(t.font_size_caption))
-                    .when(is_selected, |el| el.bg(t.line_highlight))
+                    .when(is_selected, |el| el.bg(accent_muted))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hover_bg))
+                    .hover(move |el| {
+                        if is_selected {
+                            el
+                        } else {
+                            el.bg(gpui::Hsla::from(hover_bg_row))
+                        }
+                    })
                     .on_mouse_move(cx.listener(move |view, _, _, cx| view.set_selection(ix, cx)))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -930,6 +936,7 @@ impl FileFinderView {
             .id("ff-list")
             .flex_col()
             .overflow_y_scroll()
+            .py(px(4.))
             .track_scroll(&self.list_scroll);
 
         if fill_h {
@@ -1213,14 +1220,12 @@ impl Render for FileFinderView {
             );
 
         // ── mask dropdown (outside modal to escape overflow_hidden) ────────────
-        // With centered layout the modal top = (vh - total_modal_h) / 2.
+        // With top-anchored layout the modal top = PAD_TOP.
+        const PAD_TOP: f32 = 132.;
         let vw = window.viewport_size().width;
-        let vh = window.viewport_size().height;
-        let total_modal_h = INPUT_ROW_H + final_body_h + FOOTER_H;
-        let modal_top = (f32::from(vh) - total_modal_h) * 0.5;
-        // Modal right edge = vw/2 + final_w/2. Dropdown 200px, 12px inset from right.
+        // Modal right edge = center + half modal width. Dropdown 200px wide, 12px inset from right.
         let dropdown_left = vw / 2.0 + px(final_w / 2.0 - 212.0);
-        let dropdown_top = px(modal_top.max(0.) + INPUT_ROW_H);
+        let dropdown_top = px(PAD_TOP + INPUT_ROW_H);
 
         // ── drag cursor overlay ────────────────────────────────────────────────
         // While the user drags the divider, an invisible full-screen overlay
@@ -1230,7 +1235,7 @@ impl Render for FileFinderView {
         let drag_is_bottom = is_bottom;
 
         deferred(
-            modal_backdrop("ff-backdrop", &t)
+            modal_backdrop_clear("ff-backdrop", PAD_TOP)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, _, window, cx| view.dismiss(window, cx)),

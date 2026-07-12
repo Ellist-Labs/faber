@@ -2,13 +2,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, FocusHandle, Focusable, IntoElement, Render, SharedString,
-    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
+    App, Context, FocusHandle, Focusable, IntoElement, Render, ScrollHandle, SharedString,
+    WeakEntity, Window, div, prelude::*, px, rgba,
 };
 use rust_i18n::t;
 
 use crate::file_icons;
-use crate::panels::results_list::{FileCounts, Row, render_results_list, split_path};
+use crate::panels::results_list::{
+    FileCounts, Row, render_references_banner, render_results_list, split_path,
+};
 use crate::theme::RuntimeTheme;
 use crate::workspace::Workspace;
 
@@ -16,7 +18,9 @@ pub struct ReferencesPanel {
     pub focus_handle: FocusHandle,
     workspace: Option<WeakEntity<Workspace>>,
     rows: Vec<Row>,
-    scroll: UniformListScrollHandle,
+    scroll: ScrollHandle,
+    /// Total reference count across all files.
+    total_refs: usize,
 }
 
 impl ReferencesPanel {
@@ -25,7 +29,8 @@ impl ReferencesPanel {
             focus_handle: cx.focus_handle(),
             workspace: None,
             rows: Vec::new(),
-            scroll: UniformListScrollHandle::new(),
+            scroll: ScrollHandle::new(),
+            total_refs: 0,
         }
     }
 
@@ -39,6 +44,7 @@ impl ReferencesPanel {
         root: Option<&std::path::Path>,
     ) {
         self.rows.clear();
+        self.total_refs = locations.len();
 
         let mut groups: Vec<(PathBuf, Vec<(usize, usize)>)> = Vec::new();
         for (path, line, col) in locations {
@@ -106,6 +112,7 @@ impl Render for ReferencesPanel {
                 .flex()
                 .flex_col()
                 .size_full()
+                .child(render_references_banner(0))
                 .items_center()
                 .justify_center()
                 .font_family(t.ui_family.clone())
@@ -115,11 +122,26 @@ impl Render for ReferencesPanel {
                 .into_any_element();
         }
 
-        render_results_list(
-            "ref-rows",
-            self.rows.clone(),
-            self.scroll.clone(),
-            self.workspace.clone(),
-        )
+        let list_content = div()
+            .flex()
+            .flex_col()
+            .px(px(12.))
+            .pt(px(8.))
+            .pb(px(4.))
+            .child(render_results_list(
+                "ref-rows",
+                self.rows.clone(),
+                self.scroll.clone(),
+                self.workspace.clone(),
+            ));
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgba(0x000000FFu32))
+            .child(render_references_banner(self.total_refs))
+            .child(list_content)
+            .into_any_element()
     }
 }

@@ -1,5 +1,5 @@
 use faber_theme::Theme as ThemeDef;
-use gpui::{App, Global, Hsla, rgb};
+use gpui::{App, Global, Hsla, rgba};
 
 /// GPU-ready runtime theme — all fields are `Copy` `Hsla`.
 /// Cloned once per frame at the top of `render()`, then passed by ref to helpers.
@@ -9,6 +9,7 @@ pub struct RuntimeTheme {
     // Surface
     pub bg: Hsla,
     pub bg_elevated: Hsla,
+    pub bg_raised: Hsla,
     pub bg_overlay: Hsla,
     pub bg_sunken: Hsla,
     // Text
@@ -56,6 +57,9 @@ pub struct RuntimeTheme {
     pub syntax_namespace: Hsla,
     pub syntax_tag: Hsla,
     pub syntax_label: Hsla,
+    // Syntax font styles (spec §2.7 — italic keyword/comment)
+    pub syntax_keyword_italic: bool,
+    pub syntax_comment_italic: bool,
     // Typography (pixel sizes; font family resolved by consumers)
     pub ui_family: SharedString,
     pub mono_family: SharedString,
@@ -77,18 +81,20 @@ pub struct RuntimeTheme {
     pub sp7: f32,
     pub sp8: f32,
     // Radii
+    pub radius_xs: f32,
     pub radius_sm: f32,
     pub radius_md: f32,
     pub radius_lg: f32,
+    pub radius_xl: f32,
     // Scrim / overlay opacity
     pub scrim: f32, // default 0.35
     // Layout sizes (px) — named for theming, avoids magic literals in views
-    pub tab_h: f32,          // 30.0
-    pub titlebar_h: f32,     // 36.0
-    pub activity_bar_w: f32, // 44.0
+    pub tab_h: f32,          // 36.0
+    pub titlebar_h: f32,     // 38.0
     pub sidebar_w: f32,      // 240.0
-    pub tree_row_h: f32,     // 24.0
-    pub bottom_panel_h: f32, // 180.0
+    pub tree_row_h: f32,     // 25.0
+    pub bottom_panel_h: f32, // 168.0
+    pub status_bar_h: f32,   // 24.0
     pub right_panel_w: f32,  // 240.0
     pub panel_header_h: f32, // 30.0
 }
@@ -96,7 +102,7 @@ pub struct RuntimeTheme {
 impl Global for RuntimeTheme {}
 
 fn h(hex: u32) -> Hsla {
-    rgb(hex).into()
+    rgba(hex).into()
 }
 
 impl From<ThemeDef> for RuntimeTheme {
@@ -117,6 +123,7 @@ impl RuntimeTheme {
         RuntimeTheme {
             bg: h(c.bg),
             bg_elevated: h(c.bg_elevated),
+            bg_raised: h(c.bg_raised),
             bg_overlay: h(c.bg_overlay),
             bg_sunken: h(c.bg_sunken),
             text: h(c.text),
@@ -158,6 +165,8 @@ impl RuntimeTheme {
             syntax_namespace: h(s.namespace.color),
             syntax_tag: h(s.tag.color),
             syntax_label: h(s.label.color),
+            syntax_keyword_italic: s.keyword.italic,
+            syntax_comment_italic: s.comment.italic,
             ui_family: ty.ui_family.clone().into(),
             mono_family: ty.mono_family.clone().into(),
             font_size_body: ty.body.size_px * scale,
@@ -177,16 +186,18 @@ impl RuntimeTheme {
             sp6: sp.sp6,
             sp7: sp.sp7,
             sp8: sp.sp8,
+            radius_xs: r.xs,
             radius_sm: r.sm,
             radius_md: r.md,
             radius_lg: r.lg,
+            radius_xl: r.xl,
             scrim: t.material.scrim,
-            tab_h: 30.0,
-            titlebar_h: 36.0,
-            activity_bar_w: 44.0,
+            tab_h: 36.0,
+            titlebar_h: 38.0,
             sidebar_w: 240.0,
-            tree_row_h: 24.0,
-            bottom_panel_h: 180.0,
+            tree_row_h: 25.0,
+            bottom_panel_h: 168.0,
+            status_bar_h: 24.0,
             right_panel_w: 240.0,
             panel_header_h: 30.0,
         }
