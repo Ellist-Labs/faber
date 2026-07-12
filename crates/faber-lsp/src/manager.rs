@@ -365,6 +365,10 @@ impl LspManager {
         self.update_status();
 
         // Replay didOpen for documents that were opened while this server was initializing.
+        log::info!(
+            "lsp: {server_id} replaying didOpen for {} document(s)",
+            queued.len()
+        );
         for (uri, lid, version, text) in queued {
             let params = serde_json::json!({
                 "textDocument": {
@@ -764,12 +768,13 @@ impl LspManager {
         };
         let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
         for slot in slots.values() {
-            if let ServerSlot::Running { server, lang } = slot {
-                if lang == &lang_id_str {
-                    return Some(server.transport().request(method, params));
-                }
+            if let ServerSlot::Running { server, lang } = slot
+                && lang == &lang_id_str
+            {
+                return Some(server.transport().request(method, params));
             }
         }
+        log::debug!("lsp: {method} for {lang_id_str:?} dropped — no Running server");
         None
     }
 
@@ -783,10 +788,10 @@ impl LspManager {
         };
         let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
         for slot in slots.values() {
-            if let ServerSlot::Running { server, lang } = slot {
-                if lang == &lang_id_str {
-                    return server.capabilities().position_encoding;
-                }
+            if let ServerSlot::Running { server, lang } = slot
+                && lang == &lang_id_str
+            {
+                return server.capabilities().position_encoding;
             }
         }
         PositionEncoding::Utf16
@@ -799,12 +804,17 @@ impl LspManager {
         // Collect servers while holding the slots lock (send is non-blocking — unbounded
         // crossbeam channel — so holding the lock during notify is safe).
         let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        let mut delivered = 0usize;
         for slot in slots.values() {
-            if let ServerSlot::Running { server, lang } = slot {
-                if lang == lang_id_str {
-                    server.transport().notify(method, params.clone());
-                }
+            if let ServerSlot::Running { server, lang } = slot
+                && lang == lang_id_str
+            {
+                server.transport().notify(method, params.clone());
+                delivered += 1;
             }
+        }
+        if delivered == 0 {
+            log::debug!("lsp: {method} for {lang_id_str:?} dropped — no Running server");
         }
     }
 

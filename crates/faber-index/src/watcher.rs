@@ -41,6 +41,16 @@ impl FsWatcher {
         let pending_clone = pending.clone();
         let overflow_clone = overflow.clone();
 
+        // Gitignore matcher for the root .gitignore: build artefacts (target/,
+        // node_modules/, …) churn constantly — rust-analyzer alone floods
+        // thousands of target/ events on restart — and none of them belong in
+        // the index. The scanner stays the authority for nested ignore files.
+        let gitignore = {
+            let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+            builder.add(root.join(".gitignore"));
+            builder.build().ok()
+        };
+
         let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
         let mut watcher = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
@@ -60,11 +70,16 @@ impl FsWatcher {
                         if !is_data_event {
                             continue;
                         }
-                        // Fast-path: drop .git events.
+                        // Fast-path: drop .git and gitignored events.
                         let paths: Vec<PathBuf> = event
                             .paths
                             .into_iter()
                             .filter(|p| !p.components().any(|c| c.as_os_str() == ".git"))
+                            .filter(|p| {
+                                gitignore.as_ref().is_none_or(|gi| {
+                                    !gi.matched_path_or_any_parents(p, p.is_dir()).is_ignore()
+                                })
+                            })
                             .collect();
                         if paths.is_empty() {
                             continue;

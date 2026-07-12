@@ -333,8 +333,37 @@ impl IndexEngine {
             &self.registry,
         )?;
 
+        // A Paths scan sees only the requested files — the store's other rows
+        // are still live and MUST survive (pruning against a partial view used
+        // to wipe the whole files index on any watcher event / save).
+        let complete_view = !matches!(scope, ScanScope::Paths(_));
+
+        // Deletions under a Paths scan: requested paths that vanished from disk
+        // lose their rows in every module, so removals propagate immediately.
+        if let ScanScope::Paths(paths) = &scope {
+            let present: std::collections::BTreeSet<&[u8]> =
+                scan.all_meta.iter().map(|m| m.rel_path.as_ref()).collect();
+            for p in paths {
+                let rel = if p.is_absolute() {
+                    match p.strip_prefix(&self.root) {
+                        Ok(r) => r.to_path_buf(),
+                        Err(_) => continue,
+                    }
+                } else {
+                    p.clone()
+                };
+                let key = rel.as_os_str().as_encoded_bytes().to_vec();
+                if !present.contains(key.as_slice()) {
+                    log::debug!("index: dropping deleted file {rel:?}");
+                    for m in modules.iter() {
+                        let _ = self.store.delete_file(m.name, &key);
+                    }
+                }
+            }
+        }
+
         // META-only modules: index inline from all_meta and publish.
-        self.run_meta_modules(&modules, &scan)?;
+        self.run_meta_modules(&modules, &scan, complete_view)?;
 
         // Content modules: pipeline the dirty set.
         let files_indexed = if !scan.dirty.is_empty() && !content_names.is_empty() {
@@ -355,7 +384,15 @@ impl IndexEngine {
     }
 
     /// Index every META-only module inline and publish its snapshot.
-    fn run_meta_modules(&self, modules: &[RegisteredModule], scan: &ScanResult) -> Result<()> {
+    ///
+    /// `complete_view` is true only for Walk/Verify scans, where `all_meta` is
+    /// the full live file set — the precondition for pruning missing rows.
+    fn run_meta_modules(
+        &self,
+        modules: &[RegisteredModule],
+        scan: &ScanResult,
+        complete_view: bool,
+    ) -> Result<()> {
         for m in modules.iter() {
             let Some(index_meta) = &m.index_meta else {
                 continue;
@@ -376,8 +413,10 @@ impl IndexEngine {
                 };
                 batch.push((meta.rel_path.to_vec(), stamp, kvs));
             }
-            // Reconcile deletions: drop stamps for files no longer present.
-            self.prune_missing(m.name, &scan.all_meta)?;
+            // Reconcile deletions — ONLY when the scan saw the whole tree.
+            if complete_view {
+                self.prune_missing(m.name, &scan.all_meta)?;
+            }
             self.store.write_batch(m.name, &batch, true)?;
 
             let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -607,6 +646,40 @@ mod tests {
                     .iter()
                     .any(|m| snap.entries[m.entry_ix as usize].rel_path == "src/main.rs")
             );
+        });
+    }
+
+    #[test]
+    fn paths_scope_run_preserves_files_snapshot() {
+        use std::collections::BTreeSet;
+        with_project(|root| {
+            write(root, "a.rs", b"fn a() {}");
+            write(root, "b.rs", b"fn b() {}");
+
+            let registry = Arc::new(LanguageRegistry::with_defaults());
+            let mut engine = IndexEngine::new(root.to_path_buf(), registry).unwrap();
+            let files = engine.register(FilesModule);
+            let engine = Arc::new(engine);
+
+            // Full walk seeds the snapshot with both files.
+            engine.run_once(ScanScope::Walk).unwrap();
+            assert_eq!(files.load().unwrap().entries.len(), 2);
+
+            // Regression: a targeted rescan of ONE file must not prune the
+            // other rows (it used to wipe the finder on every watcher event).
+            engine
+                .run_once(ScanScope::Paths(BTreeSet::from([root.join("a.rs")])))
+                .unwrap();
+            assert_eq!(files.load().unwrap().entries.len(), 2);
+
+            // A deleted file rescanned by path drops exactly its own entry.
+            std::fs::remove_file(root.join("a.rs")).unwrap();
+            engine
+                .run_once(ScanScope::Paths(BTreeSet::from([root.join("a.rs")])))
+                .unwrap();
+            let snap = files.load().unwrap();
+            assert_eq!(snap.entries.len(), 1);
+            assert_eq!(snap.entries[0].rel_path, "b.rs");
         });
     }
 

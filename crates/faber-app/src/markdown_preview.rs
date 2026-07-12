@@ -1,17 +1,18 @@
 use std::{path::PathBuf, sync::Arc};
 
 use faber_editor::{
-    LanguageRegistry, SyntaxToken,
+    LanguageRegistry,
     highlight::HighlightSpan,
     markdown::{Block, BlockKind, InlineRun, ListItem, MarkdownDoc},
 };
 use gpui::{
-    AnyElement, App, Context, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton,
-    MouseMoveEvent, Render, ScrollHandle, SharedString, StrikethroughStyle, Styled, TextRun,
-    UnderlineStyle, Window, div, img, prelude::*, px,
+    AnyElement, App, Context, Font, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement,
+    MouseButton, MouseMoveEvent, Render, ScrollHandle, SharedString, StrikethroughStyle, Styled,
+    StyledText, TextRun, UnderlineStyle, Window, div, img, prelude::*, px,
 };
 use ropey::Rope;
 
+use crate::buffer_view::token_color;
 use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
 use crate::ui::scrollbar::{start_drag, update_drag};
@@ -92,19 +93,19 @@ impl MarkdownPreviewView {
             BlockKind::Heading { level, inlines } => {
                 render_heading(*level, inlines, ix, base_dir, t, cx)
             }
-            BlockKind::Paragraph { inlines } => render_paragraph(inlines, base_dir, t, cx),
+            BlockKind::Paragraph { inlines } => render_paragraph(inlines, ix, base_dir, t, cx),
             BlockKind::CodeBlock {
                 lang,
                 text,
                 highlights,
-            } => render_code_block(lang.as_deref(), text, highlights, t),
+            } => render_code_block(lang.as_deref(), text, highlights, ix, t),
             BlockKind::Blockquote { children } => render_blockquote(children, base_dir, t, cx),
             BlockKind::List {
                 ordered,
                 start,
                 items,
             } => render_list(*ordered, *start, items, base_dir, t, cx),
-            BlockKind::Table { head, rows } => render_table(head, rows, base_dir, t, cx),
+            BlockKind::Table { head, rows } => render_table(head, rows, ix, base_dir, t, cx),
             BlockKind::Rule => div().h(px(1.)).bg(t.separator).into_any_element(),
             BlockKind::HtmlBlock { text } => div()
                 .font_family(t.mono_family.clone())
@@ -229,7 +230,7 @@ fn render_heading(
         .font_weight(FontWeight::BOLD)
         .text_color(t.text)
         .w_full()
-        .child(render_inlines(inlines, t, base_dir));
+        .child(render_inlines(inlines, block_ix, t, base_dir));
 
     if level <= 2 {
         el.border_b_1()
@@ -243,6 +244,7 @@ fn render_heading(
 
 fn render_paragraph(
     inlines: &[InlineRun],
+    block_ix: usize,
     base_dir: &std::path::Path,
     t: &RuntimeTheme,
     _cx: &mut App,
@@ -252,13 +254,14 @@ fn render_paragraph(
         .text_size(px(t.font_size_body))
         .text_color(t.text)
         .w_full()
-        .child(render_inlines(inlines, t, base_dir))
+        .child(render_inlines(inlines, block_ix, t, base_dir))
         .into_any_element()
 }
 
 /// Render inlines, handling hard breaks (split into stacked lines) and images.
 fn render_inlines(
     inlines: &[InlineRun],
+    block_ix: usize,
     t: &RuntimeTheme,
     base_dir: &std::path::Path,
 ) -> AnyElement {
@@ -268,7 +271,11 @@ fn render_inlines(
         let lines = crate::editor_logic::split_at_hard_breaks(inlines);
         let els: Vec<AnyElement> = lines
             .iter()
-            .map(|seg| render_inline_line(seg, t, base_dir))
+            .enumerate()
+            .map(|(seg_ix, seg)| {
+                let id = SharedString::from(format!("inline-{block_ix}-{seg_ix}"));
+                render_inline_line(seg, id, t, base_dir)
+            })
             .collect();
         return div()
             .flex()
@@ -277,30 +284,35 @@ fn render_inlines(
             .children(els)
             .into_any_element();
     }
-    render_inline_line(inlines, t, base_dir)
+    let id = SharedString::from(format!("inline-{block_ix}"));
+    render_inline_line(inlines, id, t, base_dir)
 }
 
 /// Render a single line of inlines (no HardBreaks), splitting on Image nodes.
 fn render_inline_line(
     inlines: &[InlineRun],
+    id: SharedString,
     t: &RuntimeTheme,
     base_dir: &std::path::Path,
 ) -> AnyElement {
     let has_image = inlines.iter().any(|i| matches!(i, InlineRun::Image { .. }));
     if !has_image {
-        return render_text_runs(inlines, t);
+        return render_text_runs(inlines, id, t);
     }
 
     // Split into text segments and image elements, put them in a flex row.
     let mut children: Vec<AnyElement> = Vec::new();
     let mut text_buf: Vec<InlineRun> = Vec::new();
+    let mut sub_ix: usize = 0;
 
     for inline in inlines {
         match inline {
-            InlineRun::Image { alt, dest } => {
+            InlineRun::Image { alt, dest, .. } => {
                 if !text_buf.is_empty() {
-                    children.push(render_text_runs(&text_buf, t));
+                    let seg_id = SharedString::from(format!("{id}-t{sub_ix}"));
+                    children.push(render_text_runs(&text_buf, seg_id, t));
                     text_buf.clear();
+                    sub_ix += 1;
                 }
                 let is_remote = dest.starts_with("http://") || dest.starts_with("https://");
                 if is_remote {
@@ -330,7 +342,8 @@ fn render_inline_line(
         }
     }
     if !text_buf.is_empty() {
-        children.push(render_text_runs(&text_buf, t));
+        let seg_id = SharedString::from(format!("{id}-t{sub_ix}"));
+        children.push(render_text_runs(&text_buf, seg_id, t));
     }
 
     div()
@@ -342,10 +355,16 @@ fn render_inline_line(
         .into_any_element()
 }
 
-/// Build a `StyledText` from a slice of text/soft-break inlines (no Image, no HardBreak).
-fn render_text_runs(inlines: &[InlineRun], t: &RuntimeTheme) -> AnyElement {
+/// Build styled text from a slice of text/soft-break inlines (no Image, no HardBreak).
+/// When http(s) links are present, wraps in `InteractiveText` so plain-clicks open the URL.
+/// `id` must be unique within the render tree (pass the block index from render_block).
+fn render_text_runs(inlines: &[InlineRun], id: SharedString, t: &RuntimeTheme) -> AnyElement {
     let mut text = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
+    // (char_range, url) for each http(s) link span
+    let mut link_ranges: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut char_pos: usize = 0;
+
     let default_font = Font {
         family: t.ui_family.clone(),
         weight: FontWeight::NORMAL,
@@ -362,17 +381,25 @@ fn render_text_runs(inlines: &[InlineRun], t: &RuntimeTheme) -> AnyElement {
                 link,
             } => {
                 let start = text.len();
+                let char_start = char_pos;
                 text.push_str(t_text);
                 let run_len = text.len() - start;
                 if run_len == 0 {
                     continue;
                 }
+                char_pos += t_text.chars().count();
                 let color = if link.is_some() { t.accent } else { t.text };
                 let underline = link.as_ref().map(|_| UnderlineStyle {
                     thickness: px(1.),
                     color: Some(t.accent),
                     wavy: false,
                 });
+                // Track http(s) links for click handling.
+                if let Some(url) = link
+                    && (url.starts_with("http://") || url.starts_with("https://"))
+                {
+                    link_ranges.push((char_start..char_pos, url.clone()));
+                }
                 let strikethrough = if style.strike {
                     Some(StrikethroughStyle {
                         thickness: px(1.),
@@ -419,6 +446,7 @@ fn render_text_runs(inlines: &[InlineRun], t: &RuntimeTheme) -> AnyElement {
                     underline: None,
                     strikethrough: None,
                 });
+                char_pos += 1;
             }
             // Image and HardBreak handled before this point — skip silently.
             _ => {}
@@ -429,8 +457,27 @@ fn render_text_runs(inlines: &[InlineRun], t: &RuntimeTheme) -> AnyElement {
         return div().into_any_element();
     }
 
-    gpui::StyledText::new(SharedString::from(text))
-        .with_runs(runs)
+    let styled = StyledText::new(SharedString::from(text)).with_runs(runs);
+
+    if link_ranges.is_empty() {
+        return styled.into_any_element();
+    }
+
+    // Wrap in InteractiveText so each http(s) link opens on plain click.
+    let urls: Vec<String> = link_ranges.iter().map(|(_, u)| u.clone()).collect();
+    let char_ranges: Vec<std::ops::Range<usize>> =
+        link_ranges.into_iter().map(|(r, _)| r).collect();
+
+    div()
+        .cursor_pointer()
+        .child(InteractiveText::new(id, styled).on_click(
+            char_ranges,
+            move |range_ix, _window, cx| {
+                if let Some(url) = urls.get(range_ix) {
+                    cx.open_url(url);
+                }
+            },
+        ))
         .into_any_element()
 }
 
@@ -438,6 +485,7 @@ fn render_code_block(
     lang: Option<&str>,
     text: &str,
     highlights: &[Vec<HighlightSpan>],
+    block_ix: usize,
     t: &RuntimeTheme,
 ) -> AnyElement {
     let lines: Vec<&str> = text.lines().collect();
@@ -461,7 +509,7 @@ fn render_code_block(
         .collect::<Vec<_>>();
 
     let code_block = div()
-        .id("code-block")
+        .id(("code-block", block_ix))
         .w_full()
         .bg(t.bg_sunken)
         .rounded(px(t.radius_md))
@@ -493,12 +541,19 @@ fn render_highlighted_line(line: &str, spans: &[HighlightSpan], t: &RuntimeTheme
     let mut byte_cursor = 0usize;
 
     for span in spans {
-        let start = (span.start_byte_col as usize).min(line.len());
+        // Clamp to the uncovered tail: overlapping/unsorted spans must never
+        // break the exact tiling StyledText::with_runs asserts on.
+        let start = (span.start_byte_col as usize)
+            .min(line.len())
+            .max(byte_cursor);
         let end = if span.end_byte_col == u32::MAX {
             line.len()
         } else {
             (span.end_byte_col as usize).min(line.len())
         };
+        if end <= byte_cursor {
+            continue;
+        }
         if start > byte_cursor {
             runs.push(plain_run(
                 start - byte_cursor,
@@ -506,11 +561,9 @@ fn render_highlighted_line(line: &str, spans: &[HighlightSpan], t: &RuntimeTheme
                 t.mono_family.clone(),
             ));
         }
-        if end > start {
-            let col = token_color(span.token, t);
-            runs.push(plain_run(end - start, col, t.mono_family.clone()));
-        }
-        byte_cursor = end.max(byte_cursor);
+        let col = token_color(span.token, t);
+        runs.push(plain_run(end - start, col, t.mono_family.clone()));
+        byte_cursor = end;
     }
     if byte_cursor < line.len() {
         runs.push(plain_run(
@@ -549,26 +602,6 @@ fn plain_run(len: usize, color: Hsla, family: SharedString) -> TextRun {
         background_color: None,
         underline: None,
         strikethrough: None,
-    }
-}
-
-fn token_color(token: SyntaxToken, t: &RuntimeTheme) -> Hsla {
-    match token {
-        SyntaxToken::Keyword => t.syntax_keyword,
-        SyntaxToken::Function => t.syntax_function,
-        SyntaxToken::Type => t.syntax_type,
-        SyntaxToken::String => t.syntax_string,
-        SyntaxToken::Number => t.syntax_number,
-        SyntaxToken::Comment => t.syntax_comment,
-        SyntaxToken::Constant => t.syntax_constant,
-        SyntaxToken::Operator => t.syntax_operator,
-        SyntaxToken::Punctuation => t.syntax_punctuation,
-        SyntaxToken::Variable => t.syntax_variable,
-        SyntaxToken::Property => t.syntax_property,
-        SyntaxToken::Attribute => t.syntax_attribute,
-        SyntaxToken::Namespace => t.syntax_namespace,
-        SyntaxToken::Tag => t.syntax_tag,
-        SyntaxToken::Label => t.syntax_label,
     }
 }
 
@@ -690,6 +723,7 @@ fn render_list(
 fn render_table(
     head: &[Vec<InlineRun>],
     rows: &[Vec<Vec<InlineRun>>],
+    block_ix: usize,
     base_dir: &std::path::Path,
     t: &RuntimeTheme,
     _cx: &mut App,
@@ -700,7 +734,8 @@ fn render_table(
         .bg(t.bg_elevated)
         .border_b_1()
         .border_color(t.separator)
-        .children(head.iter().map(|cell| {
+        .children(head.iter().enumerate().map(|(col, cell)| {
+            let id = block_ix * 10_000 + col;
             div()
                 .flex_1()
                 .min_w(px(120.))
@@ -709,18 +744,20 @@ fn render_table(
                 .font_weight(FontWeight::BOLD)
                 .text_size(px(t.font_size_body))
                 .font_family(t.ui_family.clone())
-                .child(render_inlines(cell, t, base_dir))
+                .child(render_inlines(cell, id, t, base_dir))
         }));
 
     let body_rows = rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(row_ix, row)| {
             div()
                 .flex()
                 .flex_row()
                 .border_b_1()
                 .border_color(t.separator)
-                .children(row.iter().map(|cell| {
+                .children(row.iter().enumerate().map(|(col, cell)| {
+                    let id = block_ix * 10_000 + (row_ix + 1) * 100 + col;
                     div()
                         .flex_1()
                         .min_w(px(120.))
@@ -729,7 +766,7 @@ fn render_table(
                         .text_size(px(t.font_size_body))
                         .font_family(t.ui_family.clone())
                         .text_color(t.text)
-                        .child(render_inlines(cell, t, base_dir))
+                        .child(render_inlines(cell, id, t, base_dir))
                 }))
         })
         .collect::<Vec<_>>();

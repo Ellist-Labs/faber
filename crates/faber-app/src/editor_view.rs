@@ -16,9 +16,9 @@ use faber_editor::{
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle,
     Focusable, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollStrategy, ScrollWheelEvent,
-    SharedString, TextRun, UniformListScrollHandle, Window, anchored, canvas, deferred, div, fill,
-    font, point, prelude::*, px, size, svg, uniform_list,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, ScrollStrategy,
+    ScrollWheelEvent, SharedString, TextRun, UniformListScrollHandle, Window, anchored, canvas,
+    deferred, div, fill, font, point, prelude::*, px, size, svg, uniform_list,
 };
 
 use crate::input_helpers::{
@@ -38,6 +38,12 @@ use rust_i18n::t;
 
 const GUTTER_COLS: f32 = 6.0;
 
+// ── hover popover geometry + timing ───────────────────────────────────────────
+const HOVER_DELAY_MS: u64 = 300;
+const HOVER_HIDE_DELAY_MS: u64 = 300;
+const HOVER_MAX_W: f32 = 560.;
+const HOVER_MAX_H: f32 = 320.;
+
 // ── outline overlay geometry ───────────────────────────────────────────────────
 const OUTLINE_INPUT_ROW_H: f32 = 45.;
 const OUTLINE_FOOTER_H: f32 = 30.;
@@ -48,15 +54,95 @@ const OUTLINE_BODY_H: f32 = OUTLINE_MODAL_H - OUTLINE_INPUT_ROW_H - OUTLINE_FOOT
 
 use crate::{
     Backspace, BoldSelection, CloseSearch, Copy, Cut, Delete, DeleteLine, DeleteToLineEnd,
-    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, InputMoveEnd,
-    InputMoveLeft, InputMoveRight, InputMoveStart, ItalicSelection, MoveDocEnd, MoveDocStart,
-    MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown, MovePageUp, MoveRight, MoveUp,
-    MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste, ProjectRoot, Redo, ReplaceAll,
-    ReplaceBackspace, ReplaceOne, SearchBackspace, SelectAll, SelectDocEnd, SelectDocStart,
-    SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft,
-    SelectWordRight, Tab, ToggleCheckbox, TogglePreview, ToggleReplace, ToggleSearchCase,
-    ToggleSearchRegex, ToggleSearchWholeWord, Undo,
+    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, GoToDefinition,
+    InputMoveEnd, InputMoveLeft, InputMoveRight, InputMoveStart, ItalicSelection, MoveDocEnd,
+    MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown, MovePageUp,
+    MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste, ProjectRoot,
+    Redo, ReplaceAll, ReplaceBackspace, ReplaceOne, SearchBackspace, SelectAll, SelectDocEnd,
+    SelectDocStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectRight, SelectUp,
+    SelectWordLeft, SelectWordRight, Tab, ToggleCheckbox, TogglePreview, ToggleReplace,
+    ToggleSearchCase, ToggleSearchRegex, ToggleSearchWholeWord, Undo,
 };
+
+// ── HoverState ─────────────────────────────────────────────────────────────────
+
+/// All hover-popover state consolidated in one place, mirroring Zed's HoverState.
+pub struct HoverState {
+    /// Show timer + LSP fetch task (replaces `hover_timer`).
+    pub info_task: Option<gpui::Task<()>>,
+    /// 300ms grace-period task before hiding.
+    pub hiding_task: Option<gpui::Task<()>>,
+    /// Running min distance from cursor to popover rect; used for sticky logic.
+    pub closest_distance: Option<Pixels>,
+    /// Last-painted popover bounds; captured each frame for hit-testing.
+    pub bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Parsed markdown document to render.
+    pub content: Option<Arc<faber_editor::markdown::MarkdownDoc>>,
+    /// Symbol range (char offsets) from the hover response; prevents re-fetch on micro-movement.
+    pub symbol_range: Option<std::ops::Range<usize>>,
+    /// Scroll handle for the scrollable popover body.
+    pub scroll: ScrollHandle,
+    /// Locked popover anchor (symbol start glyph), fixed at show time.
+    pub anchor: Option<crate::hover_popover::HoverAnchor>,
+    /// Cached content height (segments sum); computed once at show time, not per frame.
+    pub estimated_height: f32,
+    /// Char offset that triggered the last hover fetch.
+    pub char_offset: Option<usize>,
+    /// Flattened selectable content; rebuilt when `content` changes.
+    pub segments: crate::hover_popover::SharedSegments,
+    /// Active text selection inside the popover.
+    pub selection: Option<crate::hover_popover::HoverSelection>,
+    /// True while dragging a selection inside the popover.
+    pub selecting: bool,
+    /// Link pressed at mouse-down; opened at mouse-up on the same link.
+    pub pressed_link: Option<(usize, usize)>,
+    /// Active popover scrollbar thumb drag.
+    pub scrollbar_drag: Option<crate::ui::ScrollbarDrag>,
+    /// Repeating tick that scrolls the popover while a selection drag is past
+    /// its edge, extending the selection (Zed-style drag auto-scroll).
+    pub autoscroll_task: Option<gpui::Task<()>>,
+}
+
+impl Default for HoverState {
+    fn default() -> Self {
+        Self {
+            info_task: None,
+            hiding_task: None,
+            closest_distance: None,
+            bounds: Rc::new(Cell::new(None)),
+            content: None,
+            symbol_range: None,
+            scroll: ScrollHandle::new(),
+            anchor: None,
+            estimated_height: 0.0,
+            char_offset: None,
+            segments: Rc::new(std::cell::RefCell::new(Vec::new())),
+            selection: None,
+            selecting: false,
+            pressed_link: None,
+            scrollbar_drag: None,
+            autoscroll_task: None,
+        }
+    }
+}
+
+impl HoverState {
+    /// A non-empty selection locks the popover: only an explicit click outside
+    /// (or Escape / scroll / edit) dismisses it.
+    fn selection_locked(&self) -> bool {
+        self.selecting || self.selection.is_some_and(|s| !s.is_empty())
+    }
+}
+
+// ── HoveredLink (cmd+hover go-to-definition preview) ──────────────────────────
+
+/// Cached definition lookup for the symbol under the cmd-hovered mouse,
+/// mirroring Zed's HoveredLinkState. `locations` empty = negative cache
+/// (definitely not clickable; don't re-request until the mouse leaves range).
+pub struct HoveredLink {
+    pub symbol_range: std::ops::Range<usize>,
+    pub locations: Vec<(std::path::PathBuf, usize, usize)>,
+}
 
 // ── EditorView ─────────────────────────────────────────────────────────────────
 
@@ -142,15 +228,21 @@ pub struct EditorView {
     // LSP diagnostics — set by Workspace after LspManager is wired up.
     pub diagnostic_store: Option<std::sync::Arc<faber_lsp::diagnostics::DiagnosticStore>>,
 
-    // LSP hover
+    // LSP — set by Workspace after push_editor_tab wires the handles.
     pub lsp_manager: Option<std::sync::Arc<faber_lsp::manager::LspManager>>,
-    hover_timer: Option<gpui::Task<()>>,
-    /// Pixel Y of the last mouse-over; anchors the popover vertically.
-    hover_pixel_y: f32,
-    /// Char offset in the rope at the last mouse-over position.
-    hover_char_offset: Option<usize>,
-    /// Markdown / plain-text content from the last successful hover response.
-    pub hover_content: Option<String>,
+    pub ws_handle: Option<gpui::WeakEntity<crate::workspace::Workspace>>,
+    pub hover: HoverState,
+
+    // True while the Cmd/Super key is held; drives hand cursor on editor content.
+    pub cmd_held: bool,
+    // Cmd+hover link preview (Zed's hovered_link): definition cache for the
+    // symbol under the mouse. Hand cursor shows only when `locations` is non-empty.
+    pub hovered_link: Option<HoveredLink>,
+    link_task: Option<gpui::Task<()>>,
+    /// Offset that triggered the in-flight/last link request (dedupe).
+    link_trigger: Option<usize>,
+    /// Last mouse position over the editor, for modifier-change re-evaluation.
+    last_mouse_pos: Option<gpui::Point<Pixels>>,
 }
 
 impl EditorView {
@@ -216,10 +308,13 @@ impl EditorView {
             flash_line: None,
             diagnostic_store: None,
             lsp_manager: None,
-            hover_timer: None,
-            hover_pixel_y: 0.0,
-            hover_char_offset: None,
-            hover_content: None,
+            ws_handle: None,
+            hover: HoverState::default(),
+            cmd_held: false,
+            hovered_link: None,
+            link_task: None,
+            link_trigger: None,
+            last_mouse_pos: None,
         };
         view.rebuild_line_cache();
         if view.is_markdown() {
@@ -289,6 +384,9 @@ impl EditorView {
 
     /// Post-mutation bookkeeping — every document edit funnels through here.
     fn after_edit(&mut self, cx: &mut Context<Self>) {
+        // Document changed under the popover / link preview — both are stale.
+        self.dismiss_hover(cx);
+        self.clear_hovered_link(cx);
         self.clear_word_occ();
         self.update_matches();
         if self.is_markdown() {
@@ -561,6 +659,40 @@ impl EditorView {
         Some(self.line_starts[line] + char_col)
     }
 
+    /// Like `offset_at`, but only for positions over actual glyphs — Zed's
+    /// `PointForPosition::as_valid`. Past-EOL, gutter, and below-document
+    /// positions return None so they never trigger hover or link previews.
+    fn hover_offset_at(
+        &self,
+        p: gpui::Point<gpui::Pixels>,
+        t: &RuntimeTheme,
+        window: &mut Window,
+    ) -> Option<usize> {
+        let (anchor_line, origin_x, origin_y) = self.text_origin.get()?;
+        let px_y = f32::from(p.y);
+        let px_x = f32::from(p.x);
+        let line_f = anchor_line as f32 + ((px_y - origin_y) / t.line_height_code).floor();
+        if line_f < 0.0 {
+            return None;
+        }
+        let line = line_f as usize;
+        if line >= self.line_starts.len() {
+            return None;
+        }
+        let rel_x = px_x - origin_x;
+        if rel_x < 0.0 {
+            return None;
+        }
+        let shaped = self.shape_editor_line(line, t, window, &[]);
+        if rel_x > f32::from(shaped.width) + t.char_w_code * 0.5 {
+            return None;
+        }
+        let byte_off = shaped.closest_index_for_x(px(rel_x));
+        let line_str: &str = &self.line_cache[line];
+        let char_col = faber_editor::highlight::byte_col_to_char_col(line_str, byte_off as u32);
+        Some(self.line_starts[line] + char_col)
+    }
+
     fn on_mouse_down_editor(
         &mut self,
         ev: &MouseDownEvent,
@@ -568,11 +700,31 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        // Any click on the editor (the popover stops propagation for clicks
+        // inside itself) dismisses the hover popover, selection included.
+        self.dismiss_hover(cx);
         let t = cx.global::<RuntimeTheme>().clone();
         let show_line_numbers = cx.global::<SettingsStore>().0.line_numbers;
         let Some(offset) = self.offset_at(ev.position, &t, show_line_numbers, window) else {
             return;
         };
+
+        // Cmd+click → go-to-definition (takes precedence over selection).
+        if ev.click_count == 1 && ev.modifiers.platform && !ev.modifiers.shift {
+            self.sel = Selection::collapsed(offset, &self.doc.rope);
+            cx.notify();
+            // Use the cmd+hover cache when it already resolved this symbol.
+            if let Some(link) = &self.hovered_link
+                && link.symbol_range.contains(&offset)
+            {
+                if let Some((path, line, ch)) = link.locations.first().cloned() {
+                    self.goto_location(path, line, ch, window, cx);
+                }
+                return;
+            }
+            self.trigger_go_to_definition(window, cx);
+            return;
+        }
 
         match ev.click_count {
             2 => {
@@ -617,12 +769,42 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.last_mouse_pos = Some(ev.position);
+
+        // Keep cmd_held in sync; drives the hand cursor on editor content.
+        let cmd = ev.modifiers.platform;
+        if self.cmd_held != cmd {
+            self.cmd_held = cmd;
+            cx.notify();
+        }
+
+        // A popover scrollbar drag continues even when the pointer leaves it.
+        if let Some(drag) = self.hover.scrollbar_drag {
+            update_drag(&drag, ev, &self.hover.scroll);
+            cx.notify();
+            return;
+        }
+
+        // A selection drag that started inside the popover continues even when
+        // the pointer leaves it — extend to the nearest segment position and
+        // auto-scroll while past the popover edge.
+        if self.hover.selecting {
+            if let Some(hit) = crate::hover_popover::hit_test(&self.hover.segments, ev.position)
+                && let Some(sel) = &mut self.hover.selection
+            {
+                sel.end = hit;
+                cx.notify();
+            }
+            self.update_hover_autoscroll(ev.position, cx);
+            return;
+        }
+
         // Track position for hover when not dragging; compute offset while Window is available.
         if !ev.dragging() {
             let t = cx.global::<RuntimeTheme>().clone();
-            let show_ln = cx.global::<SettingsStore>().0.line_numbers;
-            let offset = self.offset_at(ev.position, &t, show_ln, window);
-            self.schedule_hover(ev.position, offset, cx);
+            let offset = self.hover_offset_at(ev.position, &t, window);
+            self.update_hovered_link(offset, cmd, cx);
+            self.hover_at(ev.position, offset, window, cx);
         }
 
         if !ev.dragging() || !self.mouse_selecting {
@@ -688,6 +870,18 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Finish popover scrollbar / selection drags that ended outside it.
+        if self.hover.scrollbar_drag.take().is_some() {
+            cx.notify();
+        }
+        if self.hover.selecting {
+            self.hover.selecting = false;
+            self.hover.autoscroll_task = None;
+            if self.hover.selection.is_some_and(|s| s.is_empty()) {
+                self.hover.selection = None;
+            }
+            cx.notify();
+        }
         if self.mouse_selecting {
             self.mouse_selecting = false;
             cx.notify();
@@ -695,29 +889,89 @@ impl EditorView {
     }
 
     // ── LSP hover ─────────────────────────────────────────────────────────────
+    //
+    // Mirrors Zed's hover_popover.rs `hover_at`/`show_hover`/`hide_hover`:
+    // - Valid text position: keep popover while inside the symbol range,
+    //   otherwise hide and arm a fresh show timer for the new position.
+    // - Off-text position: sticky grace — keep the popover while the mouse
+    //   approaches it; hide HOVER_HIDE_DELAY_MS after it moves away.
+    // - The popover itself stops mouse propagation, so the editor never sees
+    //   moves while the pointer is inside it.
 
-    fn schedule_hover(
+    fn hover_at(
         &mut self,
         position: gpui::Point<gpui::Pixels>,
         offset: Option<usize>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.hover_content.is_some() {
-            self.hover_content = None;
-            cx.notify();
+        // An active selection locks the popover: only click/Escape/scroll dismiss.
+        if self.hover.selection_locked() {
+            return;
         }
-        self.hover_pixel_y = f32::from(position.y);
-        self.hover_char_offset = offset;
-        self.hover_timer = Some(cx.spawn(async move |view, cx| {
+        match offset {
+            Some(off) => {
+                self.hover.hiding_task = None;
+                self.hover.closest_distance = None;
+                self.show_hover(off, window, cx);
+            }
+            None => {
+                if self.hover.content.is_none() {
+                    self.hover.info_task = None;
+                    self.hover.char_offset = None;
+                    return;
+                }
+                // Sticky: moving toward the popover keeps it; once the mouse
+                // moves away a single grace timer counts down to dismissal.
+                let getting_closer = self.is_mouse_getting_closer(position);
+                if !getting_closer && self.hover.hiding_task.is_some() {
+                    return;
+                }
+                self.hover.hiding_task = Some(cx.spawn(async move |view, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(HOVER_HIDE_DELAY_MS))
+                        .await;
+                    view.update(cx, |ev, cx| {
+                        log::debug!("hover: grace timer elapsed → dismiss");
+                        ev.dismiss_hover(cx);
+                    })
+                    .ok();
+                }));
+            }
+        }
+    }
+
+    fn show_hover(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // Still over the current popover's symbol (inclusive, like Zed's
+        // same_info_hover) — nothing to do.
+        if self.hover.content.is_some()
+            && let Some(range) = &self.hover.symbol_range
+            && offset >= range.start
+            && offset <= range.end
+        {
+            return;
+        }
+        // Same trigger position with a timer already pending — let it run.
+        if Some(offset) == self.hover.char_offset && self.hover.info_task.is_some() {
+            return;
+        }
+        // Moved to a new symbol: the old popover hides immediately (Zed parity).
+        if self.hover.content.is_some() {
+            log::debug!("hover: left symbol range → hide (offset {offset})");
+            self.dismiss_hover(cx);
+        }
+        self.hover.char_offset = Some(offset);
+        self.hover.info_task = Some(cx.spawn_in(window, async move |view, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(400))
+                .timer(Duration::from_millis(HOVER_DELAY_MS))
                 .await;
-            view.update(cx, |ev, cx| ev.trigger_hover(cx)).ok();
+            view.update_in(cx, |ev, window, cx| ev.trigger_hover(window, cx))
+                .ok();
         }));
     }
 
-    fn trigger_hover(&mut self, cx: &mut Context<Self>) {
-        let Some(offset) = self.hover_char_offset else {
+    fn trigger_hover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(offset) = self.hover.char_offset else {
             return;
         };
         let Some(mgr) = self.lsp_manager.clone() else {
@@ -729,25 +983,149 @@ impl EditorView {
             Err(_) => return,
         };
         let encoding = mgr.position_encoding_for_uri(&uri);
+        let rope = self.doc.rope.clone();
+        let registry = Arc::clone(&self.registry);
+        // Bare ``` fences in hover responses inherit the document's language.
+        let fallback_ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_string());
         let lsp_pos = faber_lsp::position::to_lsp_position(&self.doc.rope, offset, encoding);
         let params_json = serde_json::json!({
             "textDocument": { "uri": uri.as_str() },
             "position": { "line": lsp_pos.line, "character": lsp_pos.character }
         });
         let Some(rx) = mgr.request_for_document(&uri, "textDocument/hover", params_json) else {
+            log::debug!("hover: no running server for {uri} — request skipped");
             return;
         };
-        cx.spawn(async move |view, cx| {
+        log::debug!(
+            "hover: request offset={offset} pos={}:{}",
+            lsp_pos.line,
+            lsp_pos.character
+        );
+        cx.spawn_in(window, async move |view, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { rx.recv_timeout(std::time::Duration::from_secs(5)) })
                 .await;
-            let content = match result {
-                Ok(Ok(val)) => faber_lsp::hover::extract_hover_text(&val),
-                _ => None,
+            let parsed = match result {
+                Ok(Ok(ref val)) => {
+                    let text = faber_lsp::hover::extract_hover_text(val);
+                    let lsp_range = faber_lsp::hover::extract_hover_range(val);
+                    log::debug!(
+                        "hover: response text_len={:?} range={lsp_range:?}",
+                        text.as_ref().map(|t| t.len())
+                    );
+                    if let Some(t) = &text {
+                        log::debug!(
+                            "hover: markdown head: {:?}",
+                            t.chars().take(300).collect::<String>()
+                        );
+                        // Debug builds: dump full content so we can inspect what
+                        // rust-analyzer actually sends (lists, images, code fences, etc).
+                        #[cfg(debug_assertions)]
+                        {
+                            let _ = std::fs::write("/tmp/faber_hover_last.md", t.as_bytes());
+                        }
+                    }
+                    let char_range = lsp_range.and_then(|r| {
+                        let start =
+                            faber_lsp::position::from_lsp_position(&rope, r.start, encoding)?;
+                        let end = faber_lsp::position::from_lsp_position(&rope, r.end, encoding)?;
+                        Some(start..end)
+                    });
+                    text.map(|t| {
+                        let hover_rope = ropey::Rope::from_str(&t);
+                        let md = faber_editor::markdown::parse_markdown_with_fallback(
+                            &t,
+                            &hover_rope,
+                            &registry,
+                            fallback_ext.as_deref(),
+                        );
+                        log::debug!(
+                            "hover: parsed {} blocks: {}",
+                            md.blocks.len(),
+                            md.blocks
+                                .iter()
+                                .map(|b| match &b.kind {
+                                    faber_editor::markdown::BlockKind::Heading {
+                                        level, ..
+                                    } => format!("H{level}"),
+                                    faber_editor::markdown::BlockKind::Paragraph { .. } =>
+                                        "P".into(),
+                                    faber_editor::markdown::BlockKind::CodeBlock {
+                                        lang, ..
+                                    } => format!("Code({})", lang.as_deref().unwrap_or("?")),
+                                    faber_editor::markdown::BlockKind::Blockquote { .. } =>
+                                        "Quote".into(),
+                                    faber_editor::markdown::BlockKind::List { ordered, .. } =>
+                                        if *ordered { "OL" } else { "UL" }.into(),
+                                    faber_editor::markdown::BlockKind::Table { .. } =>
+                                        "Table".into(),
+                                    faber_editor::markdown::BlockKind::Rule => "HR".into(),
+                                    faber_editor::markdown::BlockKind::HtmlBlock { .. } =>
+                                        "HTML".into(),
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                        (Arc::new(md), char_range)
+                    })
+                }
+                other => {
+                    log::debug!("hover: request failed or timed out: {other:?}");
+                    None
+                }
             };
-            view.update(cx, |ev, cx| {
-                ev.hover_content = content;
+            view.update_in(cx, |ev, window, cx| {
+                if let Some((md, range)) = parsed {
+                    // No server range → fall back to the word under the cursor so
+                    // the popover still anchors and dismisses sensibly.
+                    let range = range.unwrap_or_else(|| {
+                        let word = cursor::word_at(&ev.doc.rope, offset);
+                        word.range()
+                    });
+                    // Freshness: accept if the mouse is still at the trigger
+                    // offset OR anywhere inside the response's own symbol range
+                    // (drifting within the same word must not drop the popover).
+                    let fresh = match ev.hover.char_offset {
+                        Some(cur) => cur == offset || (cur >= range.start && cur <= range.end),
+                        None => false,
+                    };
+                    if !fresh {
+                        log::debug!("hover: stale response for offset {offset} — dropped");
+                        return;
+                    }
+                    // New content supersedes any pending hide from the previous
+                    // symbol AND any pending re-show for an offset inside this
+                    // range (it would only duplicate this request).
+                    ev.hover.hiding_task = None;
+                    ev.hover.info_task = None;
+                    let t = cx.global::<RuntimeTheme>().clone();
+                    ev.hover.anchor = ev.hover_anchor_for_offset(range.start, &t, window);
+                    crate::hover_popover::rebuild_segments(&ev.hover.segments, &md, &t);
+                    ev.hover.estimated_height =
+                        crate::hover_popover::estimate_height(&ev.hover.segments.borrow(), &t);
+                    ev.hover.content = Some(md);
+                    ev.hover.symbol_range = Some(range);
+                    ev.hover.closest_distance = None;
+                    ev.hover.selection = None;
+                    ev.hover.selecting = false;
+                    ev.hover.pressed_link = None;
+                    ev.hover.bounds.set(None);
+                    log::debug!(
+                        "hover: show range={:?} anchor={:?}",
+                        ev.hover.symbol_range,
+                        ev.hover.anchor
+                    );
+                } else {
+                    // Empty/failed response: only clear if the mouse is still at
+                    // the trigger offset — otherwise a newer hover owns the state.
+                    if ev.hover.char_offset == Some(offset) {
+                        ev.dismiss_hover(cx);
+                    }
+                }
                 cx.notify();
             })
             .ok();
@@ -755,12 +1133,379 @@ impl EditorView {
         .detach();
     }
 
-    #[allow(dead_code)]
+    /// Window-space anchor of the glyph at `offset` — the fixed point the
+    /// popover attaches to. None if geometry hasn't been painted yet.
+    fn hover_anchor_for_offset(
+        &self,
+        offset: usize,
+        t: &RuntimeTheme,
+        window: &mut Window,
+    ) -> Option<crate::hover_popover::HoverAnchor> {
+        let (anchor_line, origin_x, origin_y) = self.text_origin.get()?;
+        let offset = offset.min(self.doc.len_chars().saturating_sub(1));
+        let line = self.doc.rope.char_to_line(offset);
+        let line_start = self.line_starts.get(line).copied()?;
+        let line_str: &str = self.line_cache.get(line)?;
+        let char_col = offset.saturating_sub(line_start);
+        let byte_col = char_col_to_byte_col(line_str, char_col);
+        let shaped = self.shape_editor_line(line, t, window, &[]);
+        let x = origin_x + f32::from(shaped.x_for_index(byte_col));
+        let line_top = origin_y + (line as f32 - anchor_line as f32) * t.line_height_code;
+        Some(crate::hover_popover::HoverAnchor {
+            x,
+            line_top,
+            line_bottom: line_top + t.line_height_code,
+        })
+    }
+
     pub fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
-        self.hover_timer = None;
-        if self.hover_content.is_some() {
-            self.hover_content = None;
+        self.hover.info_task = None;
+        self.hover.hiding_task = None;
+        // Also invalidates any in-flight response (stale-offset check).
+        self.hover.char_offset = None;
+        let had_content = self.hover.content.is_some();
+        self.hover.content = None;
+        self.hover.symbol_range = None;
+        self.hover.closest_distance = None;
+        self.hover.anchor = None;
+        self.hover.bounds.set(None);
+        self.hover.selection = None;
+        self.hover.selecting = false;
+        self.hover.pressed_link = None;
+        self.hover.scrollbar_drag = None;
+        self.hover.autoscroll_task = None;
+        self.hover.segments.borrow_mut().clear();
+        if had_content {
+            log::debug!("hover: dismissed");
             cx.notify();
+        }
+    }
+
+    /// While a selection drag sits past the popover's top/bottom edge, run a
+    /// repeating tick that scrolls the content and extends the selection to the
+    /// edge — dragging to the end selects everything (Zed parity).
+    fn update_hover_autoscroll(&mut self, pos: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(bounds) = self.hover.bounds.get() else {
+            return;
+        };
+        let outside = pos.y < bounds.top() || pos.y > bounds.bottom();
+        if !outside {
+            self.hover.autoscroll_task = None;
+            return;
+        }
+        if self.hover.autoscroll_task.is_some() {
+            return;
+        }
+        self.hover.autoscroll_task = Some(cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(30))
+                    .await;
+                let keep_going = view
+                    .update(cx, |ev, cx| {
+                        if !ev.hover.selecting {
+                            ev.hover.autoscroll_task = None;
+                            return false;
+                        }
+                        let (Some(bounds), Some(pos)) = (ev.hover.bounds.get(), ev.last_mouse_pos)
+                        else {
+                            return false;
+                        };
+                        let overshoot = if pos.y < bounds.top() {
+                            f32::from(pos.y - bounds.top())
+                        } else if pos.y > bounds.bottom() {
+                            f32::from(pos.y - bounds.bottom())
+                        } else {
+                            0.0
+                        };
+                        if overshoot == 0.0 {
+                            ev.hover.autoscroll_task = None;
+                            return false;
+                        }
+                        // Speed scales with how far past the edge the drag sits.
+                        let step = (overshoot.abs() * 0.3).clamp(2.0, 40.0) * overshoot.signum();
+                        let off = ev.hover.scroll.offset();
+                        let max = f32::from(ev.hover.scroll.max_offset().height);
+                        let new_y = (f32::from(off.y) - step).clamp(-max.max(0.0), 0.0);
+                        ev.hover.scroll.set_offset(point(off.x, px(new_y)));
+                        // Extend the selection to the content at the popover edge.
+                        let edge_y = if overshoot < 0.0 {
+                            bounds.top() + px(4.)
+                        } else {
+                            bounds.bottom() - px(4.)
+                        };
+                        if let Some(hit) =
+                            crate::hover_popover::hit_test(&ev.hover.segments, point(pos.x, edge_y))
+                            && let Some(sel) = &mut ev.hover.selection
+                        {
+                            sel.end = hit;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Returns the Euclidean distance from `pos` to the nearest edge of the hover
+    /// popover bounds (0 if `pos` is inside the bounds).
+    fn distance_to_hover_bounds(&self, pos: gpui::Point<Pixels>) -> Pixels {
+        let Some(bounds) = self.hover.bounds.get() else {
+            return px(f32::MAX);
+        };
+        if bounds.contains(&pos) {
+            return px(0.);
+        }
+        let cx = bounds.center().x;
+        let cy = bounds.center().y;
+        let hw = bounds.size.width / 2.;
+        let hh = bounds.size.height / 2.;
+        let dx = (pos.x - cx).abs() - hw;
+        let dy = (pos.y - cy).abs() - hh;
+        let dx = if dx > px(0.) { dx } else { px(0.) };
+        let dy = if dy > px(0.) { dy } else { px(0.) };
+        px((f32::from(dx) * f32::from(dx) + f32::from(dy) * f32::from(dy)).sqrt())
+    }
+
+    /// Updates `closest_distance` and returns `true` while the mouse keeps
+    /// approaching the popover. Zed semantics: a 4px tolerance absorbs jitter,
+    /// and the stored distance is the monotonic minimum seen so far.
+    fn is_mouse_getting_closer(&mut self, pos: gpui::Point<Pixels>) -> bool {
+        if self.hover.content.is_none() {
+            return false;
+        }
+        let dist = self.distance_to_hover_bounds(pos);
+        if let Some(closest) = self.hover.closest_distance
+            && dist > closest + px(4.)
+        {
+            return false;
+        }
+        let min = self
+            .hover
+            .closest_distance
+            .map_or(dist, |closest| dist.min(closest));
+        self.hover.closest_distance = Some(min);
+        true
+    }
+
+    // ── Cmd+hover link preview ────────────────────────────────────────────────
+    //
+    // Mirrors Zed's hover_links.rs: while cmd is held, resolve the definition
+    // under the mouse (cached per symbol range, including the negative result)
+    // and underline it. The hand cursor shows only when a definition exists, so
+    // keywords like `impl`/`struct` never advertise a fake link.
+
+    fn update_hovered_link(&mut self, offset: Option<usize>, cmd: bool, cx: &mut Context<Self>) {
+        let (Some(off), true) = (offset, cmd) else {
+            self.clear_hovered_link(cx);
+            return;
+        };
+        if self.mouse_selecting {
+            self.clear_hovered_link(cx);
+            return;
+        }
+        // Cached (positive or negative) for the symbol under the mouse.
+        if let Some(link) = &self.hovered_link
+            && link.symbol_range.contains(&off)
+        {
+            return;
+        }
+        // Same trigger point already in flight.
+        if self.link_trigger == Some(off) && self.link_task.is_some() {
+            return;
+        }
+        let word = cursor::word_at(&self.doc.rope, off);
+        let word_range = word.range();
+        if word_range.is_empty() {
+            self.clear_hovered_link(cx);
+            return;
+        }
+        // Whitespace / punctuation-only "words" are never links.
+        let word_text: String = self.doc.rope.slice(word_range.clone()).to_string();
+        if !word_text.chars().any(|c| c.is_alphanumeric() || c == '_') {
+            self.clear_hovered_link(cx);
+            return;
+        }
+
+        let Some(mgr) = self.lsp_manager.clone() else {
+            return;
+        };
+        let Ok(uri) = url::Url::from_file_path(&self.doc.path) else {
+            return;
+        };
+        let encoding = mgr.position_encoding_for_uri(&uri);
+        let rope = self.doc.rope.clone();
+        let lsp_pos = faber_lsp::position::to_lsp_position(&self.doc.rope, off, encoding);
+        let params_json = serde_json::json!({
+            "textDocument": { "uri": uri.as_str() },
+            "position": { "line": lsp_pos.line, "character": lsp_pos.character }
+        });
+        let Some(rx) = mgr.request_for_document(&uri, "textDocument/definition", params_json)
+        else {
+            return;
+        };
+        log::debug!("link: definition probe offset={off} word={word_text:?}");
+        self.link_trigger = Some(off);
+        self.link_task = Some(cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rx.recv_timeout(std::time::Duration::from_secs(5)) })
+                .await;
+            let (locations, origin) = match result {
+                Ok(Ok(ref val)) => (
+                    parse_definition_locations(val),
+                    faber_lsp::hover::extract_origin_selection_range(val).and_then(|r| {
+                        let start =
+                            faber_lsp::position::from_lsp_position(&rope, r.start, encoding)?;
+                        let end = faber_lsp::position::from_lsp_position(&rope, r.end, encoding)?;
+                        Some(start..end)
+                    }),
+                ),
+                _ => (Vec::new(), None),
+            };
+            view.update(cx, |ev, cx| {
+                // Stale: the mouse moved to another word while resolving.
+                if ev.link_trigger != Some(off) {
+                    return;
+                }
+                let symbol_range = origin.unwrap_or(word_range);
+                log::debug!(
+                    "link: resolved {} location(s) range={symbol_range:?}",
+                    locations.len()
+                );
+                ev.hovered_link = Some(HoveredLink {
+                    symbol_range,
+                    locations,
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn clear_hovered_link(&mut self, cx: &mut Context<Self>) {
+        self.link_task = None;
+        self.link_trigger = None;
+        if self.hovered_link.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// True when the symbol under the mouse resolved to at least one definition —
+    /// drives the hand cursor and the underline.
+    fn link_preview_active(&self) -> bool {
+        self.cmd_held
+            && self
+                .hovered_link
+                .as_ref()
+                .is_some_and(|l| !l.locations.is_empty())
+    }
+
+    // ── Go-to-Definition ──────────────────────────────────────────────────────
+
+    fn on_go_to_definition(
+        &mut self,
+        _: &GoToDefinition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.trigger_go_to_definition(window, cx);
+    }
+
+    fn trigger_go_to_definition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mgr) = self.lsp_manager.clone() else {
+            return;
+        };
+        let path = self.doc.path.clone();
+        let uri = match url::Url::from_file_path(&path) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+        let offset = self.sel.head;
+        let encoding = mgr.position_encoding_for_uri(&uri);
+        let lsp_pos = faber_lsp::position::to_lsp_position(&self.doc.rope, offset, encoding);
+        let params_json = serde_json::json!({
+            "textDocument": { "uri": uri.as_str() },
+            "position": { "line": lsp_pos.line, "character": lsp_pos.character }
+        });
+        let Some(rx) = mgr.request_for_document(&uri, "textDocument/definition", params_json)
+        else {
+            return;
+        };
+        cx.spawn_in(window, async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rx.recv_timeout(std::time::Duration::from_secs(5)) })
+                .await;
+            let locations = match result {
+                Ok(Ok(val)) => parse_definition_locations(&val),
+                _ => return,
+            };
+            log::debug!("goto_def: {} location(s)", locations.len());
+            let Some(first) = locations.first() else {
+                return;
+            };
+            let (def_path, def_line, def_char) = first.clone();
+            let _ = view.update_in(cx, |ev, window, cx| {
+                ev.goto_location(def_path, def_line, def_char, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Jump to a definition location — in-place for the current document,
+    /// through the workspace for other files.
+    fn goto_location(
+        &mut self,
+        def_path: std::path::PathBuf,
+        def_line: usize,
+        def_char: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        log::debug!(
+            "goto_location: {}:{def_line}:{def_char}",
+            def_path.display()
+        );
+        if self.doc.path == def_path {
+            let char_idx = self
+                .line_starts
+                .get(def_line)
+                .map(|&ls| ls + def_char)
+                .unwrap_or(self.doc.rope.len_chars().saturating_sub(1));
+            self.sel.head = char_idx;
+            self.sel.anchor = char_idx;
+            self.scroll_handle
+                .scroll_to_item(def_line, gpui::ScrollStrategy::Center);
+            self.flash_line = Some(def_line);
+            let epoch = self.cursor_blink_epoch;
+            cx.spawn(async move |view, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(800))
+                    .await;
+                view.update(cx, |ev, cx| {
+                    if ev.cursor_blink_epoch == epoch {
+                        ev.flash_line = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            cx.notify();
+        } else if let Some(ws) = self.ws_handle.clone().and_then(|h| h.upgrade()) {
+            // Defer: navigate_to reads pane editors — including this one, which
+            // is mid-update when goto_location runs from a mouse/task handler.
+            // A synchronous ws.update here re-enters the entity map and panics.
+            window.defer(cx, move |window, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.navigate_to(&def_path, def_line, def_char, window, cx);
+                });
+            });
         }
     }
 
@@ -1069,6 +1814,16 @@ impl EditorView {
     }
 
     fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        // A selection inside the hover popover takes precedence.
+        if let Some(sel) = &self.hover.selection
+            && !sel.is_empty()
+        {
+            let text = crate::hover_popover::selected_text(&self.hover.segments.borrow(), sel);
+            if !text.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                return;
+            }
+        }
         if !self.sel.is_empty() {
             let text: String = self.doc.rope.slice(self.sel.range()).to_string();
             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -1322,6 +2077,11 @@ impl EditorView {
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
+        // Escape dismisses the hover popover before anything else (Zed parity).
+        if ks.key.as_str() == "escape" && self.hover.content.is_some() {
+            self.dismiss_hover(cx);
+            return;
+        }
         // macOS routes cmd+backspace/delete through NSTextInputClient (doCommandBySelector:)
         // before GPUI keybinding dispatch fires. Handle here to guarantee execution.
         if ks.modifiers.platform && !ks.modifiers.control && !ks.modifiers.alt {
@@ -1768,12 +2528,44 @@ impl EditorView {
             .filter(|e| e.range.lsp_line as usize == line_idx)
             .cloned()
             .collect();
-        let runs = crate::buffer_view::build_text_runs(
+        let mut runs = crate::buffer_view::build_text_runs(
             &text,
             self.doc.highlight_spans(line_idx),
             t,
             &line_diags,
         );
+        // Cmd+hover link preview: underline the symbol that resolved to a definition.
+        if self.link_preview_active()
+            && let Some(link) = &self.hovered_link
+            && let Some(&line_start) = self.line_starts.get(line_idx)
+        {
+            let line_str: &str = &text;
+            let line_char_count = line_str.chars().count();
+            let line_end = line_start + line_char_count;
+            if link.symbol_range.start < line_end && link.symbol_range.end > line_start {
+                let s_char = link
+                    .symbol_range
+                    .start
+                    .saturating_sub(line_start)
+                    .min(line_char_count);
+                let e_char = link
+                    .symbol_range
+                    .end
+                    .saturating_sub(line_start)
+                    .min(line_char_count);
+                let s_byte = char_col_to_byte_col(line_str, s_char);
+                let e_byte = char_col_to_byte_col(line_str, e_char);
+                let accent = t.accent;
+                crate::hover_popover::style_run_range(&mut runs, s_byte..e_byte, |run| {
+                    run.color = accent;
+                    run.underline = Some(gpui::UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(accent),
+                        wavy: false,
+                    });
+                });
+            }
+        }
         window
             .text_system()
             .shape_line(text, px(t.font_size_code), &runs, None)
@@ -2644,7 +3436,10 @@ impl Render for EditorView {
             .with_width_from_item(Some(widest))
             .track_scroll(self.scroll_handle.clone())
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down_editor))
-            .on_scroll_wheel(cx.listener(|_view, _ev: &ScrollWheelEvent, _, cx| {
+            .on_mouse_move(cx.listener(Self::on_mouse_move_editor))
+            .on_scroll_wheel(cx.listener(|view, _ev: &ScrollWheelEvent, _, cx| {
+                // Scrolling detaches the popover from its anchor — hide it (Zed parity).
+                view.dismiss_hover(cx);
                 // Trigger re-render so the breadcrumb heading stack refreshes.
                 cx.notify();
             }));
@@ -2661,7 +3456,12 @@ impl Render for EditorView {
                         .flex_1()
                         .min_w(px(0.))
                         .min_h(px(0.))
-                        .cursor(CursorStyle::IBeam)
+                        .cursor(if self.link_preview_active() {
+                            // Only when the symbol under the mouse has a definition.
+                            CursorStyle::PointingHand
+                        } else {
+                            CursorStyle::IBeam
+                        })
                         .child(content),
                 )
                 .child(editor_scrollbar)
@@ -2869,6 +3669,27 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_bold_selection))
             .on_action(cx.listener(Self::on_italic_selection))
             .on_action(cx.listener(Self::on_toggle_checkbox))
+            .on_action(cx.listener(Self::on_go_to_definition))
+            .on_modifiers_changed(cx.listener(
+                |view, ev: &gpui::ModifiersChangedEvent, window, cx| {
+                    let cmd = ev.modifiers.platform;
+                    if view.cmd_held == cmd {
+                        return;
+                    }
+                    view.cmd_held = cmd;
+                    if cmd {
+                        // Re-evaluate the link preview at the current mouse position.
+                        if let Some(pos) = view.last_mouse_pos {
+                            let t = cx.global::<RuntimeTheme>().clone();
+                            let offset = view.hover_offset_at(pos, &t, window);
+                            view.update_hovered_link(offset, true, cx);
+                        }
+                    } else {
+                        view.clear_hovered_link(cx);
+                    }
+                    cx.notify();
+                },
+            ))
             .when(is_dragging || self.mouse_selecting, |el| {
                 el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, window, cx| {
                     if let Some(ref drag) = view.scrollbar_drag {
@@ -2901,8 +3722,11 @@ impl Render for EditorView {
         } else {
             root
         };
-        let root = if let Some(content) = self.hover_content.clone() {
-            root.child(self.render_hover_popover(&t, content, cx))
+        let root = if self.hover.content.is_some() {
+            match self.render_hover_popover(&t, cx) {
+                Some(popover) => root.child(popover),
+                None => root,
+            }
         } else {
             root
         };
@@ -2913,41 +3737,426 @@ impl Render for EditorView {
 // ── Hover popover ──────────────────────────────────────────────────────────────
 
 impl EditorView {
+    /// Render the hover popover, LOCKED to the symbol anchor computed at show
+    /// time (Zed parity — the popover never follows the mouse). Content is
+    /// selectable; links open on click; a selection keeps the popover alive
+    /// until the user clicks outside it.
     fn render_hover_popover(
-        &self,
+        &mut self,
         t: &RuntimeTheme,
-        content: String,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let pixel_y = self.hover_pixel_y;
-        let t2 = t.clone();
-        deferred(
-            anchored()
-                .position(point(px(120.), px(pixel_y + 24.)))
-                .snap_to_window()
+    ) -> Option<AnyElement> {
+        use crate::hover_popover::{SegmentKind, hit_test, link_at, segment_styled_text};
+
+        let anchor = self.hover.anchor?;
+        let bounds_cell = Rc::clone(&self.hover.bounds);
+        let scroll = self.hover.scroll.clone();
+        let selection = self.hover.selection;
+        let sel_color = t.selection;
+
+        // ── content: block-structured rendering ───────────────────────────────
+        // Consecutive segments group into their block containers: code lines →
+        // sunken panel, quote lines → bordered callout, images → badge row,
+        // table cells → bordered grid. Everything else renders standalone.
+        #[derive(Clone, PartialEq)]
+        enum Bucket {
+            Plain,
+            Code,
+            Quote,
+            Images,
+            Table,
+        }
+
+        // Builds the selectable text wrapper for one segment. `gap_override`
+        // suppresses the segment's own top gap when a group container owns it.
+        let seg_wrapper = |seg: &mut crate::hover_popover::Segment,
+                           sel_range: Option<std::ops::Range<usize>>,
+                           gap_override: Option<f32>,
+                           t: &RuntimeTheme|
+         -> AnyElement {
+            let styled = segment_styled_text(seg, sel_range, sel_color);
+            // Retain the layout handle: selection hit-testing reads it on
+            // mouse events between frames.
+            seg.layout = styled.layout().clone();
+            let seg_bounds = Rc::clone(&seg.bounds);
+            seg.bounds.set(None);
+            let is_code = seg.kind == crate::hover_popover::SegmentKind::Code;
+            let gap = gap_override.unwrap_or(seg.top_gap);
+            div()
+                .relative()
+                .w_full()
+                .mt(px(gap))
+                .ml(px(seg.indent))
+                .min_h(px(if is_code {
+                    t.line_height_code
+                } else {
+                    seg.text_size + 4.
+                }))
+                .when(is_code, |el| el.font_family(t.mono_family.clone()))
+                .when(!is_code, |el| {
+                    el.font_family(t.ui_family.clone()).pb(px(2.))
+                })
+                .text_size(px(seg.text_size))
+                .text_color(t.text)
                 .child(
-                    div()
-                        .id("hover-popover")
-                        .bg(t.bg_elevated)
-                        .border_1()
-                        .border_color(t.border)
-                        .rounded(px(t.radius_md))
-                        .p(px(10.))
-                        .max_w(px(520.))
-                        .font_family(t.ui_family.clone())
-                        .text_size(px(t.font_size_body))
-                        .text_color(t.text)
-                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_, _, _, _| {}))
-                        .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, _, _| seg_bounds.set(Some(bounds)),
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .child(styled)
+                .into_any_element()
+        };
+
+        let mut content_children: Vec<AnyElement> = Vec::new();
+        {
+            let mut segments = self.hover.segments.borrow_mut();
+            let seg_count = segments.len();
+
+            let mut cur: Option<Bucket> = None;
+            let mut group: Vec<AnyElement> = Vec::new();
+            let mut group_gap = 0.0f32;
+            let mut first_in_group = false;
+            let mut table_rows: Vec<Vec<AnyElement>> = Vec::new();
+
+            let flush = |bucket: &Option<Bucket>,
+                         group: &mut Vec<AnyElement>,
+                         table_rows: &mut Vec<Vec<AnyElement>>,
+                         out: &mut Vec<AnyElement>,
+                         gap: f32,
+                         t: &RuntimeTheme| {
+                match bucket {
+                    Some(Bucket::Code) if !group.is_empty() => out.push(
+                        div()
+                            .w_full()
+                            .mt(px(gap))
+                            .bg(t.bg_sunken)
+                            .rounded(px(t.radius_sm))
+                            .px(px(t.sp3))
+                            .py(px(t.sp2))
+                            .children(std::mem::take(group))
+                            .into_any_element(),
+                    ),
+                    Some(Bucket::Quote) if !group.is_empty() => out.push(
+                        div()
+                            .w_full()
+                            .mt(px(gap))
+                            .border_l_2()
+                            .border_color(t.accent_muted)
+                            .pl(px(t.sp3))
+                            .children(std::mem::take(group))
+                            .into_any_element(),
+                    ),
+                    Some(Bucket::Images) if !group.is_empty() => out.push(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(6.))
+                            .mt(px(gap))
+                            .children(std::mem::take(group))
+                            .into_any_element(),
+                    ),
+                    Some(Bucket::Table) if !table_rows.is_empty() => {
+                        let n_rows = table_rows.len();
+                        let rows: Vec<AnyElement> = std::mem::take(table_rows)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(r, cells)| {
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .when(r == 0, |el| el.bg(t.bg_elevated))
+                                    .when(r + 1 < n_rows, |el| {
+                                        el.border_b_1().border_color(t.separator)
+                                    })
+                                    .children(cells)
+                                    .into_any_element()
+                            })
+                            .collect();
+                        out.push(
                             div()
-                                .font_family(t2.mono_family.clone())
-                                .text_size(px(t2.font_size_code))
-                                .child(content),
-                        ),
-                ),
+                                .w_full()
+                                .mt(px(gap))
+                                .border_1()
+                                .border_color(t.separator)
+                                .rounded(px(t.radius_sm))
+                                .overflow_hidden()
+                                .children(rows)
+                                .into_any_element(),
+                        );
+                    }
+                    _ => {}
+                }
+            };
+
+            for ix in 0..seg_count {
+                let bucket = {
+                    let seg = &segments[ix];
+                    if seg.table_cell.is_some() {
+                        Bucket::Table
+                    } else if matches!(seg.kind, SegmentKind::Image { .. }) {
+                        Bucket::Images
+                    } else if seg.quote {
+                        Bucket::Quote
+                    } else if seg.kind == SegmentKind::Code {
+                        Bucket::Code
+                    } else {
+                        Bucket::Plain
+                    }
+                };
+                if cur.as_ref() != Some(&bucket) {
+                    flush(
+                        &cur,
+                        &mut group,
+                        &mut table_rows,
+                        &mut content_children,
+                        group_gap,
+                        t,
+                    );
+                    group_gap = segments[ix].top_gap;
+                    first_in_group = true;
+                    cur = Some(bucket.clone());
+                }
+
+                let sel_range = {
+                    let seg = &segments[ix];
+                    selection.and_then(|s| s.range_in_segment(ix, seg.text.len()))
+                };
+                match bucket {
+                    Bucket::Plain => {
+                        let seg = &mut segments[ix];
+                        if seg.kind == SegmentKind::Rule {
+                            content_children.push(
+                                div()
+                                    .h(px(1.))
+                                    .my(px(6.))
+                                    .bg(t.separator)
+                                    .into_any_element(),
+                            );
+                        } else {
+                            content_children.push(seg_wrapper(seg, sel_range, None, t));
+                        }
+                    }
+                    Bucket::Code => {
+                        let seg = &mut segments[ix];
+                        // The panel owns the block gap; lines stack flush.
+                        group.push(seg_wrapper(seg, sel_range, Some(0.0), t));
+                    }
+                    Bucket::Quote => {
+                        let seg = &mut segments[ix];
+                        let gap = if first_in_group { 0.0 } else { seg.top_gap };
+                        group.push(seg_wrapper(seg, sel_range, Some(gap), t));
+                    }
+                    Bucket::Images => {
+                        let seg = &segments[ix];
+                        if let SegmentKind::Image { url, link } = &seg.kind {
+                            let image = gpui::img(url.clone())
+                                .h(px(18.))
+                                .object_fit(gpui::ObjectFit::ScaleDown)
+                                .into_any_element();
+                            let el = match link {
+                                Some(target) => {
+                                    let target = target.clone();
+                                    div()
+                                        .id(("hover-img", ix))
+                                        .cursor_pointer()
+                                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.open_url(&target);
+                                        })
+                                        .child(image)
+                                        .into_any_element()
+                                }
+                                None => div().child(image).into_any_element(),
+                            };
+                            group.push(el);
+                        }
+                    }
+                    Bucket::Table => {
+                        let (_, col, _) = segments[ix].table_cell.unwrap_or((0, 0, 1));
+                        if col == 0 {
+                            table_rows.push(Vec::new());
+                        }
+                        let seg = &mut segments[ix];
+                        let cell = div()
+                            .flex_1()
+                            .min_w(px(60.))
+                            .px(px(t.sp2))
+                            .py(px(2.))
+                            .child(seg_wrapper(seg, sel_range, Some(0.0), t))
+                            .into_any_element();
+                        if let Some(row) = table_rows.last_mut() {
+                            row.push(cell);
+                        }
+                    }
+                }
+                first_in_group = false;
+            }
+            flush(
+                &cur,
+                &mut group,
+                &mut table_rows,
+                &mut content_children,
+                group_gap,
+                t,
+            );
+        }
+
+        // ── placement: prefer above the symbol line, flip below near the top ──
+        // FLUSH against the line (Zed parity): any gap would overlap adjacent
+        // lines, and crossing another symbol on the way to the popover would
+        // dismiss it.
+        let est_h = self.hover.estimated_height.min(HOVER_MAX_H);
+        let above = anchor.line_top - est_h >= 8.0;
+        let (pos, corner) = if above {
+            (
+                point(px(anchor.x), px(anchor.line_top)),
+                gpui::Corner::BottomLeft,
+            )
+        } else {
+            (
+                point(px(anchor.x), px(anchor.line_bottom)),
+                gpui::Corner::TopLeft,
+            )
+        };
+
+        let popover = div()
+            .id("hover-popover")
+            .occlude()
+            .cursor(CursorStyle::IBeam)
+            .bg(t.bg_elevated)
+            .border_1()
+            .border_color(t.border)
+            .rounded(px(t.radius_md))
+            .shadow_lg()
+            .on_mouse_move(cx.listener(|ev, e: &MouseMoveEvent, _, cx| {
+                // Inside the popover: never hide; extend an active selection.
+                ev.last_mouse_pos = Some(e.position);
+                ev.hover.closest_distance = Some(px(0.));
+                ev.hover.hiding_task = None;
+                // Back inside — stop any edge auto-scroll.
+                ev.hover.autoscroll_task = None;
+                if let Some(drag) = ev.hover.scrollbar_drag {
+                    update_drag(&drag, e, &ev.hover.scroll);
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if ev.hover.selecting
+                    && let Some(hit) = hit_test(&ev.hover.segments, e.position)
+                    && let Some(sel) = &mut ev.hover.selection
+                {
+                    sel.end = hit;
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ev, e: &MouseDownEvent, _, cx| {
+                    ev.hover.pressed_link = link_at(&ev.hover.segments, e.position);
+                    if let Some(hit) = hit_test(&ev.hover.segments, e.position) {
+                        ev.hover.selection = Some(crate::hover_popover::HoverSelection {
+                            start: hit,
+                            end: hit,
+                        });
+                        ev.hover.selecting = true;
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|ev, e: &MouseUpEvent, _, cx| {
+                    ev.hover.scrollbar_drag = None;
+                    ev.hover.autoscroll_task = None;
+                    ev.hover.selecting = false;
+                    let click_no_drag = ev.hover.selection.is_some_and(|s| s.is_empty());
+                    if click_no_drag {
+                        ev.hover.selection = None;
+                    }
+                    // Press + release on the same link without dragging → open it.
+                    if click_no_drag
+                        && let Some(pressed) = ev.hover.pressed_link
+                        && link_at(&ev.hover.segments, e.position) == Some(pressed)
+                    {
+                        let url = ev
+                            .hover
+                            .segments
+                            .borrow()
+                            .get(pressed.0)
+                            .and_then(|s| s.links.get(pressed.1).map(|(_, u)| u.clone()));
+                        if let Some(url) = url {
+                            log::debug!("hover: opening link {url}");
+                            cx.open_url(&url);
+                        }
+                    }
+                    ev.hover.pressed_link = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(
+                // Transparent overlay that records the popover's painted bounds
+                // for sticky hit-testing.
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _, _| {
+                        bounds_cell.set(Some(bounds));
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .max_h(px(HOVER_MAX_H))
+                    .child(
+                        // Block-level layout (no flex) so overflow_y_scroll can
+                        // measure true content height and activate scrolling.
+                        div()
+                            .id("hover-scroll")
+                            .overflow_y_scroll()
+                            .max_w(px(HOVER_MAX_W))
+                            .max_h(px(HOVER_MAX_H))
+                            .track_scroll(&scroll)
+                            .p(px(10.))
+                            .children(content_children),
+                    )
+                    .child(render_scrollbar(
+                        "hover-scrollbar",
+                        "hover-scrollbar-thumb",
+                        &scroll,
+                        true,
+                        self.hover.scrollbar_drag.is_some(),
+                        cx.listener(|ev, e: &MouseDownEvent, _, cx| {
+                            ev.hover.scrollbar_drag = Some(start_drag(e, &ev.hover.scroll));
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                        t,
+                        None,
+                    )),
+            );
+
+        Some(
+            deferred(
+                anchored()
+                    .position(pos)
+                    .anchor(corner)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(popover),
+            )
+            .with_priority(3)
+            .into_any_element(),
         )
-        .with_priority(3)
-        .into_any_element()
     }
 }
 
@@ -3231,4 +4440,38 @@ impl EditorView {
         .with_priority(2)
         .into_any()
     }
+}
+
+/// Parse a `textDocument/definition` response into (path, line, char) tuples.
+/// Handles Location, LocationLink, and arrays of either.
+fn parse_definition_locations(val: &serde_json::Value) -> Vec<(std::path::PathBuf, usize, usize)> {
+    let items: Vec<&serde_json::Value> = if val.is_array() {
+        val.as_array().unwrap().iter().collect()
+    } else if val.is_object() {
+        vec![val]
+    } else {
+        return Vec::new();
+    };
+
+    items
+        .into_iter()
+        .filter_map(|item| {
+            // LocationLink has targetUri/targetRange; Location has uri/range.
+            let uri_str = item
+                .get("targetUri")
+                .or_else(|| item.get("uri"))
+                .and_then(|v| v.as_str())?;
+            let range = item
+                .get("targetSelectionRange")
+                .or_else(|| item.get("targetRange"))
+                .or_else(|| item.get("range"))
+                .and_then(|r| r.as_object())?;
+            let start = range.get("start").and_then(|s| s.as_object())?;
+            let line = start.get("line").and_then(|l| l.as_u64())? as usize;
+            let character = start.get("character").and_then(|c| c.as_u64())? as usize;
+            let url = url::Url::parse(uri_str).ok()?;
+            let path = url.to_file_path().ok()?;
+            Some((path, line, character))
+        })
+        .collect()
 }

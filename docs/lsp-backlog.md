@@ -7,7 +7,7 @@ This backlog tracks Gate C: the interactive LSP feature wave.
 
 ## C0. DiagnosticsPanel — implement all_entries()  [HIGH]
 
-**Status:** stub exists, returns `vec![]`. Problems panel renders but is empty.
+**Status:** shipped (#12/#13). `rebuild_rows` reads `DiagnosticStore::get_all()`, groups by file, click navigates.
 
 **Description:**
 - Read `LspManager::diagnostic_store()` and collect all entries.
@@ -24,7 +24,7 @@ This backlog tracks Gate C: the interactive LSP feature wave.
 
 ## C1. Hover  [TS]
 
-**Status:** not started.
+**Status:** shipped (#12). 400ms dwell timer, caret-anchored popover, dismisses on move.
 
 **Description:**
 - On cursor dwell (~500ms), call `textDocument/hover` via `LspManager::request_for_document`.
@@ -41,7 +41,7 @@ This backlog tracks Gate C: the interactive LSP feature wave.
 
 ## C2. Go-to-Definition  [TS]
 
-**Status:** not started.
+**Status:** shipped. F12 + Cmd+Click → `textDocument/definition`; same-file scrolls editor; cross-file opens via `Workspace::navigate_to`.
 
 **Description:**
 - `Cmd+Click` or `F12` sends `textDocument/definition`.

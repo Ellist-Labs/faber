@@ -6,6 +6,8 @@ mod file_finder;
 mod file_icon_data;
 mod file_icons;
 mod file_preview;
+mod hover_popover;
+mod http;
 mod i18n;
 mod input_helpers;
 mod language_picker;
@@ -117,6 +119,7 @@ actions!(
         InputMoveRight,
         InputMoveStart,
         InputMoveEnd,
+        GoToDefinition,
     ]
 );
 
@@ -208,13 +211,32 @@ actions!(
 
 actions!(confirm, [CfConfirm, CfDismiss]);
 
+// ── logging ────────────────────────────────────────────────────────────────────
+
+/// Debug builds log at `debug` for faber crates (overridable via RUST_LOG);
+/// release builds stay at `warn` so the log facade costs nothing in normal use.
+fn init_logging() {
+    let default_filter = if cfg!(debug_assertions) {
+        "warn,faber=debug,faber_lsp=debug,faber_editor=debug,faber_index=debug"
+    } else {
+        "warn"
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
+        .format_timestamp_millis()
+        .init();
+}
+
 // ── main ───────────────────────────────────────────────────────────────────────
 
 fn main() {
+    init_logging();
     let paths: Vec<String> = env::args().skip(1).collect();
 
     Application::new()
         .with_assets(assets::Assets)
+        // Real http client (gpui defaults to a null one) — powers remote image
+        // loading, e.g. badges in hover documentation.
+        .with_http_client(http::UreqHttpClient::new())
         .run(move |cx: &mut App| {
             let settings = faber_settings::load();
             let state = faber_settings::state::load();
@@ -333,6 +355,8 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-b", BoldSelection, Some("Editor && markdown")),
         KeyBinding::new("cmd-i", ItalicSelection, Some("Editor && markdown")),
         KeyBinding::new("cmd-shift-x", ToggleCheckbox, Some("Editor && markdown")),
+        // LSP navigation
+        KeyBinding::new("f12", GoToDefinition, Some("Editor")),
         // Project search
         KeyBinding::new("cmd-shift-f", OpenProjectSearch, Some("Workspace")),
         // Symbol finder
