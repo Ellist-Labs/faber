@@ -1812,6 +1812,39 @@ impl Workspace {
         self.activate_tab(new_ix, window, cx);
     }
 
+    pub(crate) fn open_references(
+        &mut self,
+        locations: Vec<(std::path::PathBuf, usize, usize)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = cx
+            .try_global::<crate::ProjectRoot>()
+            .and_then(|r| r.0.clone());
+        let existing = self.pane().read(cx).find_references_tab();
+        if let Some(ix) = existing {
+            if let Some(panel) = self.pane().read(cx).references_panel_at(ix).cloned() {
+                panel.update(cx, |p, _cx| {
+                    p.populate(locations, root.as_deref());
+                });
+                self.activate_tab(ix, window, cx);
+            }
+            return;
+        }
+        let ws_weak = cx.weak_entity();
+        let panel = cx.new(|cx| {
+            let mut p = crate::panels::references_panel::ReferencesPanel::new(cx);
+            p.set_workspace(ws_weak);
+            p.populate(locations, root.as_deref());
+            p
+        });
+        self.panes[&self.focused_pane].update(cx, |p, cx| {
+            p.push_references_tab(panel, cx);
+        });
+        let new_ix = self.pane().read(cx).tab_count() - 1;
+        self.activate_tab(new_ix, window, cx);
+    }
+
     pub(crate) fn on_open_project_search(
         &mut self,
         _: &OpenProjectSearch,
@@ -2685,6 +2718,12 @@ impl Workspace {
                     .text_color(t.text_muted)
                     .into_any_element(),
                 TabKind::Problems => svg()
+                    .path(IconName::Search.path())
+                    .size(px(14.0))
+                    .flex_shrink_0()
+                    .text_color(t.text_muted)
+                    .into_any_element(),
+                TabKind::References => svg()
                     .path(IconName::Search.path())
                     .size(px(14.0))
                     .flex_shrink_0()

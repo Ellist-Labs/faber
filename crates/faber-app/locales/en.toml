@@ -207,6 +207,7 @@ no_matches = "No matches"
 settings = "Settings"
 search = "Search"
 problems = "Problems"
+references = "References"
 
 [lsp_overlay]
 title = "Language Servers"
