@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::{App, Context, FocusHandle, Focusable, IntoElement, Render, SharedString, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px};
+use gpui::{
+    App, Context, FocusHandle, Focusable, IntoElement, Render, SharedString,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
+};
 use rust_i18n::t;
 
 use faber_lsp::diagnostics::{DiagnosticStore, Severity};
@@ -61,14 +64,23 @@ impl DiagnosticsPanel {
             let (filename, dir) = split_path(&rel_fwd);
             let file_icon = file_icons::icon_for_file(filename);
 
-            let error_count = entries.iter().filter(|e| e.severity == Severity::Error).count();
-            let warning_count = entries.iter().filter(|e| e.severity == Severity::Warning).count();
+            let error_count = entries
+                .iter()
+                .filter(|e| e.severity == Severity::Error)
+                .count();
+            let warning_count = entries
+                .iter()
+                .filter(|e| e.severity == Severity::Warning)
+                .count();
 
             self.rows.push(Row::FileHeader {
                 filename: SharedString::from(filename.to_owned()),
                 dir: SharedString::from(dir.to_owned()),
                 file_icon,
-                counts: FileCounts::Problems { errors: error_count, warnings: warning_count },
+                counts: FileCounts::Problems {
+                    errors: error_count,
+                    warnings: warning_count,
+                },
             });
             for entry in entries {
                 self.rows.push(Row::DiagEntry {

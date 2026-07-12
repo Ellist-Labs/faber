@@ -55,14 +55,13 @@ const OUTLINE_BODY_H: f32 = OUTLINE_MODAL_H - OUTLINE_INPUT_ROW_H - OUTLINE_FOOT
 use crate::{
     Backspace, BoldSelection, CloseSearch, Copy, Cut, Delete, DeleteLine, DeleteToLineEnd,
     DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, FindReferences,
-    GoToDefinition,
-    InputMoveEnd, InputMoveLeft, InputMoveRight, InputMoveStart, ItalicSelection, MoveDocEnd,
-    MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown, MovePageUp,
-    MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste, ProjectRoot,
-    Redo, ReplaceAll, ReplaceBackspace, ReplaceOne, SearchBackspace, SelectAll, SelectDocEnd,
-    SelectDocStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectRight, SelectUp,
-    SelectWordLeft, SelectWordRight, Tab, ToggleCheckbox, TogglePreview, ToggleReplace,
-    ToggleSearchCase, ToggleSearchRegex, ToggleSearchWholeWord, Undo,
+    GoToDefinition, InputMoveEnd, InputMoveLeft, InputMoveRight, InputMoveStart, ItalicSelection,
+    MoveDocEnd, MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown,
+    MovePageUp, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste,
+    ProjectRoot, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne, SearchBackspace, SelectAll,
+    SelectDocEnd, SelectDocStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart,
+    SelectRight, SelectUp, SelectWordLeft, SelectWordRight, Tab, ToggleCheckbox, TogglePreview,
+    ToggleReplace, ToggleSearchCase, ToggleSearchRegex, ToggleSearchWholeWord, Undo,
 };
 
 // ── HoverState ─────────────────────────────────────────────────────────────────

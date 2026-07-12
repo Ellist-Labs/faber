@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{AnyElement, IntoElement, MouseButton, SharedString, UniformListScrollHandle, WeakEntity, div, img, prelude::*, px, uniform_list};
 use faber_lsp::diagnostics::Severity;
+use gpui::{
+    AnyElement, IntoElement, MouseButton, SharedString, UniformListScrollHandle, WeakEntity, div,
+    img, prelude::*, px, uniform_list,
+};
 
 use crate::theme::RuntimeTheme;
 use crate::ui::h_flex;
@@ -76,15 +79,24 @@ fn render_row(
     t: &RuntimeTheme,
 ) -> AnyElement {
     match row {
-        Row::FileHeader { filename, dir, file_icon, counts } => {
-            render_file_header(filename, dir, file_icon, counts, i, t)
-        }
-        Row::RefEntry { path, line, col, preview } => {
-            render_ref_entry(path, *line, *col, preview, workspace, i, t)
-        }
-        Row::DiagEntry { path, lsp_line, message, severity } => {
-            render_diag_entry(path, *lsp_line, message, *severity, workspace, i, t)
-        }
+        Row::FileHeader {
+            filename,
+            dir,
+            file_icon,
+            counts,
+        } => render_file_header(filename, dir, file_icon, counts, i, t),
+        Row::RefEntry {
+            path,
+            line,
+            col,
+            preview,
+        } => render_ref_entry(path, *line, *col, preview, workspace, i, t),
+        Row::DiagEntry {
+            path,
+            lsp_line,
+            message,
+            severity,
+        } => render_diag_entry(path, *lsp_line, message, *severity, workspace, i, t),
     }
 }
 
@@ -113,16 +125,12 @@ fn render_file_header(
             .when(*errors > 0, {
                 let e = *errors;
                 let color = t.error;
-                move |el| {
-                    el.child(div().text_color(color).child(format!("{e}E")))
-                }
+                move |el| el.child(div().text_color(color).child(format!("{e}E")))
             })
             .when(*warnings > 0, {
                 let w = *warnings;
                 let color = t.warning;
-                move |el| {
-                    el.child(div().text_color(color).child(format!("{w}W")))
-                }
+                move |el| el.child(div().text_color(color).child(format!("{w}W")))
             })
             .into_any_element(),
     };

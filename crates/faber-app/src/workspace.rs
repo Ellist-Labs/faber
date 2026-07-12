@@ -1818,7 +1818,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let root = cx.try_global::<crate::ProjectRoot>().and_then(|r| r.0.clone());
+        let root = cx
+            .try_global::<crate::ProjectRoot>()
+            .and_then(|r| r.0.clone());
         let existing = self.pane().read(cx).find_references_tab();
         if let Some(ix) = existing {
             if let Some(panel) = self.pane().read(cx).references_panel_at(ix).cloned() {

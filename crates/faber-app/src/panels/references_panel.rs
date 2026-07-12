@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{App, Context, FocusHandle, Focusable, IntoElement, Render, SharedString, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px};
+use gpui::{
+    App, Context, FocusHandle, Focusable, IntoElement, Render, SharedString,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
+};
 use rust_i18n::t;
 
 use crate::file_icons;
@@ -48,7 +51,11 @@ impl ReferencesPanel {
 
         for (path, entries) in groups {
             let rel = match root {
-                Some(r) => path.strip_prefix(r).unwrap_or(&path).to_string_lossy().into_owned(),
+                Some(r) => path
+                    .strip_prefix(r)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned(),
                 None => path.to_string_lossy().into_owned(),
             };
             let rel_fwd = rel.replace('\\', "/");
