@@ -14,7 +14,8 @@ pub use icon::{Icon, IconName};
 pub use key_hint::KeyHint;
 pub use label::Label;
 pub use modal::{
-    modal_backdrop, modal_container, modal_footer, popover_container, render_matched_text,
+    glass_surface, modal_backdrop, modal_backdrop_clear, modal_container, modal_footer,
+    popover_container, render_matched_text,
 };
 pub use scrollbar::{ScrollbarDrag, render_scrollbar};
 

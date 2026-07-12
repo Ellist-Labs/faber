@@ -2,7 +2,7 @@ pub mod default;
 
 use serde::{Deserialize, Serialize};
 
-/// Raw RGB color as 0xRRGGBB.
+/// Raw RGBA color as 0xRRGGBBAA. Alpha FF = opaque.
 pub type HexColor = u32;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +40,7 @@ pub struct SemanticColors {
     // Surface
     pub bg: HexColor,
     pub bg_elevated: HexColor,
+    pub bg_raised: HexColor,
     pub bg_overlay: HexColor,
     pub bg_sunken: HexColor,
     // Text
@@ -151,9 +152,11 @@ pub struct Spacing {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Radii {
+    pub xs: f32,
     pub sm: f32,
     pub md: f32,
     pub lg: f32,
+    pub xl: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

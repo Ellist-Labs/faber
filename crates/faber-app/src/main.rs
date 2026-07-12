@@ -263,7 +263,7 @@ fn main() {
                         titlebar: Some(TitlebarOptions {
                             title: None,
                             appears_transparent: true,
-                            traffic_light_position: Some(point(px(12.), px(11.))),
+                            traffic_light_position: Some(point(px(14.), px(12.))),
                         }),
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         ..Default::default()
@@ -340,6 +340,8 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, Some("Workspace")),
         // Sidebar / panels
         KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
+        KeyBinding::new("cmd-1", ToggleSidebar, Some("Workspace")),
+        KeyBinding::new("escape", ToggleSidebar, Some("Sidebar")),
         KeyBinding::new("cmd-j", ToggleBottomPanel, Some("Workspace")),
         KeyBinding::new("ctrl-cmd-b", ToggleRightPanel, Some("Workspace")),
         // Tabs

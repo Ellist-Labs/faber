@@ -17,7 +17,8 @@ use crate::input_helpers::{
 };
 use crate::theme::RuntimeTheme;
 use crate::ui::{
-    IconName, h_flex, modal_backdrop, modal_container, modal_footer, render_matched_text, v_flex,
+    IconName, h_flex, modal_backdrop_clear, modal_container, modal_footer, render_matched_text,
+    v_flex,
 };
 use crate::workspace::Workspace;
 use crate::{
@@ -28,7 +29,7 @@ use crate::{
 const RESULT_LIMIT: usize = 100;
 const FILTER_DEBOUNCE_MS: u64 = 30;
 
-const MODAL_W: f32 = 640.;
+const MODAL_W: f32 = 540.;
 const INPUT_ROW_H: f32 = 45.;
 const FOOTER_H: f32 = 30.;
 const MODAL_H: f32 = 480.;
@@ -400,14 +401,14 @@ impl SymbolFinderView {
 
         h_flex()
             .id("sf-input-row")
-            .px_4()
-            .py(px(10.))
+            .px(px(15.))
+            .py(px(13.))
             .gap_2()
             .h(px(INPUT_ROW_H))
             .border_b_1()
             .border_color(t.separator)
             .font_family(t.mono_family.clone())
-            .text_size(px(t.font_size_code))
+            .text_size(px(14.))
             .text_color(t.text)
             .child(
                 svg()
@@ -461,13 +462,15 @@ impl Render for SymbolFinderView {
                     el.child(empty_state(&t!("symbol_finder.no_matches"), &t))
                 } else {
                     let selected = self.selected;
+                    // Spec §5.5: rows ~34px, mx 5, rounded 8, accent_muted selected, white 6% hover
+                    let hover_bg_row = gpui::rgba(0xFFFFFF0F);
                     let entries: Vec<AnyElement> = self
                         .rows
                         .iter()
                         .enumerate()
                         .map(|(i, row)| {
                             let is_selected = i == selected;
-                            let hover_bg = t.line_highlight;
+                            let accent_muted = t.accent_muted;
                             let name_el = render_matched_text(
                                 row.name.as_ref(),
                                 &row.positions,
@@ -478,11 +481,19 @@ impl Render for SymbolFinderView {
                             let path_and_line = row.path_and_line.clone();
                             div()
                                 .id(("sf-row", i))
-                                .px_4()
-                                .py(px(5.))
+                                .mx(px(5.))
+                                .px_2()
+                                .py(px(7.))
+                                .rounded(px(t.radius_md))
                                 .cursor_pointer()
-                                .when(is_selected, |el| el.bg(t.line_highlight))
-                                .hover(move |el| el.bg(hover_bg))
+                                .when(is_selected, |el| el.bg(accent_muted))
+                                .hover(move |el| {
+                                    if is_selected {
+                                        el
+                                    } else {
+                                        el.bg(gpui::Hsla::from(hover_bg_row))
+                                    }
+                                })
                                 .on_mouse_move(cx.listener(move |view, _, _, cx| {
                                     if view.selected != i {
                                         view.selected = i;
@@ -521,6 +532,7 @@ impl Render for SymbolFinderView {
                             .id("sf-list")
                             .h_full()
                             .overflow_y_scroll()
+                            .py(px(4.))
                             .track_scroll(&self.list_scroll)
                             .children(entries),
                     )
@@ -555,9 +567,10 @@ impl Render for SymbolFinderView {
                 ],
             ));
 
-        // ── backdrop: centered scrim with click-outside dismiss ────────────────
+        // ── backdrop: clear, top-anchored, with click-outside dismiss ─────────
+        const PAD_TOP: f32 = 132.;
         deferred(
-            modal_backdrop("sf-backdrop", &t)
+            modal_backdrop_clear("sf-backdrop", PAD_TOP)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, _, window, cx| view.dismiss(window, cx)),

@@ -3,7 +3,8 @@ use crate::{
     Typography, TypographyRole,
 };
 
-/// Built-in dark theme based on Catppuccin Mocha.
+/// Built-in dark theme — "Focused Glass" OLED Black (docs/ui-design-spec.md §2).
+/// All colors are 0xRRGGBBAA.
 pub fn faber_dark() -> Theme {
     Theme {
         name: String::from("Faber Dark"),
@@ -17,93 +18,97 @@ pub fn faber_dark() -> Theme {
     }
 }
 
+/// Legacy palette slots (inert — semantic tokens below are authoritative).
 fn palette() -> Palette {
     Palette {
-        crust: 0x11111b,
-        mantle: 0x181825,
-        base: 0x1e1e2e,
-        surface0: 0x313244,
-        surface1: 0x45475a,
-        surface2: 0x585b70,
-        overlay0: 0x6c7086,
-        overlay1: 0x7f849c,
-        overlay2: 0x9399b2,
-        subtext0: 0xa6adc8,
-        subtext1: 0xbac2de,
-        text: 0xcdd6f4,
-        lavender: 0xb4befe,
-        blue: 0x89b4fa,
-        sapphire: 0x74c7ec,
-        sky: 0x89dceb,
-        teal: 0x94e2d5,
-        green: 0xa6e3a1,
-        yellow: 0xf9e2af,
-        peach: 0xfab387,
-        maroon: 0xeba0ac,
-        red: 0xf38ba8,
-        mauve: 0xcba6f7,
-        pink: 0xf5c2e7,
-        flamingo: 0xf2cdcd,
-        rosewater: 0xf5e0dc,
+        crust: 0x080808FF,
+        mantle: 0x0D0D0DFF,
+        base: 0x000000FF,
+        surface0: 0x1A1A1AFF,
+        surface1: 0x262626FF,
+        surface2: 0x333333FF,
+        overlay0: 0x555555FF,
+        overlay1: 0x888888FF,
+        overlay2: 0xAAAAAAFF,
+        subtext0: 0x888888FF,
+        subtext1: 0xBBBBBBFF,
+        text: 0xFFFFFFFF,
+        lavender: 0x7472E8FF,
+        blue: 0x82AAFFFF,
+        sapphire: 0x89DDFFFF,
+        sky: 0x89DDFFFF,
+        teal: 0xB2CCD6FF,
+        green: 0xC3E88DFF,
+        yellow: 0xFFCB6BFF,
+        peach: 0xF78C6CFF,
+        maroon: 0xFF453AFF,
+        red: 0xFF453AFF,
+        mauve: 0xCF8EF4FF,
+        pink: 0xCF8EF4FF,
+        flamingo: 0xFF9F0AFF,
+        rosewater: 0xFF9F0AFF,
     }
 }
 
 fn semantic() -> SemanticColors {
     SemanticColors {
-        // Surface hierarchy
-        bg: 0x1e1e2e,          // base
-        bg_elevated: 0x181825, // mantle (chrome, title bar)
-        bg_overlay: 0x313244,  // surface0 (popovers, dropdowns)
-        bg_sunken: 0x11111b,   // crust (inset areas)
-        // Text
-        text: 0xcdd6f4,           // text
-        text_muted: 0xbac2de,     // subtext1
-        text_subtle: 0xa6adc8,    // subtext0
-        text_on_accent: 0x1e1e2e, // base (text on mauve accent)
-        text_disabled: 0x6c7086,  // overlay0
-        // Border
-        border: 0x45475a,       // surface1
-        border_focus: 0xcba6f7, // mauve
-        separator: 0x313244,    // surface0
-        // Accent (mauve = Catppuccin signature)
-        accent: 0xcba6f7,       // mauve
-        accent_hover: 0xb4befe, // lavender (lighter on hover)
-        accent_muted: 0x45475a, // surface1 (subtle accent bg)
-        // Editor
-        cursor: 0xcdd6f4,         // text (bar cursor)
-        selection: 0x45475a,      // surface1
-        word_highlight: 0x3d3f58, // between surface0 and selection — more prominent than line highlight
-        line_highlight: 0x313244, // surface0
-        gutter: 0x6c7086,         // overlay0
-        gutter_active: 0xcdd6f4,  // text
-        match_bg: 0x4a4f6a,       // mid-tone blue-grey (search match)
-        match_active: 0x7f849c,   // overlay1 (active match)
-        dirty: 0xf38ba8,          // red (unsaved indicator)
-        // Status
-        success: 0xa6e3a1, // green
-        warning: 0xf9e2af, // yellow
-        error: 0xf38ba8,   // red
-        info: 0x89b4fa,    // blue
+        // Surface hierarchy (§2.1)
+        bg: 0x000000FF,          // window background, active tab
+        bg_elevated: 0x0D0D0DFF, // title bar, tab bar, bottom panel, status bar
+        bg_raised: 0x1A1A1AFF,   // hover rows, badges, item icon fills
+        bg_overlay: 0x000000C2,  // glass surface base (§3)
+        bg_sunken: 0x080808FF,   // gutter background
+        // Text (§2.2)
+        text: 0xFFFFFFFF,
+        text_muted: 0x9A9A9AFF,  // #9A9A9A — contrast 5.5:1 on black (WCAG AA)
+        text_subtle: 0x6E6E6EFF, // #6E6E6E — more visible than previous #555
+        text_on_accent: 0xFFFFFFFF,
+        text_disabled: 0x555555FF,
+        // Border (§2.3)
+        border: 0xFFFFFF12,       // white 7%
+        border_focus: 0xFFFFFF1F, // white 12%
+        separator: 0xFFFFFF12,
+        // Accent (§2.4)
+        accent: 0x5E5CE6FF,
+        accent_hover: 0x7472E8FF,
+        accent_muted: 0x5E5CE62E, // 18%
+        // Editor (§2.5)
+        cursor: 0x5E5CE6FF,
+        selection: 0x5E5CE666,      // 40% — enough contrast on OLED black
+        word_highlight: 0x5E5CE64D, // 30%
+        line_highlight: 0xFFFFFF0D, // white 5%
+        // gutter tokens keep their text-color semantic (line numbers);
+        // the gutter *background* maps to bg_sunken.
+        gutter: 0x6E6E6EFF,
+        gutter_active: 0x9A9A9AFF,
+        match_bg: 0x5E5CE666,     // 40%
+        match_active: 0x5E5CE699, // 60%
+        dirty: 0x5E5CE6FF,
+        // Status (§2.6)
+        success: 0x30D158FF,
+        warning: 0xFF9F0AFF,
+        error: 0xFF453AFF,
+        info: 0x5E5CE6FF,
     }
 }
 
 fn syntax() -> SyntaxTheme {
     SyntaxTheme {
-        keyword: HighlightStyle::italic(0xcba6f7), // mauve, italic
-        function: HighlightStyle::color(0x89b4fa), // blue
-        r#type: HighlightStyle::color(0xf9e2af),   // yellow
-        string: HighlightStyle::color(0xa6e3a1),   // green
-        number: HighlightStyle::color(0xfab387),   // peach
-        comment: HighlightStyle::italic(0x6c7086), // overlay0, italic
-        constant: HighlightStyle::color(0xfab387), // peach
-        operator: HighlightStyle::color(0x89dceb), // sky
-        punctuation: HighlightStyle::color(0xcdd6f4), // text (neutral)
-        variable: HighlightStyle::color(0xcdd6f4), // text
-        property: HighlightStyle::color(0x89dceb), // sky
-        attribute: HighlightStyle::color(0xf5c2e7), // pink
-        namespace: HighlightStyle::color(0xf9e2af), // yellow
-        tag: HighlightStyle::color(0xcba6f7),      // mauve
-        label: HighlightStyle::color(0x89dceb),    // sky
+        keyword: HighlightStyle::italic(0xCF8EF4FF),
+        function: HighlightStyle::color(0x82AAFFFF),
+        r#type: HighlightStyle::color(0xFFCB6BFF),
+        string: HighlightStyle::color(0xC3E88DFF),
+        number: HighlightStyle::color(0xF78C6CFF),
+        comment: HighlightStyle::italic(0x546E7AFF),
+        constant: HighlightStyle::color(0xF78C6CFF),
+        operator: HighlightStyle::color(0x89DDFFFF),
+        punctuation: HighlightStyle::color(0xFFFFFF99), // white 60% — visible on OLED black
+        variable: HighlightStyle::color(0xFFFFFFFF),
+        property: HighlightStyle::color(0xB2CCD6FF),
+        attribute: HighlightStyle::color(0xFF9F0AFF),
+        namespace: HighlightStyle::color(0xFFCB6BFF),
+        tag: HighlightStyle::color(0xCF8EF4FF),
+        label: HighlightStyle::color(0x89DDFFFF),
     }
 }
 
@@ -112,29 +117,29 @@ fn typography() -> Typography {
         ui_family: String::from(".SystemUIFont"),
         mono_family: String::from("Menlo"),
         display: TypographyRole {
-            size_px: 20.0,
-            weight: 600,
-            line_height_px: 28.0,
+            size_px: 17.0,
+            weight: 700,
+            line_height_px: 20.0,
         },
         heading: TypographyRole {
-            size_px: 14.0,
+            size_px: 13.0,
             weight: 600,
-            line_height_px: 20.0,
+            line_height_px: 18.0,
         },
         body: TypographyRole {
             size_px: 13.0,
             weight: 400,
-            line_height_px: 18.0,
+            line_height_px: 19.0,
         },
         caption: TypographyRole {
-            size_px: 11.0,
+            size_px: 12.0,
             weight: 400,
-            line_height_px: 16.0,
+            line_height_px: 18.0,
         },
         code: TypographyRole {
             size_px: 13.0,
             weight: 400,
-            line_height_px: 20.0,
+            line_height_px: 21.0,
         },
     }
 }
@@ -145,24 +150,26 @@ fn spacing() -> Spacing {
         sp2: 4.0,
         sp3: 6.0,
         sp4: 8.0,
-        sp5: 12.0,
-        sp6: 16.0,
-        sp7: 24.0,
-        sp8: 32.0,
+        sp5: 10.0,
+        sp6: 12.0,
+        sp7: 16.0,
+        sp8: 20.0,
     }
 }
 
 fn radii() -> Radii {
     Radii {
-        sm: 4.0,
-        md: 6.0,
-        lg: 8.0,
+        xs: 4.0,
+        sm: 6.0,
+        md: 8.0,
+        lg: 10.0,
+        xl: 14.0,
     }
 }
 
 fn material() -> MaterialOpacity {
     MaterialOpacity {
-        chrome: 1.0, // opaque now; reduce to ~0.85 when blur lands
+        chrome: 1.0,
         overlay: 1.0,
         scrim: 0.35,
     }

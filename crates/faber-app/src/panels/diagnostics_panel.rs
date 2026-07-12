@@ -2,15 +2,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, FocusHandle, Focusable, IntoElement, Render, SharedString,
-    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
+    App, Context, FocusHandle, Focusable, IntoElement, Render, ScrollHandle, SharedString,
+    WeakEntity, Window, div, prelude::*, px, rgba,
 };
 use rust_i18n::t;
 
 use faber_lsp::diagnostics::{DiagnosticStore, Severity};
 
 use crate::file_icons;
-use crate::panels::results_list::{FileCounts, Row, render_results_list, split_path};
+use crate::panels::results_list::{
+    FileCounts, Row, render_problems_banner, render_results_list, split_path,
+};
 use crate::theme::RuntimeTheme;
 use crate::workspace::Workspace;
 
@@ -20,7 +22,11 @@ pub struct DiagnosticsPanel {
     workspace: Option<WeakEntity<Workspace>>,
     rows: Vec<Row>,
     last_generation: Option<u64>,
-    scroll: UniformListScrollHandle,
+    scroll: ScrollHandle,
+    /// Total error count across all files (kept in sync with rows).
+    total_errors: usize,
+    /// Total warning count across all files.
+    total_warnings: usize,
 }
 
 impl DiagnosticsPanel {
@@ -31,7 +37,9 @@ impl DiagnosticsPanel {
             workspace: None,
             rows: Vec::new(),
             last_generation: None,
-            scroll: UniformListScrollHandle::new(),
+            scroll: ScrollHandle::new(),
+            total_errors: 0,
+            total_warnings: 0,
         }
     }
 
@@ -44,9 +52,14 @@ impl DiagnosticsPanel {
     fn rebuild_rows(&mut self, root: Option<&Path>) {
         let Some(store) = &self.diagnostic_store else {
             self.rows.clear();
+            self.total_errors = 0;
+            self.total_warnings = 0;
             return;
         };
         self.rows.clear();
+        self.total_errors = 0;
+        self.total_warnings = 0;
+
         for (uri, entries) in store.get_all() {
             let file_path = Arc::new(
                 uri.to_file_path()
@@ -62,7 +75,7 @@ impl DiagnosticsPanel {
             };
             let rel_fwd = rel.replace('\\', "/");
             let (filename, dir) = split_path(&rel_fwd);
-            let file_icon = file_icons::icon_for_file(filename);
+            let _file_icon = file_icons::icon_for_file(filename);
 
             let error_count = entries
                 .iter()
@@ -73,10 +86,13 @@ impl DiagnosticsPanel {
                 .filter(|e| e.severity == Severity::Warning)
                 .count();
 
+            self.total_errors += error_count;
+            self.total_warnings += warning_count;
+
             self.rows.push(Row::FileHeader {
                 filename: SharedString::from(filename.to_owned()),
                 dir: SharedString::from(dir.to_owned()),
-                file_icon,
+                file_icon: file_icons::icon_for_file(filename),
                 counts: FileCounts::Problems {
                     errors: error_count,
                     warnings: warning_count,
@@ -88,6 +104,7 @@ impl DiagnosticsPanel {
                     lsp_line: entry.range.lsp_line,
                     message: SharedString::from(entry.message.clone()),
                     severity: entry.severity,
+                    source: SharedString::from(entry.source.as_ref().to_owned()),
                 });
             }
         }
@@ -127,6 +144,7 @@ impl Render for DiagnosticsPanel {
                 .flex()
                 .flex_col()
                 .size_full()
+                .child(render_problems_banner(0, 0))
                 .items_center()
                 .justify_center()
                 .font_family(t.ui_family.clone())
@@ -136,11 +154,30 @@ impl Render for DiagnosticsPanel {
                 .into_any_element();
         }
 
-        render_results_list(
-            "diag-rows",
-            self.rows.clone(),
-            self.scroll.clone(),
-            self.workspace.clone(),
-        )
+        // Outer container: padding 8px 12px 4px around the file groups
+        let list_content = div()
+            .flex()
+            .flex_col()
+            .px(px(12.))
+            .pt(px(8.))
+            .pb(px(4.))
+            .child(render_results_list(
+                "diag-rows",
+                self.rows.clone(),
+                self.scroll.clone(),
+                self.workspace.clone(),
+            ));
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgba(0x000000FFu32))
+            .child(render_problems_banner(
+                self.total_errors,
+                self.total_warnings,
+            ))
+            .child(list_content)
+            .into_any_element()
     }
 }

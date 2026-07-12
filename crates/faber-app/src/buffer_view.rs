@@ -61,17 +61,21 @@ pub(crate) fn build_text_runs(
         if start >= end {
             continue;
         }
-        let color = raw_spans
+        let (color, italic) = raw_spans
             .iter()
             .rfind(|s| {
                 let (sb, eb) = span_range(s);
                 start >= sb && end <= eb
             })
-            .map(|s| token_color(s.token, t))
-            .unwrap_or(t.text);
+            .map(|s| token_style(s.token, t))
+            .unwrap_or((t.text, false));
+        let mut run_font = default_font.clone();
+        if italic {
+            run_font.style = gpui::FontStyle::Italic;
+        }
         runs.push(TextRun {
             len: end - start,
-            font: default_font.clone(),
+            font: run_font,
             color,
             background_color: None,
             underline: None,
@@ -126,6 +130,16 @@ pub(crate) fn build_text_runs(
     }
 
     runs
+}
+
+/// Color + italic flag for a syntax token (spec §2.7: italic keyword/comment).
+pub(crate) fn token_style(token: SyntaxToken, t: &RuntimeTheme) -> (Hsla, bool) {
+    let italic = match token {
+        SyntaxToken::Keyword => t.syntax_keyword_italic,
+        SyntaxToken::Comment => t.syntax_comment_italic,
+        _ => false,
+    };
+    (token_color(token, t), italic)
 }
 
 pub(crate) fn token_color(token: SyntaxToken, t: &RuntimeTheme) -> Hsla {

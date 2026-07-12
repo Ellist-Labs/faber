@@ -17,16 +17,17 @@ use gpui::{
     AnyElement, App, ClipboardItem, Context, Div, DragMoveEvent, Entity, FocusHandle, Focusable,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Render,
     ScrollStrategy, SharedString, Stateful, Task, UniformListScrollHandle, Window, anchored,
-    deferred, div, img, prelude::*, px, relative, svg,
+    deferred, div, prelude::*, px, relative, svg,
 };
 
 use crate::editor_view::{EditorEvent, EditorView};
 use crate::file_finder::FileFinderView;
+use crate::file_icons::language_dot_color;
 use crate::lsp_status::LspStatus;
 use crate::pane::{Pane, TabKind, TabMenu};
 use crate::project_search_view::ProjectSearchView;
 use crate::settings_view::{SettingsStore, SettingsView};
-use crate::sidebar::{SidebarItem, SidebarItemKind, SidebarState, default_items};
+use crate::sidebar::{SidebarItemKind, SidebarState};
 use crate::theme::{ActiveTheme, RuntimeTheme};
 use crate::ui::scrollbar::update_drag;
 use crate::ui::{
@@ -168,14 +169,13 @@ pub struct Workspace {
     next_pane_id: u64,
     root_folder: Option<PathBuf>,
     focus_handle: FocusHandle,
-    pub(crate) sidebar_items: Vec<SidebarItem>,
     pub(crate) sidebar: SidebarState,
-    pub(crate) sidebar_resizing: bool,
     pub(crate) tree: Option<FileTree>,
     pub(crate) visible_rows: Vec<VisibleRow>,
     pub(crate) tree_scroll: UniformListScrollHandle,
     pub(crate) tree_scrollbar_drag: Option<ScrollbarDrag>,
     pub(crate) bottom_open: bool,
+    pub(crate) bottom_panel_tab: usize,
     pub(crate) right_open: bool,
     /// Bumped on every edit; a debounced auto-save fires only if no newer
     /// edit arrived while its timer slept.
@@ -200,6 +200,7 @@ pub struct Workspace {
     pub(crate) lsp_overlay_pos: gpui::Point<gpui::Pixels>,
     active_doc_info: Entity<crate::status_bar::ActiveDocInfo>,
     language_picker: Option<Entity<crate::language_picker::LanguagePickerView>>,
+    pub(crate) sidebar_focus: FocusHandle,
 }
 
 impl Workspace {
@@ -218,27 +219,38 @@ impl Workspace {
         let lsp_status = cx.new(|_| LspStatus::new());
         let active_doc_info = cx.new(|_| crate::status_bar::ActiveDocInfo::new());
         let status_bar = cx.new(|_| crate::status_bar::StatusBar::new());
+        // LEFT slot: Language → LSP → Errors → Warnings
+        {
+            let ws_weak = cx.entity().downgrade();
+            let item = cx.new(|cx| {
+                crate::status_bar::LanguageStatusItem::new(active_doc_info.clone(), ws_weak, cx)
+            });
+            status_bar.update(cx, |bar, _| bar.push_left(item.into()));
+        }
+        {
+            let ws_weak = cx.entity().downgrade();
+            let item =
+                cx.new(|cx| crate::status_bar::LspStatusItem::new(lsp_status.clone(), ws_weak, cx));
+            status_bar.update(cx, |bar, _| bar.push_left(item.into()));
+        }
+        {
+            let item =
+                cx.new(|cx| crate::status_bar::DiagnosticsStatusItem::new(lsp_status.clone(), cx));
+            status_bar.update(cx, |bar, _| bar.push_left(item.into()));
+        }
+        // RIGHT slot: Indexing → Cursor → Encoding
         {
             let item =
                 cx.new(|cx| crate::status_bar::IndexingStatusItem::new(index_status.clone(), cx));
             status_bar.update(cx, |bar, _| bar.push_right(item.into()));
         }
         {
-            let ws_weak = cx.entity().downgrade();
-            let item = cx.new(|cx| {
-                crate::status_bar::LanguageStatusItem::new(active_doc_info.clone(), ws_weak, cx)
-            });
+            let item =
+                cx.new(|cx| crate::status_bar::CursorStatusItem::new(active_doc_info.clone(), cx));
             status_bar.update(cx, |bar, _| bar.push_right(item.into()));
         }
         {
-            let ws_weak = cx.entity().downgrade();
-            let item =
-                cx.new(|cx| crate::status_bar::LspStatusItem::new(lsp_status.clone(), ws_weak, cx));
-            status_bar.update(cx, |bar, _| bar.push_right(item.into()));
-        }
-        {
-            let item =
-                cx.new(|cx| crate::status_bar::DiagnosticsStatusItem::new(lsp_status.clone(), cx));
+            let item = cx.new(|_| crate::status_bar::EncodingStatusItem);
             status_bar.update(cx, |bar, _| bar.push_right(item.into()));
         }
 
@@ -249,14 +261,13 @@ impl Workspace {
             next_pane_id: 1,
             root_folder: None,
             focus_handle: cx.focus_handle(),
-            sidebar_items: default_items(),
             sidebar: SidebarState::default(),
-            sidebar_resizing: false,
             tree: None,
             visible_rows: Vec::new(),
             tree_scroll: UniformListScrollHandle::new(),
             tree_scrollbar_drag: None,
             bottom_open: false,
+            bottom_panel_tab: 0,
             right_open: false,
             autosave_generation: 0,
             index_engine: None,
@@ -276,6 +287,7 @@ impl Workspace {
             lsp_overlay_pos: gpui::point(gpui::px(0.), gpui::px(0.)),
             active_doc_info,
             language_picker: None,
+            sidebar_focus: cx.focus_handle(),
         };
         if !paths.is_empty() {
             // Detect project root from the first path so the LSP can start.
@@ -1092,13 +1104,23 @@ impl Workspace {
             .active_tab()
             .and_then(|t| t.editor())
             .cloned();
-        let lang = editor.and_then(|e| {
-            let doc = &e.read(cx).doc;
+        let (lang, cursor) = if let Some(ref e) = editor {
+            let ev = e.read(cx);
+            let doc = &ev.doc;
             let registry = cx.global::<crate::Registry>().0.clone();
-            registry.language_for_path(&doc.path)
-        });
+            let l = registry.language_for_path(&doc.path);
+            let head = ev.sel.head;
+            let line = doc.rope.char_to_line(head);
+            let col = head - doc.rope.line_to_char(line);
+            (l, Some((line + 1, col + 1)))
+        } else {
+            (None, None)
+        };
+        let has_editor = editor.is_some();
         self.active_doc_info.update(cx, |info, cx| {
             info.language = lang;
+            info.cursor = cursor;
+            info.has_editor = has_editor;
             cx.notify();
         });
     }
@@ -1991,8 +2013,16 @@ impl Workspace {
         cx.notify();
     }
 
-    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_sidebar(
+        &mut self,
+        _: &ToggleSidebar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sidebar.open = !self.sidebar.open;
+        if self.sidebar.open {
+            window.focus(&self.sidebar_focus);
+        }
         cx.notify();
     }
 
@@ -2431,73 +2461,45 @@ impl Workspace {
         )
     }
 
-    fn render_titlebar(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> impl IntoElement {
-        let sidebar_open = self.sidebar.open;
-        let bottom_open = self.bottom_open;
-        let right_open = self.right_open;
-        let hover_bg = t.line_highlight;
-        let active_bg = t.line_highlight;
-        let accent = t.accent;
-        let text_subtle = t.text_subtle;
-        let radius = t.radius_sm;
+    fn render_titlebar(
+        &self,
+        title: &str,
+        t: &RuntimeTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        // Centered title — absolute so it doesn't push the settings button.
+        let title_label = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .top_0()
+            .bottom_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .children(std::iter::once(
+                div()
+                    .font_family(t.ui_family.clone())
+                    .text_size(px(12.))
+                    .text_color(t.text_muted)
+                    .child(title.to_string()),
+            ));
 
-        let make_btn = |id: &'static str, icon: IconName, active: bool, color: gpui::Hsla| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(28.))
-                .rounded(px(radius))
-                .cursor_pointer()
-                .when(active, move |el| el.bg(active_bg))
-                .hover(move |s| s.bg(hover_bg))
-                .child(svg().path(icon.path()).size(px(15.)).text_color(color))
-        };
-
-        let left_btn = make_btn(
-            "titlebar-left-panel",
-            IconName::PanelLeft,
-            sidebar_open,
-            if sidebar_open { accent } else { text_subtle },
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|ws, _, window, cx| {
-                cx.stop_propagation();
-                ws.on_toggle_sidebar(&ToggleSidebar, window, cx);
-            }),
-        );
-
-        let right_btn = make_btn(
-            "titlebar-right-panel",
-            IconName::PanelRight,
-            right_open,
-            if right_open { accent } else { text_subtle },
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|ws, _, window, cx| {
-                cx.stop_propagation();
-                ws.on_toggle_right_panel(&ToggleRightPanel, window, cx);
-            }),
-        );
-
-        let bottom_btn = make_btn(
-            "titlebar-bottom-panel",
-            IconName::PanelBottom,
-            bottom_open,
-            if bottom_open { accent } else { text_subtle },
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|ws, _, window, cx| {
-                cx.stop_propagation();
-                ws.on_toggle_bottom_panel(&ToggleBottomPanel, window, cx);
-            }),
-        );
-
-        let settings_btn = make_btn("titlebar-settings", IconName::Settings, false, text_subtle)
+        let settings_btn = div()
+            .id("titlebar-settings")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(28.))
+            .rounded(px(t.radius_sm))
+            .cursor_pointer()
+            .hover(move |s| s.bg(t.line_highlight))
+            .child(
+                svg()
+                    .path(IconName::Settings.path())
+                    .size(px(14.))
+                    .text_color(t.text_muted),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|ws, _, window, cx| {
@@ -2506,58 +2508,110 @@ impl Workspace {
                 }),
             );
 
-        h_flex()
+        div()
             .id("titlebar")
-            .h(px(36.))
+            .h(px(t.titlebar_h))
             .flex_shrink_0()
-            .px_2()
+            .flex()
+            .flex_row()
+            .items_center()
             .bg(t.bg_elevated)
             .border_b_1()
-            .border_color(t.separator)
+            .border_color(t.border)
+            .relative()
             .on_mouse_down(MouseButton::Left, |_, window, _cx| {
                 window.start_window_move();
             })
+            // Native traffic-light spacer
             .child(div().w(px(72.)).flex_shrink_0())
+            // Flex spacer to push settings to the right
             .child(div().flex_1())
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(left_btn)
-                    .child(right_btn)
-                    .child(bottom_btn)
-                    .child(settings_btn),
-            )
-            .child(div().w_2())
+            // Settings button (right side)
+            .child(settings_btn)
+            .child(div().w(px(6.)))
+            // Centered title (non-interactive, rendered above flex layer)
+            .child(title_label)
     }
 
-    fn render_bottom_panel(&self, t: &RuntimeTheme) -> impl IntoElement {
+    fn titlebar_title(&self, cx: &Context<Self>) -> String {
+        let project_name = self
+            .root_folder
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let pane = self.pane().read(cx);
+        let Some(tab) = pane.active_tab() else {
+            return "Faber".to_string();
+        };
+        let (tab_title, _dirty) = tab.title(cx);
+        if project_name.is_empty() {
+            tab_title
+        } else {
+            format!("{} \u{2014} {}", tab_title, project_name)
+        }
+    }
+
+    fn render_bottom_panel(&self, t: &RuntimeTheme, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_tab = self.bottom_panel_tab;
+        let tabs = [
+            rust_i18n::t!("panel.terminal").to_string(),
+            rust_i18n::t!("panel.output").to_string(),
+        ];
+
+        let tab_strip = h_flex()
+            .h(px(34.))
+            .flex_shrink_0()
+            .px(px(6.))
+            .border_b_1()
+            .border_color(t.border)
+            .children(tabs.iter().enumerate().map(|(i, label)| {
+                let is_active = i == active_tab;
+                div()
+                    .id(SharedString::from(format!("panel-tab-{}", i)))
+                    .flex()
+                    .items_center()
+                    .h_full()
+                    .px(px(9.))
+                    .cursor_pointer()
+                    .font_family(t.ui_family.clone())
+                    .text_size(px(11.5))
+                    .text_color(if is_active { t.text } else { t.text_muted })
+                    .border_b_2()
+                    .border_color(if is_active {
+                        t.accent
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |ws, _, _, cx| {
+                            ws.bottom_panel_tab = i;
+                            cx.notify();
+                        }),
+                    )
+                    .child(label.clone())
+            }));
+
         v_flex()
             .w_full()
-            .h(px(180.))
+            .h(px(t.bottom_panel_h))
             .flex_shrink_0()
             .bg(t.bg_elevated)
             .border_t_1()
-            .border_color(t.separator)
-            .child(
-                div()
-                    .px_3()
-                    .h(px(30.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .text_size(px(t.font_size_caption))
-                    .text_color(t.text_muted)
-                    .font_family(t.ui_family.clone())
-                    .child(rust_i18n::t!("panel.terminal").to_string()),
-            )
+            .border_color(t.border)
+            .rounded_tl(px(10.))
+            .rounded_tr(px(10.))
+            .child(tab_strip)
             .child(
                 v_flex()
                     .flex_1()
                     .items_center()
                     .justify_center()
-                    .text_size(px(t.font_size_caption))
-                    .text_color(t.text_muted)
-                    .font_family(t.ui_family.clone())
+                    .text_size(px(12.5))
+                    .text_color(t.text_subtle)
+                    .font_family(t.mono_family.clone())
                     .child(rust_i18n::t!("panel.coming_soon").to_string()),
             )
     }
@@ -2695,60 +2749,97 @@ impl Workspace {
         t: &RuntimeTheme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let (title, dirty, is_active, tab_id, icon) = {
+        let (title, dirty, is_active, tab_id, tab_kind) = {
             let pane = self.panes[&pane_id].read(cx);
             let tab = &pane.tabs[ix];
             let (title, dirty) = tab.title(cx);
             let is_active = pane.active == Some(ix);
-            let icon: AnyElement = match tab.content.kind {
-                TabKind::Editor => img(crate::file_icons::icon_for_file(&title))
-                    .size(px(14.0))
+            (title, dirty, is_active, tab.id, tab.content.kind)
+        };
+
+        let lsp_errors = self.lsp_status.read(cx).error_count;
+
+        // Left dot per tab kind
+        let left_dot: AnyElement = match tab_kind {
+            TabKind::Editor => {
+                let dot_color = language_dot_color(&title)
+                    .map(|v| {
+                        let c: gpui::Hsla = gpui::rgba(v).into();
+                        c
+                    })
+                    .unwrap_or(t.text_muted);
+                div()
+                    .size(px(7.))
                     .flex_shrink_0()
+                    .rounded_full()
+                    .bg(dot_color)
+                    .into_any_element()
+            }
+            TabKind::Problems => div()
+                .size(px(7.))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(t.error)
+                .into_any_element(),
+            TabKind::References => div()
+                .size(px(7.))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(t.text_muted)
+                .into_any_element(),
+            TabKind::Settings => svg()
+                .path(IconName::Settings.path())
+                .size(px(14.0))
+                .flex_shrink_0()
+                .text_color(t.text_muted)
+                .into_any_element(),
+            TabKind::ProjectSearch => svg()
+                .path(IconName::Search.path())
+                .size(px(14.0))
+                .flex_shrink_0()
+                .text_color(t.text_muted)
+                .into_any_element(),
+        };
+
+        // Error count pill for Problems tab
+        let error_pill: Option<AnyElement> = if tab_kind == TabKind::Problems && lsp_errors > 0 {
+            Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(5.))
+                    .bg(gpui::rgba(0xFF453A24))
+                    .text_size(px(10.))
+                    .font_family(t.ui_family.clone())
+                    .text_color(t.error)
+                    .child(format!("{}", lsp_errors))
                     .into_any_element(),
-                TabKind::Settings => svg()
-                    .path(IconName::Settings.path())
-                    .size(px(14.0))
-                    .flex_shrink_0()
-                    .text_color(t.text_muted)
-                    .into_any_element(),
-                TabKind::ProjectSearch => svg()
-                    .path(IconName::Search.path())
-                    .size(px(14.0))
-                    .flex_shrink_0()
-                    .text_color(t.text_muted)
-                    .into_any_element(),
-                TabKind::Problems => svg()
-                    .path(IconName::Search.path())
-                    .size(px(14.0))
-                    .flex_shrink_0()
-                    .text_color(t.text_muted)
-                    .into_any_element(),
-                TabKind::References => svg()
-                    .path(IconName::Search.path())
-                    .size(px(14.0))
-                    .flex_shrink_0()
-                    .text_color(t.text_muted)
-                    .into_any_element(),
-            };
-            (title, dirty, is_active, tab.id, icon)
+            )
+        } else {
+            None
         };
 
         let element_id = SharedString::from(format!("tab-{}-{}", pane_id.0, tab_id));
 
-        h_flex()
+        let tab = h_flex()
             .id(element_id)
             .group("tab")
             .flex_shrink_0()
-            .max_w(px(170.))
-            .gap_2()
-            .px_3()
+            .min_w(px(126.))
+            .max_w(px(200.))
+            .gap(px(7.))
+            .pl(px(12.))
+            .pr(px(10.))
             .h_full()
             .border_r_1()
             .border_color(t.separator)
+            .relative()
             .when(is_active, |el| el.bg(t.bg))
-            .when(!is_active, |el| el.bg(t.bg_elevated))
+            .when(!is_active, |el| el.hover(|s| s.bg(gpui::rgba(0xFFFFFF0A))))
             .font_family(t.ui_family.clone())
-            .text_size(px(t.font_size_caption))
+            .text_size(px(12.))
             .text_color(if is_active { t.text } else { t.text_muted })
             .cursor_pointer()
             .on_drag(
@@ -2785,7 +2876,7 @@ impl Workspace {
                     ws.request_close_tab_in(pane_id, ix, window, cx)
                 }),
             )
-            .child(icon)
+            .child(left_dot)
             .child(
                 div()
                     .flex_1()
@@ -2794,23 +2885,41 @@ impl Workspace {
                     .text_ellipsis()
                     .child(title),
             )
+            .when_some(error_pill, |el, pill| el.child(pill))
+            // Dirty dot: visible when dirty AND not hovered; replaced by close × on hover
             .when(dirty, |el| {
                 el.child(
                     div()
-                        .size(px(7.0))
+                        .size(px(6.0))
                         .flex_shrink_0()
                         .rounded_full()
-                        .bg(t.dirty),
+                        .bg(t.dirty)
+                        .group_hover("tab", |s| s.invisible()),
                 )
             })
+            // Close × button: invisible at rest, visible on tab group hover
             .child(
-                svg()
-                    .path(IconName::Close.path())
-                    .size(px(16.0))
+                div()
+                    .id(SharedString::from(format!(
+                        "tab-close-{}-{}",
+                        pane_id.0, tab_id
+                    )))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(14.0))
+                    .rounded(px(4.))
                     .flex_shrink_0()
-                    .text_color(gpui::transparent_black())
-                    .group_hover("tab", |s| s.text_color(t.text_subtle))
-                    .hover(|s| s.text_color(t.text))
+                    .invisible()
+                    .group_hover("tab", |s| s.visible())
+                    .hover(|s| s.bg(gpui::rgba(0xFFFFFF1A)))
+                    .cursor_pointer()
+                    .child(
+                        svg()
+                            .path(IconName::Close.path())
+                            .size(px(10.0))
+                            .text_color(t.text_subtle),
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |ws, _, window, cx| {
@@ -2818,7 +2927,22 @@ impl Workspace {
                             ws.request_close_tab_in(pane_id, ix, window, cx);
                         }),
                     ),
+            );
+
+        // Active tab bottom accent bar
+        if is_active {
+            tab.child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(2.))
+                    .bg(t.accent),
             )
+        } else {
+            tab
+        }
     }
 
     fn render_tab_bar_for(
@@ -2833,12 +2957,12 @@ impl Workspace {
             .id(bar_id)
             .flex()
             .flex_row()
-            .h(px(30.0))
+            .h(px(t.tab_h))
             .flex_shrink_0()
-            .overflow_x_scroll()
+            .overflow_x_hidden()
             .bg(t.bg_elevated)
             .border_b_1()
-            .border_color(t.separator)
+            .border_color(t.border)
             .on_drop::<DraggedTab>(cx.listener(move |ws, dragged: &DraggedTab, window, cx| {
                 ws.drop_hover = None;
                 if dragged.source_pane != pane_id {
@@ -2924,6 +3048,10 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(move |ws, _, _, cx| {
                     ws.focused_pane = pane_id;
+                    // Close sidebar when editor receives a click (§6.4), without consuming event.
+                    if ws.sidebar.open {
+                        ws.sidebar.open = false;
+                    }
                     cx.notify();
                 }),
             )
@@ -3173,21 +3301,6 @@ impl Render for Workspace {
                         }),
                     )
             })
-            .when(self.sidebar_resizing, |el| {
-                el.on_mouse_move(cx.listener(|ws, event: &MouseMoveEvent, _, cx| {
-                    use crate::sidebar::ACTIVITY_BAR_W;
-                    let x = f32::from(event.position.x);
-                    ws.sidebar.width = (x - ACTIVITY_BAR_W).clamp(160.0, 600.0);
-                    cx.notify();
-                }))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|ws, _, _, cx| {
-                        ws.sidebar_resizing = false;
-                        cx.notify();
-                    }),
-                )
-            })
             .when(self.tree_scrollbar_drag.is_some(), |el| {
                 el.on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, _, cx| {
                     if let Some(ref drag) = ws.tree_scrollbar_drag {
@@ -3205,7 +3318,7 @@ impl Render for Workspace {
                 )
             });
 
-        // Empty state: show welcome screen only when no folder and all panes are empty.
+        // Empty state: show welcome screen with titlebar + empty tab bar + welcome content.
         let all_empty = self.panes.values().all(|p| p.read(cx).is_empty());
         if all_empty && self.root_folder.is_none() {
             let (recent_projects, recent_files) = {
@@ -3215,25 +3328,20 @@ impl Render for Workspace {
                     store.0.recent_files.clone(),
                 )
             };
+
             return base
                 .flex()
-                .items_center()
-                .justify_center()
-                .child(render_welcome(
+                .flex_col()
+                .child(self.render_titlebar("Faber", &t, cx))
+                .child(div().flex_1().min_h(px(0.)).child(render_welcome(
                     &t,
                     &recent_projects,
                     &recent_files,
                     &cx.entity(),
-                ))
-                .when_some(self.file_finder.clone(), |el, finder| {
-                    el.relative().child(finder)
-                })
-                .when_some(self.symbol_finder.clone(), |el, finder| {
-                    el.relative().child(finder)
-                })
-                .when_some(self.language_picker.clone(), |el, picker| {
-                    el.relative().child(picker)
-                })
+                )))
+                .when_some(self.file_finder.clone(), |el, finder| el.child(finder))
+                .when_some(self.symbol_finder.clone(), |el, finder| el.child(finder))
+                .when_some(self.language_picker.clone(), |el, picker| el.child(picker))
                 .map(|el| match self.render_confirm_modal(&t, cx) {
                     Some(modal) => el.relative().child(modal),
                     None => el,
@@ -3248,15 +3356,21 @@ impl Render for Workspace {
         let root_member = self.pane_group.root.clone();
         let main = self.render_pane_group(root_member, vec![], &t, cx);
 
-        let body_row = h_flex()
+        // Sidebar glass overlay: absolute on top of editor, zero layout shift.
+        let sidebar_overlay = if self.sidebar.open {
+            Some(self.render_sidebar_panel(&t, cx).into_any_element())
+        } else {
+            None
+        };
+
+        let body_row = div()
+            .flex()
+            .flex_row()
             .flex_1()
             .min_h(px(0.))
-            .child(self.render_activity_bar(&t, cx))
-            .when(self.sidebar.open, |el| {
-                el.child(self.render_sidebar_panel(&t, cx))
-                    .child(self.render_sidebar_resize_handle(&t, cx))
-            })
+            .relative()
             .child(main)
+            .when_some(sidebar_overlay, |el, overlay| el.child(overlay))
             .when(self.right_open, |el| {
                 el.child(self.render_right_panel(&t, cx))
             });
@@ -3266,14 +3380,15 @@ impl Render for Workspace {
             .min_h(px(0.))
             .child(body_row)
             .when(self.bottom_open, |el| {
-                el.child(self.render_bottom_panel(&t))
+                el.child(self.render_bottom_panel(&t, cx))
             });
 
+        let title = self.titlebar_title(cx);
         let root = base
             .flex()
             .flex_col()
             .relative()
-            .child(self.render_titlebar(&t, cx))
+            .child(self.render_titlebar(&title, &t, cx))
             .child(body)
             .child(self.status_bar.clone())
             .map(|el| match self.render_context_menu(&t, cx) {

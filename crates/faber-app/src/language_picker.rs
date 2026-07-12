@@ -10,7 +10,7 @@ use faber_lang::Language;
 use crate::{
     LpConfirm, LpDismiss, LpSelectNext, LpSelectPrev,
     theme::RuntimeTheme,
-    ui::{h_flex, modal_backdrop, modal_container, modal_footer, v_flex},
+    ui::{h_flex, modal_backdrop_clear, modal_container, modal_footer, v_flex},
     workspace::Workspace,
 };
 
@@ -89,6 +89,8 @@ impl Render for LanguagePickerView {
         let cursor = self.cursor;
         let current_lang_id = self.current_lang_id.clone();
 
+        // Spec §5.5: rows rounded 8, mx 5, accent_muted selected, white 6% hover
+        let hover_bg_row = gpui::rgba(0xFFFFFF0F);
         let rows: Vec<_> = self
             .languages
             .iter()
@@ -99,17 +101,23 @@ impl Render for LanguagePickerView {
                     .as_ref()
                     .map(|id| id == &lang.id)
                     .unwrap_or(false);
-                let bg = if is_selected {
-                    t.line_highlight
-                } else {
-                    t.bg_elevated
-                };
+                let accent_muted = t.accent_muted;
                 let name = lang.name.clone();
                 h_flex()
+                    .id(("lp-row", ix))
+                    .mx(px(5.))
                     .px(px(t.sp5))
                     .py(px(t.sp2))
                     .gap(px(t.sp3))
-                    .bg(bg)
+                    .rounded(px(t.radius_md))
+                    .when(is_selected, |el| el.bg(accent_muted))
+                    .hover(move |el| {
+                        if is_selected {
+                            el
+                        } else {
+                            el.bg(gpui::Hsla::from(hover_bg_row))
+                        }
+                    })
                     .child(
                         div()
                             .w(px(16.))
@@ -131,6 +139,7 @@ impl Render for LanguagePickerView {
         let list = v_flex()
             .id("lp-list")
             .overflow_y_scroll()
+            .py(px(4.))
             .max_h(px(300.))
             .children(rows);
 
@@ -165,8 +174,9 @@ impl Render for LanguagePickerView {
             .child(list)
             .child(footer);
 
+        const PAD_TOP: f32 = 132.;
         deferred(
-            modal_backdrop("lp-backdrop", &t)
+            modal_backdrop_clear("lp-backdrop", PAD_TOP)
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|view, _, window, cx| {

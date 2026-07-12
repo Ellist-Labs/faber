@@ -4,55 +4,30 @@ use std::sync::Arc;
 use faber_editor::outline::Outline;
 use gpui::{
     AnyElement, App, Context, Div, Entity, IntoElement, ListHorizontalSizingBehavior, MouseButton,
-    SharedString, Stateful, div, img, prelude::*, px, svg, uniform_list,
+    SharedString, Stateful, div, prelude::*, px, svg, uniform_list,
 };
 
-use crate::OpenProjectSearch;
 use crate::file_icons;
 use crate::theme::RuntimeTheme;
-use crate::ui::{Icon, IconName, h_flex, v_flex};
+use crate::ui::{Icon, IconName, glass_surface, h_flex, v_flex};
 use crate::workspace::Workspace;
 
+#[allow(dead_code)]
 pub const ACTIVITY_BAR_W: f32 = 44.0;
+#[allow(dead_code)]
 pub const SIDEBAR_PANEL_W: f32 = 240.0;
-const TREE_ROW_H: f32 = 24.0;
-const TREE_INDENT_W: f32 = 12.0;
+const TREE_INDENT_W: f32 = 16.0;
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SidebarItemKind {
     Explorer,
     Search,
 }
 
-/// One activity-bar icon. Adding an entry to `default_items` is the whole
-/// contract for registering a new sidebar panel.
-pub struct SidebarItem {
-    pub kind: SidebarItemKind,
-    pub icon: IconName,
-    /// Stable GPUI element ID for the activity-bar button — not a display
-    /// label (the visible title comes from i18n `t!()` in `render_sidebar_panel`).
-    pub id: &'static str,
-}
-
-pub fn default_items() -> Vec<SidebarItem> {
-    vec![
-        SidebarItem {
-            kind: SidebarItemKind::Explorer,
-            icon: IconName::FileCopy,
-            id: "Explorer",
-        },
-        SidebarItem {
-            kind: SidebarItemKind::Search,
-            icon: IconName::Search,
-            id: "Search",
-        },
-    ]
-}
-
 pub struct SidebarState {
     pub open: bool,
     pub active: SidebarItemKind,
-    pub width: f32,
 }
 
 impl Default for SidebarState {
@@ -60,89 +35,35 @@ impl Default for SidebarState {
         Self {
             open: false,
             active: SidebarItemKind::Explorer,
-            width: SIDEBAR_PANEL_W,
         }
     }
 }
 
 impl Workspace {
-    pub(crate) fn render_activity_bar(
-        &self,
-        t: &RuntimeTheme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        v_flex()
-            .w(px(ACTIVITY_BAR_W))
-            .flex_shrink_0()
-            .h_full()
-            .items_center()
-            .py_2()
-            .gap_1()
-            .bg(t.bg_elevated)
-            .border_r_1()
-            .border_color(t.separator)
-            .children(self.sidebar_items.iter().map(|item| {
-                let kind = item.kind;
-                let is_active = self.sidebar.open && self.sidebar.active == kind;
-                div()
-                    .id(item.id)
-                    .group("activity-item")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(34.0))
-                    .rounded(px(t.radius_md))
-                    .when(is_active, |el| el.bg(t.bg))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |ws, _, window, cx| {
-                            ws.on_activity_click(kind, window, cx)
-                        }),
-                    )
-                    .child(
-                        svg()
-                            .path(item.icon.path())
-                            .size(px(21.0))
-                            .text_color(if is_active { t.text } else { t.text_subtle })
-                            .group_hover("activity-item", |s| s.text_color(t.text)),
-                    )
-            }))
-    }
-
+    /// Render the sidebar as a glass overlay (absolute, left-anchored, no layout shift).
     pub(crate) fn render_sidebar_panel(
         &self,
         t: &RuntimeTheme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let title = match self.sidebar.active {
-            SidebarItemKind::Explorer => rust_i18n::t!("sidebar.explorer").to_string(),
-            SidebarItemKind::Search => rust_i18n::t!("sidebar.search").to_string(),
-        };
+        let header = self.render_explorer_header(t, cx);
+        let body = self.render_explorer(t, cx);
+        let sidebar_fh = self.sidebar_focus.clone();
 
-        let header: AnyElement = match self.sidebar.active {
-            SidebarItemKind::Explorer => self.render_explorer_header(t, cx),
-            _ => h_flex()
-                .px_3()
-                .h(px(30.0))
-                .flex_shrink_0()
-                .text_size(px(t.font_size_caption))
-                .text_color(t.text_muted)
-                .font_family(t.ui_family.clone())
-                .child(title)
-                .into_any_element(),
-        };
-
-        let body: AnyElement = match self.sidebar.active {
-            SidebarItemKind::Explorer => self.render_explorer(t, cx),
-            SidebarItemKind::Search => div().into_any_element(), // Search opens a tab
-        };
-
-        v_flex()
-            .w(px(self.sidebar.width))
-            .flex_shrink_0()
-            .h_full()
-            .bg(t.bg_elevated)
+        glass_surface(t)
+            .id("sidebar-overlay")
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(t.sidebar_w))
+            .flex()
+            .flex_col()
+            // No rounded corners — full-height overlay
+            .border_r_1()
+            .border_color(t.border_focus)
+            .key_context("Sidebar")
+            .track_focus(&sidebar_fh)
             .child(header)
             .child(body)
     }
@@ -166,7 +87,6 @@ impl Workspace {
         let entity = cx.entity();
         let t2 = t.clone();
         let active_path = self.active_editor_path(cx);
-        // Find the index of the widest-looking row so the list can self-size horizontally.
         let char_w = t.char_w_code;
         let widest_idx = self
             .visible_rows
@@ -280,14 +200,25 @@ impl Workspace {
             div().size(px(12.0)).into_any_element()
         };
 
-        let icon = if row.is_dir {
-            file_icons::icon_for_folder(&row.name, row.expanded)
+        // Language dot for files; folder chevron only for dirs (no dot)
+        let file_indicator: AnyElement = if row.is_dir {
+            div().size(px(7.)).into_any_element()
         } else {
-            file_icons::icon_for_file(&row.name)
+            let dot_color = file_icons::language_dot_color(&row.name)
+                .map(|v| {
+                    let c: gpui::Hsla = gpui::rgba(v).into();
+                    c
+                })
+                .unwrap_or(t.text_muted);
+            div()
+                .size(px(7.))
+                .rounded_full()
+                .bg(dot_color)
+                .flex_shrink_0()
+                .into_any_element()
         };
 
-        // Vertical indent guide lines — one thin line per ancestor depth level.
-        // Each line is absolutely positioned at the center of that depth's indent column.
+        // Vertical indent guides
         let guides: Vec<AnyElement> = if indent_guides && depth > 0 {
             (0..depth)
                 .map(|d| {
@@ -309,21 +240,28 @@ impl Workspace {
 
         h_flex()
             .id(ix)
-            .h(px(TREE_ROW_H))
+            .h(px(t.tree_row_h))
+            .mx(px(5.))
+            .rounded(px(7.))
             .relative()
             .pl(px(8.0 + depth as f32 * TREE_INDENT_W))
             .pr_2()
             .gap_1()
             .font_family(t.ui_family.clone())
-            .text_size(px(t.font_size_caption))
-            .text_color(if is_active || is_dir {
+            .text_size(px(12.5))
+            .text_color(if is_active {
                 t.text
+            } else if is_dir {
+                t.text_subtle
             } else {
                 t.text_muted
             })
+            .when(is_dir, |el| el.font_weight(gpui::FontWeight::MEDIUM))
             .cursor_pointer()
-            .when(is_active, |el| el.bg(t.selection))
-            .hover(|el| el.bg(t.line_highlight))
+            .when(is_active, |el| el.bg(t.accent_muted))
+            .when(!is_active, |el| {
+                el.hover(|s| s.bg(gpui::rgba(0xFFFFFF0F)).text_color(t.text))
+            })
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 entity.update(cx, |ws, cx| {
                     if is_dir {
@@ -335,7 +273,7 @@ impl Workspace {
             })
             .children(guides)
             .child(div().flex_shrink_0().child(chevron))
-            .child(img(icon).size(px(16.0)).flex_shrink_0())
+            .child(file_indicator)
             .child(
                 div()
                     .whitespace_nowrap()
@@ -389,7 +327,7 @@ impl Workspace {
 
         h_flex()
             .id(ix)
-            .h(px(TREE_ROW_H))
+            .h(px(t.tree_row_h))
             .pl(px(8.0 + indent))
             .pr_2()
             .gap_1()
@@ -488,15 +426,21 @@ impl Workspace {
         };
 
         h_flex()
-            .px_3()
+            .px(px(14.))
             .h(px(30.0))
             .flex_shrink_0()
             .items_center()
             .justify_between()
-            .text_size(px(t.font_size_caption))
-            .text_color(t.text_muted)
-            .font_family(t.ui_family.clone())
-            .child(rust_i18n::t!("sidebar.explorer").to_string())
+            .border_b_1()
+            .border_color(t.border)
+            .child(
+                div()
+                    .font_family(t.ui_family.clone())
+                    .text_size(px(10.5))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(t.text_muted)
+                    .child(rust_i18n::t!("sidebar.explorer").to_string().to_uppercase()),
+            )
             .child(
                 h_flex()
                     .gap_1()
@@ -544,47 +488,5 @@ impl Workspace {
                     ),
             )
             .into_any_element()
-    }
-
-    pub(crate) fn render_sidebar_resize_handle(
-        &self,
-        t: &RuntimeTheme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id("sidebar-resize-handle")
-            .w(px(4.0))
-            .h_full()
-            .flex_shrink_0()
-            .bg(t.separator)
-            .cursor_col_resize()
-            .hover(|el| el.bg(t.accent))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|ws, _, _, cx| {
-                    ws.sidebar_resizing = true;
-                    cx.notify();
-                }),
-            )
-    }
-
-    fn on_activity_click(
-        &mut self,
-        kind: SidebarItemKind,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) {
-        if kind == SidebarItemKind::Search {
-            // Search opens a full tab rather than a sidebar panel.
-            window.dispatch_action(Box::new(OpenProjectSearch), cx);
-            return;
-        }
-        if self.sidebar.open && self.sidebar.active == kind {
-            self.sidebar.open = false;
-        } else {
-            self.sidebar.open = true;
-            self.sidebar.active = kind;
-        }
-        cx.notify();
     }
 }

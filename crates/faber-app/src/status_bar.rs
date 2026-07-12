@@ -16,7 +16,6 @@ use faber_lsp::server::ServerState;
 
 // ── StatusBar ─────────────────────────────────────────────────────────────────
 
-/// Generic sticky ~26px bottom strip with left/right slot rows.
 pub struct StatusBar {
     left: Vec<AnyView>,
     right: Vec<AnyView>,
@@ -30,7 +29,6 @@ impl StatusBar {
         }
     }
 
-    #[allow(dead_code)]
     pub fn push_left(&mut self, item: AnyView) {
         self.left.push(item);
     }
@@ -40,25 +38,43 @@ impl StatusBar {
     }
 }
 
+fn item_sep(t: &RuntimeTheme) -> impl IntoElement {
+    div().w(px(1.)).h(px(14.)).flex_shrink_0().bg(t.border)
+}
+
 impl Render for StatusBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.global::<RuntimeTheme>().clone();
 
-        let left_slot = h_flex().gap_2().children(self.left.iter().cloned());
-        let right_slot = h_flex()
-            .gap_2()
-            .ml_auto()
-            .children(self.right.iter().cloned());
+        // Interleave 1px dividers between items
+        let mut left_children: Vec<gpui::AnyElement> = Vec::new();
+        for (i, item) in self.left.iter().enumerate() {
+            if i > 0 {
+                left_children.push(item_sep(&t).into_any_element());
+            }
+            left_children.push(item.clone().into_any_element());
+        }
+
+        let mut right_children: Vec<gpui::AnyElement> = Vec::new();
+        for (i, item) in self.right.iter().enumerate() {
+            if i > 0 {
+                right_children.push(item_sep(&t).into_any_element());
+            }
+            right_children.push(item.clone().into_any_element());
+        }
+
+        let left_slot = h_flex().children(left_children);
+        let right_slot = h_flex().ml_auto().children(right_children);
 
         h_flex()
             .id("status-bar")
-            .h(px(26.))
+            .h(px(24.))
             .flex_shrink_0()
             .px_2()
             .bg(t.bg_elevated)
             .border_t_1()
-            .border_color(t.separator)
-            .text_size(px(t.font_size_caption))
+            .border_color(t.border)
+            .text_size(px(11.))
             .font_family(t.ui_family.clone())
             .text_color(t.text_muted)
             .child(left_slot)
@@ -66,14 +82,15 @@ impl Render for StatusBar {
     }
 }
 
+// ── Status dot helper ─────────────────────────────────────────────────────────
+
+fn status_dot(color: gpui::Hsla) -> impl IntoElement {
+    div().size(px(6.)).rounded_full().flex_shrink_0().bg(color)
+}
+
 // ── IndexingStatusItem ────────────────────────────────────────────────────────
 
-/// Timing constants from the TDD.
-/// Show the bar if the run is still active after this delay.
 const APPEAR_DELAY_MS: u64 = 800;
-/// Also show retroactively if the run completed after at least this long
-/// (catches cold/verify scans that finish in 150ms–800ms). File-save
-/// rescans complete in <20ms so they stay invisible.
 const MIN_RUN_TO_SHOW_MS: u64 = 150;
 const MIN_SHOWN_MS: u64 = 1000;
 const LABEL_DWELL_MS: u64 = 500;
@@ -81,17 +98,12 @@ const POLL_MS: u64 = 100;
 
 pub struct IndexingStatusItem {
     index_status: Entity<IndexStatus>,
-    /// When the current run's Begin was received.
     run_started_at: Option<Instant>,
-    /// When End was received (used to compute run duration for retroactive show).
     run_ended_at: Option<Instant>,
-    /// When the item first became visible (for the 1s minimum shown rule).
     shown_at: Option<Instant>,
     visible: bool,
-    /// Last time the displayed label changed.
     label_shown_at: Option<Instant>,
     label_phase: LabelPhase,
-    // Keeps the 100ms poll task alive.
     _poll_task: gpui::Task<()>,
 }
 
@@ -108,7 +120,6 @@ impl IndexingStatusItem {
         })
         .detach();
 
-        // 100ms timer to re-evaluate visibility (appear delay + min dwell).
         let poll_task = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -156,7 +167,6 @@ impl IndexingStatusItem {
                 self.run_ended_at = None;
             }
             Some(ProgressEvent::Report { phase, done, total }) => {
-                // Begin may have been overwritten before the poll fired; synthesize it.
                 if self.run_started_at.is_none() {
                     self.run_started_at = Some(Instant::now());
                     self.run_ended_at = None;
@@ -193,7 +203,6 @@ impl IndexingStatusItem {
 
         if let Some(started) = self.run_started_at {
             if self.run_ended_at.is_none() {
-                // Run still active: show only after appear delay.
                 if !self.visible
                     && now.duration_since(started) >= Duration::from_millis(APPEAR_DELAY_MS)
                 {
@@ -203,9 +212,6 @@ impl IndexingStatusItem {
                 return;
             }
 
-            // Run ended: also show retroactively if the run itself took long enough.
-            // This catches cold/verify scans that complete in 150ms–800ms.
-            // File-save rescans finish in <20ms and stay invisible.
             if !self.visible {
                 let run_duration = self
                     .run_ended_at
@@ -218,7 +224,6 @@ impl IndexingStatusItem {
             }
         }
 
-        // Hide after minimum dwell.
         if self.visible {
             let dwell_done = self
                 .shown_at
@@ -285,7 +290,7 @@ impl Render for IndexingStatusItem {
             .child(progress_bar)
             .child(
                 div()
-                    .text_size(px(t.font_size_caption))
+                    .text_size(px(11.))
                     .font_family(t.ui_family.clone())
                     .text_color(t.text_muted)
                     .child(label_text),
@@ -318,7 +323,6 @@ impl Render for LspStatusItem {
         let t = cx.global::<RuntimeTheme>().clone();
         let lsp = self.lsp_status.read(cx);
 
-        // Fold across all statuses: Error > Downloading/Starting/Restarting > Running > Stopped
         let (dot_color, download_fraction) = if lsp.statuses.is_empty() {
             (t.text_subtle, None)
         } else {
@@ -341,7 +345,6 @@ impl Render for LspStatusItem {
                 None
             };
 
-            // Server health only — diagnostics counts live in DiagnosticsStatusItem.
             let color = match &status.state {
                 ServerState::Running => t.success,
                 ServerState::Downloading
@@ -359,18 +362,21 @@ impl Render for LspStatusItem {
             .id("lsp-status-item")
             .flex()
             .items_center()
-            .gap(px(3.))
-            .px(px(4.))
+            .gap(px(4.))
+            .px(px(7.))
+            .py(px(2.))
+            .rounded(px(6.))
             .h_full()
             .cursor_pointer()
+            .hover(|s| s.bg(t.bg_raised))
+            .child(status_dot(dot_color))
             .child(
                 svg()
                     .path(IconName::Code.path())
-                    .size(px(13.))
+                    .size(px(11.))
                     .text_color(dot_color),
             );
 
-        // Show a small download progress bar when a server is being fetched.
         if let Some(fraction) = download_fraction {
             let bar_w = 50_f32;
             let filled_w = (bar_w * fraction).max(3.);
@@ -409,7 +415,6 @@ impl Render for LspStatusItem {
 
 // ── DiagnosticsStatusItem ─────────────────────────────────────────────────────
 
-/// Status bar item showing error/warning counts; tapping opens the Problems tab.
 pub struct DiagnosticsStatusItem {
     lsp_status: gpui::Entity<LspStatus>,
 }
@@ -437,35 +442,52 @@ impl Render for DiagnosticsStatusItem {
         let error_count = lsp.error_count;
         let warning_count = lsp.warning_count;
 
-        div()
+        h_flex()
             .id("diagnostics-status-item")
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .px(px(4.))
+            .gap(px(4.))
             .h_full()
             .cursor_pointer()
             .child(
-                div()
-                    .text_size(px(t.font_size_caption))
-                    .font_family(t.ui_family.clone())
-                    .text_color(if error_count > 0 {
-                        t.error
-                    } else {
-                        t.text_subtle
-                    })
-                    .child(format!("✕ {}", error_count)),
+                // Errors
+                h_flex()
+                    .gap(px(4.))
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded(px(6.))
+                    .hover(|s| s.bg(t.bg_raised))
+                    .child(status_dot(t.error))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_family(t.ui_family.clone())
+                            .text_color(if error_count > 0 {
+                                t.error
+                            } else {
+                                t.text_subtle
+                            })
+                            .child(format!("{}", error_count)),
+                    ),
             )
             .child(
-                div()
-                    .text_size(px(t.font_size_caption))
-                    .font_family(t.ui_family.clone())
-                    .text_color(if warning_count > 0 {
-                        t.warning
-                    } else {
-                        t.text_subtle
-                    })
-                    .child(format!("⚠ {}", warning_count)),
+                // Warnings
+                h_flex()
+                    .gap(px(4.))
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded(px(6.))
+                    .hover(|s| s.bg(t.bg_raised))
+                    .child(status_dot(t.warning))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_family(t.ui_family.clone())
+                            .text_color(if warning_count > 0 {
+                                t.warning
+                            } else {
+                                t.text_subtle
+                            })
+                            .child(format!("{}", warning_count)),
+                    ),
             )
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 log::debug!("status_bar: diagnostics item clicked → OpenProblems");
@@ -477,14 +499,20 @@ impl Render for DiagnosticsStatusItem {
 
 // ── ActiveDocInfo ─────────────────────────────────────────────────────────────
 
-/// Tracks the active document's language; updated by Workspace on tab change / file open.
 pub struct ActiveDocInfo {
     pub language: Option<Arc<Language>>,
+    /// (line 1-based, col 1-based) of the primary caret; None when no editor active.
+    pub cursor: Option<(usize, usize)>,
+    pub has_editor: bool,
 }
 
 impl ActiveDocInfo {
     pub fn new() -> Self {
-        Self { language: None }
+        Self {
+            language: None,
+            cursor: None,
+            has_editor: false,
+        }
     }
 }
 
@@ -508,28 +536,102 @@ impl LanguageStatusItem {
 impl Render for LanguageStatusItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.global::<RuntimeTheme>().clone();
-        let lang_name = self
-            .active_doc
-            .read(cx)
+        let info = self.active_doc.read(cx);
+        let lang_name = info
             .language
             .as_ref()
             .map(|l| l.name.clone())
             .unwrap_or_else(|| t!("status_bar.plain_text").to_string());
 
+        let dot_color = t.accent;
+
         div()
             .id("language-status-item")
             .flex()
             .items_center()
-            .px(px(4.))
+            .gap(px(4.))
+            .px(px(7.))
+            .py(px(2.))
+            .rounded(px(6.))
             .h_full()
             .cursor_pointer()
-            .text_size(px(t.font_size_caption))
+            .text_size(px(11.))
             .font_family(t.ui_family.clone())
             .text_color(t.text_muted)
+            .hover(|s| s.bg(t.bg_raised).text_color(t.text))
+            .child(status_dot(dot_color))
             .child(lang_name)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.dispatch_action(Box::new(OpenLanguagePicker), cx);
             })
+            .into_any_element()
+    }
+}
+
+// ── CursorStatusItem ─────────────────────────────────────────────────────────
+
+pub struct CursorStatusItem {
+    active_doc: Entity<ActiveDocInfo>,
+}
+
+impl CursorStatusItem {
+    pub fn new(active_doc: Entity<ActiveDocInfo>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&active_doc, |_, _, cx| cx.notify()).detach();
+        Self { active_doc }
+    }
+}
+
+impl Render for CursorStatusItem {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.global::<RuntimeTheme>().clone();
+        let info = self.active_doc.read(cx);
+
+        let Some((line, col)) = info.cursor else {
+            return div().into_any_element();
+        };
+
+        if !info.has_editor {
+            return div().into_any_element();
+        }
+
+        div()
+            .id("cursor-status-item")
+            .flex()
+            .items_center()
+            .px(px(7.))
+            .py(px(2.))
+            .rounded(px(6.))
+            .h_full()
+            .text_size(px(11.))
+            .font_family(t.ui_family.clone())
+            .text_color(t.text_muted)
+            .hover(|s| s.bg(t.bg_raised))
+            .child(t!("status_bar.ln_col", line = line, col = col).to_string())
+            .into_any_element()
+    }
+}
+
+// ── EncodingStatusItem ────────────────────────────────────────────────────────
+
+pub struct EncodingStatusItem;
+
+impl Render for EncodingStatusItem {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.global::<RuntimeTheme>().clone();
+
+        div()
+            .id("encoding-status-item")
+            .flex()
+            .items_center()
+            .px(px(7.))
+            .py(px(2.))
+            .rounded(px(6.))
+            .h_full()
+            .text_size(px(11.))
+            .font_family(t.ui_family.clone())
+            .text_color(t.text_muted)
+            .hover(|s| s.bg(t.bg_raised))
+            .child(t!("status_bar.encoding").to_string())
             .into_any_element()
     }
 }

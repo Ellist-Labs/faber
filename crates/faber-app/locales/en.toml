@@ -3,16 +3,13 @@
 # Rules: never hardcode user-facing strings in code; always add a key here first.
 
 [welcome]
-tagline = "Made to last, not to bloat"
-get_started = "Get Started"
 new_file = "New File"
 open_file = "Open File…"
 open_folder = "Open Folder…"
-configure = "Configure"
 open_settings = "Open Settings"
-recent = "Recent"
-recent_projects = "Projects"
-recent_files = "Files"
+start = "START"
+recent = "RECENT"
+no_recent = "No recent projects"
 
 [settings]
 title = "Settings"
@@ -138,6 +135,7 @@ expand_all = "Expand All"
 [panel]
 panel = "Panel"
 terminal = "Terminal"
+output = "Output"
 coming_soon = "Coming soon"
 headings = "Headings"
 
@@ -190,6 +188,10 @@ lsp_warnings = "warnings"
 lsp_restarting = "Restarting"
 lsp_error = "rust-analyzer error"
 plain_text = "Plain Text"
+ln_col = "Ln %{line}, Col %{col}"
+encoding = "UTF-8"
+spaces = "Spaces: %{n}"
+tabs = "Tabs: %{n}"
 
 [language_picker]
 title = "Select Language Mode"
@@ -224,6 +226,13 @@ start = "Start"
 [dashboard]
 problems_title = "Problems"
 problems_empty = "No problems"
+errors_count = "%{n} errors"
+warnings_count = "%{n} warnings"
+location = "line %{line}, col %{col}"
+location_line = "line %{line}"
+
+[references]
+results = "%{n} results"
 
 [project_search]
 placeholder = "Search project…"

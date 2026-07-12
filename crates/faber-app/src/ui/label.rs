@@ -11,7 +11,6 @@ pub enum LabelSize {
 enum LabelColor {
     Default,
     Muted,
-    Subtle,
 }
 
 #[derive(IntoElement)]
@@ -44,12 +43,6 @@ impl Label {
         self.color = LabelColor::Muted;
         self
     }
-
-    /// Dimmest text tone (theme `text_subtle`) — section labels, taglines.
-    pub fn subtle(mut self) -> Self {
-        self.color = LabelColor::Subtle;
-        self
-    }
 }
 
 impl RenderOnce for Label {
@@ -58,7 +51,6 @@ impl RenderOnce for Label {
         let color = match self.color {
             LabelColor::Default => theme.text,
             LabelColor::Muted => theme.text_muted,
-            LabelColor::Subtle => theme.text_subtle,
         };
         let size = match self.size {
             LabelSize::Caption => theme.font_size_caption,

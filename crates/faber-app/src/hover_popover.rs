@@ -537,14 +537,14 @@ fn push_inline_segments(
                     links.push((start..text.len(), url.clone()));
                 }
                 let (font, bg) = if style.code {
-                    (mono_font(t), Some(t.bg_sunken))
+                    (mono_font(t), Some(t.bg_raised))
                 } else {
                     (ui_font(t, cx.bold || style.bold, style.italic), None)
                 };
                 runs.push(TextRun {
                     len: t_text.len(),
                     font,
-                    color: if is_link { t.accent } else { t.text },
+                    color: if is_link { t.accent } else { t.text_muted },
                     background_color: bg,
                     underline: is_link.then(|| UnderlineStyle {
                         thickness: px(1.),
