@@ -260,6 +260,22 @@ impl LanguageServer {
                         dynamic_registration: None,
                         content_format: Some(vec![lsp_types::MarkupKind::Markdown]),
                     }),
+                    completion: Some(lsp_types::CompletionClientCapabilities {
+                        completion_item: Some(lsp_types::CompletionItemCapability {
+                            snippet_support: Some(false),
+                            documentation_format: Some(vec![
+                                lsp_types::MarkupKind::Markdown,
+                                lsp_types::MarkupKind::PlainText,
+                            ]),
+                            resolve_support: Some(
+                                lsp_types::CompletionItemCapabilityResolveSupport {
+                                    properties: vec!["documentation".into(), "detail".into()],
+                                },
+                            ),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 general: Some(lsp_types::GeneralClientCapabilities {

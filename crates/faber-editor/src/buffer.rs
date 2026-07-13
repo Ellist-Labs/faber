@@ -271,16 +271,30 @@ impl Document {
     /// layer, updates the dirty flag, and returns the inverse ChangeSet for undo.
     pub fn apply(&mut self, tx: Transaction) -> ChangeSet {
         self.version += 1;
-        let inverse = tx.changes.invert(&self.rope); // capture before applying
+        let inverse = tx.changes.invert(&self.rope);
+
+        let pre = self.syntax.as_ref().map(|_| self.rope.clone());
+
         tx.changes.apply(&mut self.rope);
 
-        if let Some(ref mut syn) = self.syntax {
+        if let (Some(ref mut syn), Some(pre)) = (self.syntax.as_mut(), pre) {
+            // (a) Derive InputEdit and interpolate the old tree — coords stay valid.
+            if let Some(edit) =
+                crate::syntax::input_edit_from_changeset(&tx.changes, &pre, &self.rope)
+            {
+                syn.tree.edit(&edit);
+            }
+
+            // (b) Reparse using the Rope directly (no to_string on the hot path).
+            if let Some(new_tree) =
+                crate::syntax::reparse_with_rope(&mut syn.parser, &syn.tree, &self.rope)
+            {
+                syn.tree = new_tree;
+            }
+            // (c) Non-destructive: if reparse returns None, syn.tree keeps the interpolated tree.
+
+            // Phase 2: highlight/outline caches still need &str — materialize once.
             let src = self.rope.to_string();
-            syn.tree = syn
-                .parser
-                .parse(&src, Some(&syn.tree))
-                .or_else(|| syn.parser.parse(&src, None))
-                .expect("parse must succeed");
             self.highlight_cache.compute(&syn.tree, &src);
             self.outline = Arc::new(self.outline_cache.compute(&syn.tree, &src));
         }
@@ -390,5 +404,41 @@ mod tests {
     fn enclosing_brackets_none_for_plain_text() {
         let doc = Document::from_str("hello world", None);
         assert_eq!(doc.enclosing_brackets(3), None, "no grammar → no result");
+    }
+
+    #[test]
+    fn highlights_survive_syntax_error_after_edit() {
+        let reg = test_registry();
+        let lang = reg.language_for_path(Path::new("foo.rs")).unwrap();
+        let src = (0..50)
+            .map(|i| format!("fn f{i}() {{ let x = {i}; }}\n"))
+            .collect::<String>();
+        let mut doc = Document::from_str(&src, Some(&lang));
+
+        let n_lines = doc.rope.len_lines();
+        let last_line = n_lines.saturating_sub(2);
+        let spans_before = doc.highlight_spans(last_line).len();
+        assert!(spans_before > 0, "last line should have spans before edit");
+
+        doc.insert(10, "{");
+
+        let spans_after = doc.highlight_spans(last_line).len();
+        assert!(
+            spans_after > 0,
+            "last line should still have spans after a syntax error (got 0, was {spans_before})"
+        );
+    }
+
+    #[test]
+    fn incremental_parse_is_non_destructive_on_garbage_input() {
+        let reg = test_registry();
+        let lang = reg.language_for_path(Path::new("foo.rs")).unwrap();
+        let mut doc = Document::from_str("fn main() {}", Some(&lang));
+        let spans_before = doc.highlight_spans(0).len();
+        assert!(spans_before > 0, "initial parse should have spans");
+
+        doc.insert(3, "X");
+        let spans_after = doc.highlight_spans(0).len();
+        assert!(spans_after > 0, "spans must survive an edit");
     }
 }

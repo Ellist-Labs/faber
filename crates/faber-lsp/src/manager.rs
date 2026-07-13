@@ -778,6 +778,43 @@ impl LspManager {
         None
     }
 
+    /// Completion trigger characters advertised by the server for `uri`'s language.
+    /// Returns an empty vec when no server is running or none are advertised.
+    pub fn completion_trigger_chars_for_uri(&self, uri: &url::Url) -> Vec<String> {
+        let lang_id_str = {
+            let guard = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.get(uri) {
+                Some(d) => d.lang_id.clone(),
+                None => return vec![],
+            }
+        };
+        let slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        for slot in slots.values() {
+            if let ServerSlot::Running { server, lang } = slot
+                && lang == &lang_id_str
+            {
+                return server
+                    .capabilities()
+                    .server_capabilities
+                    .completion_provider
+                    .as_ref()
+                    .and_then(|p| p.trigger_characters.clone())
+                    .unwrap_or_default();
+            }
+        }
+        vec![]
+    }
+
+    /// Send `completionItem/resolve` for a completion item, routed via `uri`'s
+    /// language server. `item_json` must be the raw JSON of the `CompletionItem`.
+    pub fn resolve_completion_item(
+        &self,
+        uri: &url::Url,
+        item_json: serde_json::Value,
+    ) -> Option<Receiver<Result<serde_json::Value, RpcError>>> {
+        self.request_for_document(uri, "completionItem/resolve", item_json)
+    }
+
     pub fn position_encoding_for_uri(&self, uri: &url::Url) -> PositionEncoding {
         let lang_id_str = {
             let guard = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());

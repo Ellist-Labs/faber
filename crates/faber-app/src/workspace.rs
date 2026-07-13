@@ -665,25 +665,36 @@ impl Workspace {
     }
 
     pub(crate) fn set_root_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        // Always establish the root and kick off LSP — even if the FileTree
+        // fails (e.g. permission error on a sub-path). LSP and indexing rely
+        // only on `root_folder`, not on the visible tree.
+        self.root_folder = Some(folder.clone());
+        cx.set_global(ProjectRoot(Some(folder.clone())));
+        self.index_engine = None;
+        self.files_handle = None;
+        self.symbols_handle = None;
+        self._fs_watcher = None; // drops old watcher threads
+
         match FileTree::new(folder.clone()) {
             Ok(tree) => {
                 self.visible_rows = tree.visible();
                 self.tree = Some(tree);
-                self.root_folder = Some(folder.clone());
                 self.sidebar.open = true;
                 self.sidebar.active = SidebarItemKind::Explorer;
-                cx.set_global(ProjectRoot(Some(folder.clone())));
-                self.index_engine = None;
-                self.files_handle = None;
-                self.symbols_handle = None;
-                self._fs_watcher = None; // drops the old watcher threads
                 self.start_index_engine(cx);
-                self.start_lsp_manager(cx);
-                let abs = folder.to_string_lossy().to_string();
-                self.record_state_change(cx, move |s| s.record_recent_project(&abs));
             }
             Err(err) => eprintln!("faber: can't open folder {}: {err}", folder.display()),
         }
+
+        self.start_lsp_manager(cx);
+        let abs = folder.to_string_lossy().to_string();
+        self.record_state_change(cx, move |s| s.record_recent_project(&abs));
+        cx.notify();
+    }
+
+    pub(crate) fn remove_recent_project(&mut self, abs: &str, cx: &mut Context<Self>) {
+        let abs = abs.to_string();
+        self.record_state_change(cx, move |s| s.remove_recent_project(&abs));
         cx.notify();
     }
 
@@ -1173,44 +1184,27 @@ impl Workspace {
         let ws_entity = cx.entity().downgrade();
 
         // ── header ────────────────────────────────────────────────────────────
-        let ws_dismiss = ws_entity.clone();
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .mb(px(8.))
-            .child(
-                div()
-                    .font_family(t.ui_family.clone())
-                    .text_size(px(t.font_size_caption))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(t.text_muted)
-                    .child(rust_i18n::t!("lsp_overlay.title").to_string()),
-            )
-            .child(
-                div()
-                    .cursor_pointer()
-                    .text_color(t.text_muted)
-                    .text_size(px(t.font_size_caption))
-                    .font_family(t.ui_family.clone())
-                    .px(px(4.))
-                    .child("✕")
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        if let Some(ws) = ws_dismiss.upgrade() {
-                            ws.update(cx, |ws, cx| {
-                                ws.lsp_overlay_open = false;
-                                cx.notify();
-                            });
-                        }
-                    }),
-            );
+        let header = div().flex().items_center().mb(px(8.)).child(
+            div()
+                .flex_1()
+                .font_family(t.ui_family.clone())
+                .text_size(px(t.font_size_caption))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(t.text_muted)
+                .child(rust_i18n::t!("lsp_overlay.title").to_string()),
+        );
 
         // ── server rows ───────────────────────────────────────────────────────
-        // Always show all registered adapters so users can restart a stopped server.
         let all_statuses = mgr
             .as_ref()
             .map(|m| m.all_server_statuses())
             .unwrap_or_default();
+
+        let multi_server = all_statuses.len() > 1;
+        let any_running = all_statuses
+            .iter()
+            .any(|s| matches!(s.state, ServerState::Running));
+
         let rows: Vec<AnyElement> = if all_statuses.is_empty() {
             vec![
                 div()
@@ -1224,7 +1218,8 @@ impl Workspace {
         } else {
             all_statuses
                 .iter()
-                .map(|s| {
+                .enumerate()
+                .map(|(row_idx, s)| {
                     let (state_text, dot_color) = match &s.state {
                         ServerState::Downloading => {
                             let msg = s.download_msg.as_deref().unwrap_or("Downloading...");
@@ -1250,21 +1245,110 @@ impl Workspace {
                     };
 
                     let server_id = s.server_id.clone();
-                    let mgr_btn = mgr.clone();
+                    let mgr_row = mgr.clone();
                     let ws_stop = ws_entity.clone();
 
                     let is_running = matches!(s.state, ServerState::Running);
                     let is_error = matches!(s.state, ServerState::Error(_));
                     let is_stopped = matches!(s.state, ServerState::Stopped);
 
+                    let group_name = format!("lsp-srv-row-{row_idx}");
+
+                    // Action buttons (hidden by default, revealed on row hover)
+                    let actions = div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .invisible()
+                        .group_hover(&group_name, |s| s.visible())
+                        // Start — only when Stopped
+                        .when(is_stopped, |el| {
+                            let sid = server_id.clone();
+                            let mgr = mgr_row.clone();
+                            el.child(
+                                div()
+                                    .id(("lsp-start", row_idx))
+                                    .cursor_pointer()
+                                    .text_size(px(t.font_size_caption))
+                                    .font_family(t.ui_family.clone())
+                                    .text_color(t.text_muted)
+                                    .hover(|s| s.text_color(t.text))
+                                    .child(rust_i18n::t!("lsp_overlay.start").to_string())
+                                    .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
+                                        if let Some(m) = &mgr {
+                                            m.restart_server(&sid);
+                                        }
+                                    }),
+                            )
+                        })
+                        // Restart — when Running or Error
+                        .when(is_running || is_error, |el| {
+                            let sid = server_id.clone();
+                            let mgr = mgr_row.clone();
+                            el.child(
+                                div()
+                                    .id(("lsp-restart", row_idx))
+                                    .cursor_pointer()
+                                    .text_size(px(t.font_size_caption))
+                                    .font_family(t.ui_family.clone())
+                                    .text_color(t.text_muted)
+                                    .hover(|s| s.text_color(t.text))
+                                    .child(rust_i18n::t!("lsp_overlay.restart").to_string())
+                                    .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
+                                        if let Some(m) = &mgr {
+                                            m.restart_server(&sid);
+                                        }
+                                    }),
+                            )
+                        })
+                        // Stop — only when Running
+                        .when(is_running, |el| {
+                            let sid = server_id.clone();
+                            let mgr = mgr_row.clone();
+                            let ws = ws_stop.clone();
+                            el.child(
+                                div()
+                                    .id(("lsp-stop", row_idx))
+                                    .cursor_pointer()
+                                    .text_size(px(t.font_size_caption))
+                                    .font_family(t.ui_family.clone())
+                                    .text_color(t.text_muted)
+                                    .hover(|s| s.text_color(t.error))
+                                    .child(rust_i18n::t!("lsp_overlay.stop").to_string())
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        if let Some(m) = &mgr {
+                                            m.stop_server(&sid);
+                                        }
+                                        if let Some(ws) = ws.upgrade() {
+                                            ws.update(cx, |ws, cx| {
+                                                ws.lsp_overlay_open = false;
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            )
+                        });
+
+                    // Chevron — right-aligned, visible on hover
+                    let chevron = svg()
+                        .path(IconName::ChevronRight.path())
+                        .size(px(12.))
+                        .text_color(t.text_subtle)
+                        .invisible()
+                        .group_hover(&group_name, |s| s.visible());
+
                     div()
+                        .group(group_name)
                         .flex()
                         .flex_col()
-                        .gap(px(4.))
-                        .py(px(8.))
+                        .gap(px(2.))
+                        .py(px(7.))
+                        .px(px(4.))
+                        .rounded(px(7.))
                         .border_b_1()
                         .border_color(t.separator)
-                        // server name row
+                        .hover(|s| s.bg(gpui::rgba(0xFFFFFF0A)))
+                        // row 1: dot + name + chevron/actions
                         .child(
                             div()
                                 .flex()
@@ -1279,131 +1363,123 @@ impl Workspace {
                                 )
                                 .child(
                                     div()
+                                        .flex_1()
                                         .font_family(t.ui_family.clone())
                                         .text_size(px(t.font_size_body))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(t.text)
                                         .child(s.server_id.clone()),
-                                ),
+                                )
+                                .child(actions)
+                                .child(chevron),
                         )
-                        // state + action buttons row
+                        // row 2: state label
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
                                 .pl(px(13.))
-                                .child(
-                                    div()
-                                        .font_family(t.ui_family.clone())
-                                        .text_size(px(t.font_size_caption))
-                                        .text_color(dot_color)
-                                        .child(state_text),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(8.))
-                                        // Start — only when Stopped
-                                        .when(is_stopped, |el| {
-                                            let sid = server_id.clone();
-                                            let mgr = mgr_btn.clone();
-                                            el.child(
-                                                div()
-                                                    .cursor_pointer()
-                                                    .text_size(px(t.font_size_caption))
-                                                    .font_family(t.ui_family.clone())
-                                                    .text_color(t.text_muted)
-                                                    .child(
-                                                        rust_i18n::t!("lsp_overlay.start")
-                                                            .to_string(),
-                                                    )
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        move |_, _, _cx| {
-                                                            if let Some(m) = &mgr {
-                                                                m.restart_server(&sid);
-                                                            }
-                                                        },
-                                                    ),
-                                            )
-                                        })
-                                        // Restart — when Running or Error
-                                        .when(is_running || is_error, |el| {
-                                            let sid = server_id.clone();
-                                            let mgr = mgr_btn.clone();
-                                            el.child(
-                                                div()
-                                                    .cursor_pointer()
-                                                    .text_size(px(t.font_size_caption))
-                                                    .font_family(t.ui_family.clone())
-                                                    .text_color(t.text_muted)
-                                                    .child(
-                                                        rust_i18n::t!("lsp_overlay.restart")
-                                                            .to_string(),
-                                                    )
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        move |_, _, _cx| {
-                                                            if let Some(m) = &mgr {
-                                                                m.restart_server(&sid);
-                                                            }
-                                                        },
-                                                    ),
-                                            )
-                                        })
-                                        // Stop — only when Running
-                                        .when(is_running, |el| {
-                                            let sid = server_id.clone();
-                                            let mgr = mgr_btn.clone();
-                                            el.child(
-                                                div()
-                                                    .cursor_pointer()
-                                                    .text_size(px(t.font_size_caption))
-                                                    .font_family(t.ui_family.clone())
-                                                    .text_color(t.text_muted)
-                                                    .child(
-                                                        rust_i18n::t!("lsp_overlay.stop")
-                                                            .to_string(),
-                                                    )
-                                                    .on_mouse_down(MouseButton::Left, {
-                                                        let ws = ws_stop.clone();
-                                                        move |_, _, cx| {
-                                                            if let Some(m) = &mgr {
-                                                                m.stop_server(&sid);
-                                                            }
-                                                            if let Some(ws) = ws.upgrade() {
-                                                                ws.update(cx, |ws, cx| {
-                                                                    ws.lsp_overlay_open = false;
-                                                                    cx.notify();
-                                                                });
-                                                            }
-                                                        }
-                                                    }),
-                                            )
-                                        }),
-                                ),
+                                .font_family(t.ui_family.clone())
+                                .text_size(px(t.font_size_caption))
+                                .text_color(dot_color)
+                                .child(state_text),
                         )
                         .into_any_element()
                 })
                 .collect()
         };
 
+        // ── footer: global Restart All / Stop All (only when > 1 server) ──────
+        let footer: Option<AnyElement> = if multi_server && any_running {
+            let mgr_restart = mgr.clone();
+            let mgr_stop = mgr.clone();
+            let ws_close = ws_entity.clone();
+            Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.))
+                    .pt(px(8.))
+                    .mt(px(4.))
+                    .border_t_1()
+                    .border_color(t.separator)
+                    .child(
+                        div()
+                            .id("lsp-restart-all")
+                            .cursor_pointer()
+                            .text_size(px(t.font_size_caption))
+                            .font_family(t.ui_family.clone())
+                            .text_color(t.text_muted)
+                            .hover(|s| s.text_color(t.text))
+                            .child(rust_i18n::t!("lsp_overlay.restart_all").to_string())
+                            .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
+                                if let Some(m) = &mgr_restart {
+                                    for srv in m.all_server_statuses() {
+                                        m.restart_server(&srv.server_id);
+                                    }
+                                }
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("lsp-stop-all")
+                            .cursor_pointer()
+                            .text_size(px(t.font_size_caption))
+                            .font_family(t.ui_family.clone())
+                            .text_color(t.text_muted)
+                            .hover(|s| s.text_color(t.error))
+                            .child(rust_i18n::t!("lsp_overlay.stop_all").to_string())
+                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                if let Some(m) = &mgr_stop {
+                                    for srv in m.all_server_statuses() {
+                                        m.stop_server(&srv.server_id);
+                                    }
+                                }
+                                if let Some(ws) = ws_close.upgrade() {
+                                    ws.update(cx, |ws, cx| {
+                                        ws.lsp_overlay_open = false;
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
         let panel = popover_container("lsp-overlay", t)
             .w(px(280.))
             .p(px(12.))
             .child(header)
-            .children(rows);
+            .children(rows)
+            .when_some(footer, |el, f| el.child(f));
+
+        // ── backdrop — dismiss on click outside ───────────────────────────────
+        let ws_backdrop = ws_entity.clone();
+        let backdrop =
+            div()
+                .absolute()
+                .inset_0()
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    if let Some(ws) = ws_backdrop.upgrade() {
+                        ws.update(cx, |ws, cx| {
+                            ws.lsp_overlay_open = false;
+                            cx.notify();
+                        });
+                    }
+                });
 
         let pos = self.lsp_overlay_pos;
         Some(
             deferred(
-                anchored()
-                    .position(pos)
-                    .anchor(gpui::Corner::BottomRight)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(panel),
+                div().absolute().inset_0().child(backdrop).child(
+                    anchored()
+                        .position(pos)
+                        .anchor(gpui::Corner::BottomRight)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(panel),
+                ),
             )
             .with_priority(2)
             .into_any(),
@@ -1873,6 +1949,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.root_folder.is_none() {
+            return; // no project folder open; search has nothing to scan
+        }
+
         // Prefill with active editor selection text if any.
         let prefill = self
             .pane()

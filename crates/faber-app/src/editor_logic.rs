@@ -2,7 +2,6 @@
 //! Tested in isolation and called from the view layer.
 
 use faber_editor::{
-    SyntaxToken,
     markdown::InlineRun,
     outline::{Outline, OutlineItem},
 };
@@ -24,13 +23,13 @@ pub(crate) fn breadcrumb_stack<'a>(outline: &'a Outline, top_line: usize) -> Vec
     stack
 }
 
-/// Map a breadcrumb `@context` keyword to the syntax token used for coloring.
-pub(crate) fn context_to_token(context: Option<&str>) -> Option<SyntaxToken> {
+/// Map a breadcrumb `@context` keyword to the capture name used for coloring.
+pub(crate) fn context_to_capture(context: Option<&str>) -> Option<&'static str> {
     Some(match context? {
-        "fn" => SyntaxToken::Function,
-        "struct" | "enum" | "trait" | "type" | "impl" => SyntaxToken::Type,
-        "mod" => SyntaxToken::Namespace,
-        "const" => SyntaxToken::Constant,
+        "fn" => "function",
+        "struct" | "enum" | "trait" | "type" | "impl" => "type",
+        "mod" => "namespace",
+        "const" => "constant",
         _ => return None,
     })
 }
@@ -134,30 +133,30 @@ mod tests {
         assert_eq!(stack.len(), 1);
     }
 
-    // ── context_to_token ──────────────────────────────────────────────────────
+    // ── context_to_capture ────────────────────────────────────────────────────
 
     #[test]
-    fn context_to_token_known_keywords() {
-        assert_eq!(context_to_token(Some("fn")), Some(SyntaxToken::Function));
-        assert_eq!(context_to_token(Some("struct")), Some(SyntaxToken::Type));
-        assert_eq!(context_to_token(Some("enum")), Some(SyntaxToken::Type));
-        assert_eq!(context_to_token(Some("trait")), Some(SyntaxToken::Type));
-        assert_eq!(context_to_token(Some("type")), Some(SyntaxToken::Type));
-        assert_eq!(context_to_token(Some("impl")), Some(SyntaxToken::Type));
-        assert_eq!(context_to_token(Some("mod")), Some(SyntaxToken::Namespace));
-        assert_eq!(context_to_token(Some("const")), Some(SyntaxToken::Constant));
+    fn context_to_capture_known_keywords() {
+        assert_eq!(context_to_capture(Some("fn")), Some("function"));
+        assert_eq!(context_to_capture(Some("struct")), Some("type"));
+        assert_eq!(context_to_capture(Some("enum")), Some("type"));
+        assert_eq!(context_to_capture(Some("trait")), Some("type"));
+        assert_eq!(context_to_capture(Some("type")), Some("type"));
+        assert_eq!(context_to_capture(Some("impl")), Some("type"));
+        assert_eq!(context_to_capture(Some("mod")), Some("namespace"));
+        assert_eq!(context_to_capture(Some("const")), Some("constant"));
     }
 
     #[test]
-    fn context_to_token_unknown_returns_none() {
-        assert_eq!(context_to_token(Some("let")), None);
-        assert_eq!(context_to_token(Some("use")), None);
-        assert_eq!(context_to_token(Some("")), None);
+    fn context_to_capture_unknown_returns_none() {
+        assert_eq!(context_to_capture(Some("let")), None);
+        assert_eq!(context_to_capture(Some("use")), None);
+        assert_eq!(context_to_capture(Some("")), None);
     }
 
     #[test]
-    fn context_to_token_none_input_returns_none() {
-        assert_eq!(context_to_token(None), None);
+    fn context_to_capture_none_input_returns_none() {
+        assert_eq!(context_to_capture(None), None);
     }
 
     // ── split_at_hard_breaks ──────────────────────────────────────────────────

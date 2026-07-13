@@ -1,8 +1,18 @@
-use faber_theme::Theme as ThemeDef;
-use gpui::{App, Global, Hsla, rgba};
+use std::sync::Arc;
 
-/// GPU-ready runtime theme — all fields are `Copy` `Hsla`.
-/// Cloned once per frame at the top of `render()`, then passed by ref to helpers.
+use faber_lang::HighlightId;
+use faber_theme::Theme as ThemeDef;
+use gpui::{App, Global, Hsla, SharedString, rgba};
+
+/// GPU-ready style for a single syntax highlight entry.
+#[derive(Clone, Copy)]
+pub struct SyntaxStyle {
+    pub color: Hsla,
+    pub italic: bool,
+}
+
+/// GPU-ready runtime theme. Cloned once per frame at the top of `render()`, then
+/// passed by ref to helpers. Arc fields make the clone O(1).
 #[allow(dead_code)] // some tokens unused until Wave 2 view adoption
 #[derive(Clone)]
 pub struct RuntimeTheme {
@@ -41,25 +51,9 @@ pub struct RuntimeTheme {
     pub warning: Hsla,
     pub error: Hsla,
     pub info: Hsla,
-    // Syntax
-    pub syntax_keyword: Hsla,
-    pub syntax_function: Hsla,
-    pub syntax_type: Hsla,
-    pub syntax_string: Hsla,
-    pub syntax_number: Hsla,
-    pub syntax_comment: Hsla,
-    pub syntax_constant: Hsla,
-    pub syntax_operator: Hsla,
-    pub syntax_punctuation: Hsla,
-    pub syntax_variable: Hsla,
-    pub syntax_property: Hsla,
-    pub syntax_attribute: Hsla,
-    pub syntax_namespace: Hsla,
-    pub syntax_tag: Hsla,
-    pub syntax_label: Hsla,
-    // Syntax font styles (spec §2.7 — italic keyword/comment)
-    pub syntax_keyword_italic: bool,
-    pub syntax_comment_italic: bool,
+    // Syntax — data-driven via HighlightMap
+    pub syntax_styles: Arc<[SyntaxStyle]>,
+    syntax_theme: Arc<faber_theme::SyntaxTheme>,
     // Typography (pixel sizes; font family resolved by consumers)
     pub ui_family: SharedString,
     pub mono_family: SharedString,
@@ -115,8 +109,17 @@ impl RuntimeTheme {
     /// Build from a theme definition with all typography multiplied by
     /// `scale` (settings-driven; 1.0 = the theme's own sizes).
     pub fn from_scaled(t: ThemeDef, scale: f32) -> Self {
+        let syntax_theme = Arc::new(t.syntax);
+        let syntax_styles: Arc<[SyntaxStyle]> = syntax_theme
+            .styles
+            .iter()
+            .map(|hs| SyntaxStyle {
+                color: h(hs.color),
+                italic: hs.italic,
+            })
+            .collect::<Vec<_>>()
+            .into();
         let c = &t.colors;
-        let s = &t.syntax;
         let ty = &t.typography;
         let sp = &t.spacing;
         let r = &t.radii;
@@ -150,23 +153,8 @@ impl RuntimeTheme {
             warning: h(c.warning),
             error: h(c.error),
             info: h(c.info),
-            syntax_keyword: h(s.keyword.color),
-            syntax_function: h(s.function.color),
-            syntax_type: h(s.r#type.color),
-            syntax_string: h(s.string.color),
-            syntax_number: h(s.number.color),
-            syntax_comment: h(s.comment.color),
-            syntax_constant: h(s.constant.color),
-            syntax_operator: h(s.operator.color),
-            syntax_punctuation: h(s.punctuation.color),
-            syntax_variable: h(s.variable.color),
-            syntax_property: h(s.property.color),
-            syntax_attribute: h(s.attribute.color),
-            syntax_namespace: h(s.namespace.color),
-            syntax_tag: h(s.tag.color),
-            syntax_label: h(s.label.color),
-            syntax_keyword_italic: s.keyword.italic,
-            syntax_comment_italic: s.comment.italic,
+            syntax_styles,
+            syntax_theme,
             ui_family: ty.ui_family.clone().into(),
             mono_family: ty.mono_family.clone().into(),
             font_size_body: ty.body.size_px * scale,
@@ -201,6 +189,23 @@ impl RuntimeTheme {
             right_panel_w: 240.0,
             panel_header_h: 30.0,
         }
+    }
+
+    /// Get the style for a highlight id (None if id is out of range).
+    pub fn syntax_style(&self, id: HighlightId) -> Option<SyntaxStyle> {
+        self.syntax_styles.get(id.index()).copied()
+    }
+
+    /// Resolve a capture name to its HighlightId (dotted-name fallback).
+    pub fn highlight_id(&self, capture_name: &str) -> Option<HighlightId> {
+        self.syntax_theme
+            .highlight_id(capture_name)
+            .map(|idx| HighlightId::from_style_index(idx as usize))
+    }
+
+    /// Convenience: color for a highlight id, falling back to `self.text`.
+    pub fn syntax_color(&self, id: HighlightId) -> Hsla {
+        self.syntax_style(id).map(|s| s.color).unwrap_or(self.text)
     }
 }
 
@@ -239,5 +244,3 @@ impl<T: 'static> ActiveTheme for gpui::Context<'_, T> {
         self.global::<RuntimeTheme>()
     }
 }
-
-use gpui::SharedString;

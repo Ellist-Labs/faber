@@ -1,5 +1,7 @@
 pub mod default;
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Raw RGBA color as 0xRRGGBBAA. Alpha FF = opaque.
@@ -103,21 +105,41 @@ impl HighlightStyle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyntaxTheme {
-    pub keyword: HighlightStyle,
-    pub function: HighlightStyle,
-    pub r#type: HighlightStyle,
-    pub string: HighlightStyle,
-    pub number: HighlightStyle,
-    pub comment: HighlightStyle,
-    pub constant: HighlightStyle,
-    pub operator: HighlightStyle,
-    pub punctuation: HighlightStyle,
-    pub variable: HighlightStyle,
-    pub property: HighlightStyle,
-    pub attribute: HighlightStyle,
-    pub namespace: HighlightStyle,
-    pub tag: HighlightStyle,
-    pub label: HighlightStyle,
+    pub styles: Vec<HighlightStyle>,
+    pub capture_name_map: BTreeMap<String, usize>,
+}
+
+impl SyntaxTheme {
+    /// Build from ordered `(capture_name, style)` pairs.
+    pub fn new(entries: impl IntoIterator<Item = (&'static str, HighlightStyle)>) -> Self {
+        let mut styles = Vec::new();
+        let mut capture_name_map = BTreeMap::new();
+        for (name, style) in entries {
+            let idx = styles.len();
+            styles.push(style);
+            capture_name_map.insert(name.to_string(), idx);
+        }
+        Self {
+            styles,
+            capture_name_map,
+        }
+    }
+
+    /// Dotted-prefix fallback: "keyword.control.conditional" → "keyword.control" → "keyword".
+    pub fn highlight_id(&self, capture_name: &str) -> Option<u32> {
+        let first = capture_name.split('.').next().unwrap_or(capture_name);
+        self.capture_name_map
+            .range::<str, _>((
+                std::ops::Bound::Included(first),
+                std::ops::Bound::Included(capture_name),
+            ))
+            .rfind(|(key, _)| {
+                *key == capture_name
+                    || (capture_name.starts_with(*key)
+                        && capture_name.as_bytes().get(key.len()).copied() == Some(b'.'))
+            })
+            .map(|(_, &idx)| idx as u32)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +212,6 @@ mod tests {
         let back: Theme = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.name, theme.name);
         assert_eq!(back.colors.bg, theme.colors.bg);
-        assert_eq!(back.syntax.keyword.color, theme.syntax.keyword.color);
+        assert!(back.syntax.highlight_id("keyword").is_some());
     }
 }

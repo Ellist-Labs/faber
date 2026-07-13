@@ -122,7 +122,13 @@ impl ChangeSet {
                     pos += n;
                 }
                 Operation::Delete(n) => {
-                    let text: String = original.slice(pos..pos + n).to_string();
+                    debug_assert!(
+                        pos + n <= original.len_chars(),
+                        "ChangeSet invariant violated: Delete({n}) at pos {pos} exceeds rope length {}",
+                        original.len_chars()
+                    );
+                    let available = (*n).min(original.len_chars().saturating_sub(pos));
+                    let text: String = original.slice(pos..pos + available).to_string();
                     push_insert(&mut inv_ops, text);
                     pos += n;
                 }

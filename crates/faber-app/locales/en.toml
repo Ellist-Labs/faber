@@ -10,6 +10,9 @@ open_settings = "Open Settings"
 start = "START"
 recent = "RECENT"
 no_recent = "No recent projects"
+remove_project = "Remove from list"
+restart_all = "Restart All"
+stop_all = "Stop All"
 
 [settings]
 title = "Settings"
@@ -222,6 +225,9 @@ stopped = "Stopped"
 restart = "Restart"
 stop = "Stop"
 start = "Start"
+version = "Version: %{v}"
+restart_all = "Restart All"
+stop_all = "Stop All"
 
 [dashboard]
 problems_title = "Problems"
@@ -268,3 +274,7 @@ expand_below = "Show more below"
 message = "Do you trust the authors of this folder?\n\nLanguage servers and project tooling only run in trusted folders."
 btn_trust = "Trust"
 btn_restricted = "Open Restricted"
+
+
+[completion]
+no_items = "No completions"

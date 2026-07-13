@@ -4,7 +4,7 @@ use std::sync::Arc;
 use faber_editor::outline::Outline;
 use gpui::{
     AnyElement, App, Context, Div, Entity, IntoElement, ListHorizontalSizingBehavior, MouseButton,
-    SharedString, Stateful, div, prelude::*, px, svg, uniform_list,
+    ScrollWheelEvent, SharedString, Stateful, div, prelude::*, px, svg, uniform_list,
 };
 
 use crate::file_icons;
@@ -62,6 +62,13 @@ impl Workspace {
             // No rounded corners — full-height overlay
             .border_r_1()
             .border_color(t.border_focus)
+            .occlude()
+            // Explicitly consume scroll so it never bubbles to the editor behind
+            // (Zed project_panel parity — relying on .occlude() alone is insufficient
+            // because the editor uniform_list's scroll hitbox can still match).
+            .on_scroll_wheel(cx.listener(|_, _ev: &ScrollWheelEvent, _, cx| {
+                cx.stop_propagation();
+            }))
             .key_context("Sidebar")
             .track_focus(&sidebar_fh)
             .child(header)
@@ -241,6 +248,7 @@ impl Workspace {
         h_flex()
             .id(ix)
             .h(px(t.tree_row_h))
+            .min_w_full()
             .mx(px(5.))
             .rounded(px(7.))
             .relative()

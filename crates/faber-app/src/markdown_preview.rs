@@ -12,7 +12,6 @@ use gpui::{
 };
 use ropey::Rope;
 
-use crate::buffer_view::token_color;
 use crate::settings_view::SettingsStore;
 use crate::theme::RuntimeTheme;
 use crate::ui::scrollbar::{start_drag, update_drag};
@@ -561,7 +560,7 @@ fn render_highlighted_line(line: &str, spans: &[HighlightSpan], t: &RuntimeTheme
                 t.mono_family.clone(),
             ));
         }
-        let col = token_color(span.token, t);
+        let col = t.syntax_color(span.highlight_id);
         runs.push(plain_run(end - start, col, t.mono_family.clone()));
         byte_cursor = end;
     }

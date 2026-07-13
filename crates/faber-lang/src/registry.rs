@@ -99,6 +99,6 @@ mod tests {
     fn markdown_highlight_query_compiles() {
         let reg = LanguageRegistry::with_defaults();
         let lang = reg.language_for_path(&PathBuf::from("README.md")).unwrap();
-        assert!(lang.make_highlight_query().is_some());
+        assert!(lang.build_grammar().highlight.is_some());
     }
 }

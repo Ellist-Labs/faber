@@ -1,7 +1,7 @@
 use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
 use faber_editor::{
-    ChangeSet, LanguageRegistry, Selection, SyntaxToken, Transaction,
+    ChangeSet, LanguageRegistry, Selection, Transaction,
     buffer::Document,
     cursor,
     edit_history::History,
@@ -54,15 +54,17 @@ const OUTLINE_BODY_H: f32 = OUTLINE_MODAL_H - OUTLINE_INPUT_ROW_H - OUTLINE_FOOT
 // ── actions ────────────────────────────────────────────────────────────────────
 
 use crate::{
-    Backspace, BoldSelection, CloseSearch, Copy, Cut, Delete, DeleteLine, DeleteToLineEnd,
-    DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev, FindReferences,
-    GoToDefinition, InputMoveEnd, InputMoveLeft, InputMoveRight, InputMoveStart, ItalicSelection,
-    MoveDocEnd, MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MovePageDown,
-    MovePageUp, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace, OpenSearch, Paste,
-    ProjectRoot, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne, SearchBackspace, SelectAll,
-    SelectDocEnd, SelectDocStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart,
-    SelectRight, SelectUp, SelectWordLeft, SelectWordRight, Tab, ToggleCheckbox, TogglePreview,
-    ToggleReplace, ToggleSearchCase, ToggleSearchRegex, ToggleSearchWholeWord, Undo,
+    Backspace, BoldSelection, CancelCompletion, CloseSearch, CompletionFirst, CompletionLast,
+    CompletionNext, CompletionPrev, ConfirmCompletion, Copy, Cut, Delete, DeleteLine,
+    DeleteToLineEnd, DeleteToLineStart, DeleteWordLeft, DeleteWordRight, Enter, FindNext, FindPrev,
+    FindReferences, GoToDefinition, InputMoveEnd, InputMoveLeft, InputMoveRight, InputMoveStart,
+    ItalicSelection, MoveDocEnd, MoveDocStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart,
+    MovePageDown, MovePageUp, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, OpenReplace,
+    OpenSearch, Paste, ProjectRoot, Redo, ReplaceAll, ReplaceBackspace, ReplaceOne,
+    SearchBackspace, SelectAll, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft,
+    SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight,
+    ShowCompletions, Tab, ToggleCheckbox, TogglePreview, ToggleReplace, ToggleSearchCase,
+    ToggleSearchRegex, ToggleSearchWholeWord, Undo,
 };
 
 // ── HoverState ─────────────────────────────────────────────────────────────────
@@ -143,6 +145,34 @@ impl HoverState {
 pub struct HoveredLink {
     pub symbol_range: std::ops::Range<usize>,
     pub locations: Vec<(std::path::PathBuf, usize, usize)>,
+}
+
+// ── CompletionMenu ─────────────────────────────────────────────────────────────
+
+pub struct CompletionMenu {
+    pub items: Vec<faber_lsp::completion::ParsedCompletion>,
+    pub filtered: Vec<usize>,
+    pub selected_ix: usize,
+    pub word_start: usize,
+    pub query: String,
+    pub initial_query: String,
+    pub is_incomplete: bool,
+    pub scroll: ScrollHandle,
+    pub request_task: Option<gpui::Task<()>>,
+    pub doc_text: Option<String>,
+    pub resolve_task: Option<gpui::Task<()>>,
+    pub locked_anchor: Option<crate::hover_popover::HoverAnchor>,
+    /// Persistent markdown segments for the doc panel — rebuilt when doc changes.
+    pub doc_segments: crate::hover_popover::SharedSegments,
+    /// Persistent scroll handle for the doc panel — preserved across re-filters.
+    pub doc_scroll: ScrollHandle,
+}
+
+impl CompletionMenu {
+    fn selected_item(&self) -> Option<&faber_lsp::completion::ParsedCompletion> {
+        let ix = *self.filtered.get(self.selected_ix)?;
+        self.items.get(ix)
+    }
 }
 
 // ── EditorView ─────────────────────────────────────────────────────────────────
@@ -234,6 +264,9 @@ pub struct EditorView {
     pub ws_handle: Option<gpui::WeakEntity<crate::workspace::Workspace>>,
     pub hover: HoverState,
 
+    pub completion: Option<CompletionMenu>,
+    completion_suppress_once: bool,
+
     // True while the Cmd/Super key is held; drives hand cursor on editor content.
     pub cmd_held: bool,
     // Cmd+hover link preview (Zed's hovered_link): definition cache for the
@@ -311,6 +344,8 @@ impl EditorView {
             lsp_manager: None,
             ws_handle: None,
             hover: HoverState::default(),
+            completion: None,
+            completion_suppress_once: false,
             cmd_held: false,
             hovered_link: None,
             link_task: None,
@@ -388,6 +423,9 @@ impl EditorView {
         // Document changed under the popover / link preview — both are stale.
         self.dismiss_hover(cx);
         self.clear_hovered_link(cx);
+        if self.completion.is_some() {
+            self.refresh_completion_filter_or_dismiss(cx);
+        }
         self.clear_word_occ();
         self.update_matches();
         if self.is_markdown() {
@@ -704,6 +742,7 @@ impl EditorView {
         // Any click on the editor (the popover stops propagation for clicks
         // inside itself) dismisses the hover popover, selection included.
         self.dismiss_hover(cx);
+        self.dismiss_completion(cx);
         let t = cx.global::<RuntimeTheme>().clone();
         let show_line_numbers = cx.global::<SettingsStore>().0.line_numbers;
         let Some(offset) = self.offset_at(ev.position, &t, show_line_numbers, window) else {
@@ -1793,8 +1832,25 @@ impl EditorView {
         cx.notify();
     }
 
-    fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        // A manual delete consumes the one-shot post-accept suppression — otherwise
+        // editing a just-accepted word (delete a letter to fix it) never re-opens
+        // completion until the whole word is erased.
+        self.completion_suppress_once = false;
         self.do_backspace(cx);
+        // Re-trigger completion if menu was dismissed (e.g. after accepting, or after
+        // deleting a non-word char like `::`) and there is now a word prefix at the cursor.
+        if self.completion.is_none() {
+            let head = self.sel.head;
+            if let Some((word_start, query)) =
+                crate::completion_logic::compute_word_prefix(&self.doc.rope, head)
+            {
+                if !query.is_empty() {
+                    eprintln!("[completion] backspace re-trigger query={:?}", query);
+                    self.do_trigger_completion(word_start, query, None, window, cx);
+                }
+            }
+        }
     }
     fn on_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
         self.do_delete_fwd(cx);
@@ -2337,6 +2393,11 @@ impl EditorView {
             cx.notify();
         } else {
             self.insert_text(text, cx);
+            if !self.completion_suppress_once {
+                self.schedule_completion_on_input(text, window, cx);
+            } else {
+                self.completion_suppress_once = false;
+            }
         }
     }
 
@@ -3243,8 +3304,10 @@ impl Render for EditorView {
                     .child(path_label.clone()),
             );
             for item in &crumb_stack {
-                let seg_color = crate::editor_logic::context_to_token(item.context.as_deref())
-                    .map(|tok| crate::buffer_view::token_color(tok, &t))
+                let seg_color = crate::editor_logic::context_to_capture(item.context.as_deref())
+                    .and_then(|name| t.highlight_id(name))
+                    .and_then(|id| t.syntax_style(id))
+                    .map(|s| s.color)
                     .unwrap_or(t.text);
                 inner = inner
                     .child(div().text_color(sep_color).flex_shrink_0().child(" ›"))
@@ -3380,8 +3443,9 @@ impl Render for EditorView {
                     .map(|s| s.as_ref())
                     .unwrap_or("");
                 let head_byte_col = char_col_to_byte_col(line_str, head_char_col);
+                let comment_id = t.highlight_id("comment");
                 let in_comment = self.doc.highlight_spans(cursor_line).iter().any(|s| {
-                    if s.token != SyntaxToken::Comment {
+                    if comment_id != Some(s.highlight_id) {
                         return false;
                     }
                     let start = s.start_byte_col as usize;
@@ -3618,6 +3682,13 @@ impl Render for EditorView {
                 .on_action(cx.listener(Self::on_bold_selection))
                 .on_action(cx.listener(Self::on_italic_selection))
                 .on_action(cx.listener(Self::on_toggle_checkbox))
+                .on_action(cx.listener(Self::on_show_completions))
+                .on_action(cx.listener(Self::on_completion_next))
+                .on_action(cx.listener(Self::on_completion_prev))
+                .on_action(cx.listener(Self::on_completion_first))
+                .on_action(cx.listener(Self::on_completion_last))
+                .on_action(cx.listener(Self::on_confirm_completion))
+                .on_action(cx.listener(Self::on_cancel_completion))
                 .when(is_dragging || self.mouse_selecting, |el| {
                     el.on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, window, cx| {
                         if let Some(ref drag) = view.scrollbar_drag {
@@ -3638,8 +3709,12 @@ impl Render for EditorView {
                     )
                 })
                 .child(header);
-            let key_ctx = if self.outline_open {
+            let key_ctx: &str = if self.outline_open {
                 "OutlineOverlay"
+            } else if self.completion.is_some() && is_md {
+                "Editor markdown showing_completions"
+            } else if self.completion.is_some() {
+                "Editor showing_completions"
             } else if is_md {
                 "Editor markdown"
             } else {
@@ -3660,8 +3735,12 @@ impl Render for EditorView {
             return root.into_any();
         }
 
-        let key_ctx = if self.outline_open {
+        let key_ctx: &str = if self.outline_open {
             "OutlineOverlay"
+        } else if self.completion.is_some() && is_md {
+            "Editor markdown showing_completions"
+        } else if self.completion.is_some() {
+            "Editor showing_completions"
         } else if is_md {
             "Editor markdown"
         } else {
@@ -3737,6 +3816,13 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_toggle_checkbox))
             .on_action(cx.listener(Self::on_go_to_definition))
             .on_action(cx.listener(Self::on_find_references))
+            .on_action(cx.listener(Self::on_show_completions))
+            .on_action(cx.listener(Self::on_completion_next))
+            .on_action(cx.listener(Self::on_completion_prev))
+            .on_action(cx.listener(Self::on_completion_first))
+            .on_action(cx.listener(Self::on_completion_last))
+            .on_action(cx.listener(Self::on_confirm_completion))
+            .on_action(cx.listener(Self::on_cancel_completion))
             .on_modifiers_changed(cx.listener(
                 |view, ev: &gpui::ModifiersChangedEvent, window, cx| {
                     let cmd = ev.modifiers.platform;
@@ -3792,6 +3878,14 @@ impl Render for EditorView {
         let root = if self.hover.content.is_some() {
             match self.render_hover_popover(&t, cx) {
                 Some(popover) => root.child(popover),
+                None => root,
+            }
+        } else {
+            root
+        };
+        let root = if self.completion.is_some() {
+            match self.render_completion_overlay(&t, window, cx) {
+                Some(el) => root.child(el),
                 None => root,
             }
         } else {
@@ -4536,4 +4630,1021 @@ fn parse_definition_locations(val: &serde_json::Value) -> Vec<(std::path::PathBu
             Some((path, line, character))
         })
         .collect()
+}
+
+// ── Completion ─────────────────────────────────────────────────────────────────
+
+const COMPLETION_ITEM_H: f32 = 24.0;
+
+impl EditorView {
+    fn schedule_completion_on_input(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mgr) = self.lsp_manager.clone() else {
+            return;
+        };
+        let path = self.doc.path.clone();
+        let Ok(uri) = url::Url::from_file_path(&path) else {
+            return;
+        };
+        let trigger_chars = mgr.completion_trigger_chars_for_uri(&uri);
+        let is_trigger_char = trigger_chars.iter().any(|c| c.as_str() == text);
+        let is_word_char = text.chars().all(|c| c.is_alphanumeric() || c == '_');
+
+        if is_trigger_char {
+            let head = self.sel.head;
+            eprintln!("[completion] trigger char {:?} at {head}", text);
+            self.do_trigger_completion(head, String::new(), Some(text.to_string()), window, cx);
+            return;
+        }
+
+        if !is_word_char {
+            if self.completion.is_some() {
+                eprintln!("[completion] non-word char {:?} — dismiss", text);
+                self.dismiss_completion(cx);
+            }
+            return;
+        }
+
+        let head = self.sel.head;
+        let Some((word_start, query)) =
+            crate::completion_logic::compute_word_prefix(&self.doc.rope, head)
+        else {
+            eprintln!("[completion] word char but no prefix — dismiss");
+            self.dismiss_completion(cx);
+            return;
+        };
+
+        if let Some(ref menu) = self.completion {
+            if !menu.is_incomplete {
+                eprintln!("[completion] word char — local refilter handles it");
+                return;
+            }
+            // isIncomplete=true: never re-request while we have a cached item set.
+            // Zed keeps the full original item set and re-filters locally; empty local
+            // matches hide the overlay rather than wiping items. Re-requesting would
+            // replace items with Vec::new() while the task is in flight, breaking delete-back.
+            if !menu.items.is_empty() {
+                eprintln!(
+                    "[completion] isIncomplete=true but {} cached items — local refilter only",
+                    menu.items.len()
+                );
+                return;
+            }
+            eprintln!(
+                "[completion] isIncomplete=true, no cached items — re-request query={:?}",
+                query
+            );
+        } else {
+            eprintln!(
+                "[completion] new trigger word_start={word_start} query={:?}",
+                query
+            );
+        }
+
+        self.do_trigger_completion(word_start, query, None, window, cx);
+    }
+
+    fn do_show_completions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let head = self.sel.head;
+        let (word_start, query) =
+            crate::completion_logic::compute_word_prefix(&self.doc.rope, head)
+                .unwrap_or((head, String::new()));
+        eprintln!(
+            "[completion] manual trigger word_start={word_start} query={:?}",
+            query
+        );
+        self.do_trigger_completion(word_start, query, None, window, cx);
+    }
+
+    fn do_trigger_completion(
+        &mut self,
+        word_start: usize,
+        query: String,
+        trigger_char: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mgr) = self.lsp_manager.clone() else {
+            eprintln!("[completion] no lsp_manager");
+            return;
+        };
+        let path = self.doc.path.clone();
+        let Ok(uri) = url::Url::from_file_path(&path) else {
+            return;
+        };
+        let encoding = mgr.position_encoding_for_uri(&uri);
+        let head = self.sel.head;
+        let lsp_pos = faber_lsp::position::to_lsp_position(&self.doc.rope, head, encoding);
+        let trigger_kind: u8 = if trigger_char.is_some() { 2 } else { 1 };
+        let context_json = if let Some(ref ch) = trigger_char {
+            serde_json::json!({ "triggerKind": trigger_kind, "triggerCharacter": ch })
+        } else {
+            serde_json::json!({ "triggerKind": trigger_kind })
+        };
+        let params_json = serde_json::json!({
+            "textDocument": { "uri": uri.as_str() },
+            "position": { "line": lsp_pos.line, "character": lsp_pos.character },
+            "context": context_json,
+        });
+        let Some(rx) = mgr.request_for_document(&uri, "textDocument/completion", params_json)
+        else {
+            eprintln!("[completion] no running server");
+            return;
+        };
+        eprintln!(
+            "[completion] LSP request head={head} pos={}:{} query={:?}",
+            lsp_pos.line, lsp_pos.character, query
+        );
+
+        let initial_query = query.clone();
+        let registry = Arc::clone(&self.registry);
+        let ext = self
+            .doc
+            .path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_string());
+        let task =
+            cx.spawn_in(window, async move |view, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { rx.recv_timeout(std::time::Duration::from_secs(5)) })
+                    .await;
+                match result {
+                    Ok(Ok(val)) => {
+                        let list = faber_lsp::completion::parse_completion_response(&val);
+                        eprintln!(
+                            "[completion] response {} items is_incomplete={}",
+                            list.items.len(),
+                            list.is_incomplete
+                        );
+                        view.update_in(cx, |ev, window, cx| {
+                        let current_head = ev.sel.head;
+                        if current_head < word_start {
+                            eprintln!("[completion] stale: cursor before word_start");
+                            return;
+                        }
+                        let current_query: String = ev
+                            .doc
+                            .rope
+                            .chars_at(word_start)
+                            .take(current_head.saturating_sub(word_start))
+                            .collect();
+                        eprintln!(
+                            "[completion] applying initial={:?} current={:?}",
+                            initial_query, current_query
+                        );
+
+                        let filtered =
+                            crate::completion_logic::fuzzy_filter(&list.items, &current_query);
+                        let filtered_indices: Vec<usize> =
+                            filtered.iter().map(|m| m.item_ix).collect();
+                        eprintln!("[completion] filtered {} items", filtered_indices.len());
+
+                        if filtered_indices.is_empty() {
+                            // Keep existing local-filtered items if we still have them —
+                            // server may return empty for an incomplete/throttled query.
+                            if ev.completion.as_ref().is_some_and(|m| !m.filtered.is_empty()) {
+                                eprintln!(
+                                    "[completion] server empty but {} local items remain — keep",
+                                    ev.completion.as_ref().unwrap().filtered.len()
+                                );
+                                if let Some(ref mut menu) = ev.completion {
+                                    menu.is_incomplete = false;
+                                }
+                                cx.notify();
+                                return;
+                            }
+                            let action = crate::completion_logic::resolve_empty_filter(
+                                list.is_incomplete,
+                                &initial_query,
+                                &current_query,
+                            );
+                            eprintln!("[completion] empty filter action={:?}", action);
+                            match action {
+                                crate::completion_logic::EmptyFilterAction::Dismiss => {
+                                    ev.completion = None;
+                                }
+                                crate::completion_logic::EmptyFilterAction::Rerequest => {
+                                    ev.do_trigger_completion(
+                                        word_start,
+                                        current_query,
+                                        None,
+                                        window,
+                                        cx,
+                                    );
+                                    return;
+                                }
+                            }
+                            cx.notify();
+                            return;
+                        }
+
+                        let old_label = ev
+                            .completion
+                            .as_ref()
+                            .and_then(|m| m.selected_item())
+                            .map(|i| i.label.clone());
+                        let selected_ix = old_label
+                            .and_then(|lbl| {
+                                filtered_indices.iter().position(|&ix| {
+                                    list.items.get(ix).is_some_and(|it| it.label == lbl)
+                                })
+                            })
+                            .unwrap_or(0);
+
+                        let old_parts =
+                            ev.completion.take().map(|m| (m.scroll, m.doc_segments, m.doc_scroll));
+                        let (old_scroll, new_doc_segments, new_doc_scroll) = match old_parts {
+                            Some((s, ds, dsc)) => (Some(s), ds, dsc),
+                            None => (
+                                None,
+                                std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                                ScrollHandle::new(),
+                            ),
+                        };
+
+                        // Rebuild doc segments for the initially selected item if it has docs.
+                        {
+                            let doc_text = filtered_indices
+                                .get(selected_ix)
+                                .and_then(|&ix| list.items.get(ix))
+                                .and_then(|it| {
+                                    it.documentation.as_ref().or(it.detail.as_ref())
+                                })
+                                .cloned();
+                            if let Some(text) = doc_text {
+                                let t = cx.global::<RuntimeTheme>().clone();
+                                let rope = ropey::Rope::from_str(&text);
+                                let md = std::sync::Arc::new(
+                                    faber_editor::markdown::parse_markdown_with_fallback(
+                                        &text,
+                                        &rope,
+                                        &registry,
+                                        ext.as_deref(),
+                                    ),
+                                );
+                                crate::hover_popover::rebuild_segments(&new_doc_segments, &md, &t);
+                            }
+                        }
+
+                        ev.completion = Some(CompletionMenu {
+                            items: list.items,
+                            filtered: filtered_indices,
+                            selected_ix,
+                            word_start,
+                            query: current_query,
+                            initial_query,
+                            is_incomplete: list.is_incomplete,
+                            scroll: old_scroll.unwrap_or_else(ScrollHandle::new),
+                            request_task: None,
+                            doc_text: None,
+                            resolve_task: None,
+                            locked_anchor: None,
+                            doc_segments: new_doc_segments,
+                            doc_scroll: new_doc_scroll,
+                        });
+                        cx.notify();
+                    })
+                    .ok();
+                    }
+                    Ok(Err(e)) => eprintln!("[completion] LSP error: {e:?}"),
+                    Err(_) => eprintln!("[completion] timed out"),
+                }
+            });
+
+        let old_parts = self
+            .completion
+            .take()
+            .map(|m| (m.scroll, m.doc_segments, m.doc_scroll, m.locked_anchor));
+        let (old_scroll, stub_doc_segments, stub_doc_scroll, old_anchor) = match old_parts {
+            Some((s, ds, dsc, anc)) => (Some(s), ds, dsc, anc),
+            None => (
+                None,
+                std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                ScrollHandle::new(),
+                None,
+            ),
+        };
+        self.completion = Some(CompletionMenu {
+            items: Vec::new(),
+            filtered: Vec::new(),
+            selected_ix: 0,
+            word_start,
+            query: query.clone(),
+            initial_query: query,
+            is_incomplete: false,
+            scroll: old_scroll.unwrap_or_else(ScrollHandle::new),
+            request_task: Some(task),
+            doc_text: None,
+            resolve_task: None,
+            locked_anchor: old_anchor,
+            doc_segments: stub_doc_segments,
+            doc_scroll: stub_doc_scroll,
+        });
+    }
+
+    fn refresh_completion_filter_or_dismiss(&mut self, cx: &mut Context<Self>) {
+        let head = self.sel.head;
+        let Some(ref menu) = self.completion else {
+            return;
+        };
+        let word_start = menu.word_start;
+
+        if head < word_start {
+            eprintln!("[completion] cursor before word_start — dismiss");
+            self.completion = None;
+            cx.notify();
+            return;
+        }
+
+        let current_query: String = self
+            .doc
+            .rope
+            .chars_at(word_start)
+            .take(head.saturating_sub(word_start))
+            .collect();
+
+        if current_query
+            .chars()
+            .any(|c| !c.is_alphanumeric() && c != '_')
+        {
+            eprintln!("[completion] non-word in query — dismiss");
+            self.completion = None;
+            cx.notify();
+            return;
+        }
+
+        eprintln!("[completion] refilter query={:?}", current_query);
+
+        let filtered = crate::completion_logic::fuzzy_filter(&menu.items, &current_query);
+        let filtered_indices: Vec<usize> = filtered.iter().map(|m| m.item_ix).collect();
+
+        if filtered_indices.is_empty() {
+            // Zed: never dismiss on empty local filter — keep menu alive so delete-back
+            // restores matches against the retained full item set. Overlay hides automatically
+            // when filtered is empty (render fn returns None). Only real dismissal triggers
+            // are: empty query, cursor leaving word, escape, confirm.
+            eprintln!("[completion] refilter empty — hide overlay, keep menu alive");
+            if let Some(ref mut menu) = self.completion {
+                menu.query = current_query;
+                menu.filtered = vec![];
+                menu.selected_ix = 0;
+            }
+            cx.notify();
+            return;
+        }
+
+        if let Some(ref mut menu) = self.completion {
+            menu.query = current_query;
+            menu.filtered = filtered_indices;
+            menu.selected_ix = menu.selected_ix.min(menu.filtered.len().saturating_sub(1));
+            eprintln!(
+                "[completion] refilter done {} items selected={}",
+                menu.filtered.len(),
+                menu.selected_ix
+            );
+        }
+        cx.notify();
+    }
+
+    pub fn dismiss_completion(&mut self, cx: &mut Context<Self>) {
+        if self.completion.is_some() {
+            eprintln!("[completion] dismiss");
+            self.completion = None;
+            cx.notify();
+        }
+    }
+
+    fn accept_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.completion.take() else {
+            eprintln!("[completion] accept: no menu");
+            return;
+        };
+        let Some(&item_ix) = menu.filtered.get(menu.selected_ix) else {
+            eprintln!("[completion] accept: no item at {}", menu.selected_ix);
+            cx.notify();
+            return;
+        };
+        let item = &menu.items[item_ix];
+        eprintln!("[completion] accept ix={item_ix} label={:?}", item.label);
+
+        let Some(mgr) = self.lsp_manager.clone() else {
+            return;
+        };
+        let path = self.doc.path.clone();
+        let Ok(uri) = url::Url::from_file_path(&path) else {
+            return;
+        };
+        let encoding = mgr.position_encoding_for_uri(&uri);
+
+        let (insert_range, text) = if let Some(edit) = &item.text_edit {
+            let start =
+                faber_lsp::position::from_lsp_position(&self.doc.rope, edit.range.start, encoding)
+                    .unwrap_or(menu.word_start);
+            let end =
+                faber_lsp::position::from_lsp_position(&self.doc.rope, edit.range.end, encoding)
+                    .unwrap_or(self.sel.head);
+            let t = if item.is_snippet {
+                faber_lsp::completion::strip_snippet(&edit.new_text)
+            } else {
+                edit.new_text.clone()
+            };
+            eprintln!("[completion] text_edit {start}..{end} text={:?}", t);
+            (start..end, t)
+        } else {
+            let raw = item.insert_text.as_deref().unwrap_or(&item.label);
+            let t = if item.is_snippet {
+                faber_lsp::completion::strip_snippet(raw)
+            } else {
+                raw.to_owned()
+            };
+            eprintln!(
+                "[completion] insert {}.{} text={:?}",
+                menu.word_start, self.sel.head, t
+            );
+            (menu.word_start..self.sel.head, t)
+        };
+
+        self.history.commit();
+        let char_count = text.chars().count();
+        let tx =
+            faber_editor::Transaction::replace(&self.doc.rope, insert_range.clone(), text.clone());
+        let inverse = self.doc.apply(tx);
+        self.history.push_change(inverse);
+        let new_pos = (insert_range.start + char_count).min(self.doc.len_chars());
+        self.sel = faber_editor::Selection::collapsed(new_pos, &self.doc.rope);
+        self.completion_suppress_once = true;
+        self.after_edit(cx);
+        let _ = window;
+    }
+
+    fn scroll_completion_to_selected(&self) {
+        if let Some(ref menu) = self.completion {
+            const VISIBLE_H: f32 = 10.0 * COMPLETION_ITEM_H;
+            let item_top = menu.selected_ix as f32 * COMPLETION_ITEM_H;
+            let item_bottom = item_top + COMPLETION_ITEM_H;
+            // GPUI scroll offsets are negative (scrolled-down content has negative y).
+            // Viewport shows content from (-offset_y) to (-offset_y + VISIBLE_H).
+            let offset_y = f32::from(menu.scroll.offset().y);
+            let viewport_top = -offset_y;
+            let viewport_bottom = viewport_top + VISIBLE_H;
+            let new_offset_y = if item_top < viewport_top {
+                // Item above viewport — scroll up to show at top.
+                -item_top
+            } else if item_bottom > viewport_bottom {
+                // Item below viewport — scroll down to show at bottom.
+                -(item_bottom - VISIBLE_H)
+            } else {
+                return;
+            };
+            menu.scroll
+                .set_offset(gpui::point(gpui::px(0.), gpui::px(new_offset_y)));
+        }
+    }
+
+    fn on_show_completions(
+        &mut self,
+        _: &ShowCompletions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        self.do_show_completions(window, cx);
+    }
+
+    fn on_completion_next(
+        &mut self,
+        _: &CompletionNext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        if let Some(ref mut menu) = self.completion {
+            let n = menu.filtered.len();
+            if n == 0 {
+                return;
+            }
+            menu.selected_ix = (menu.selected_ix + 1) % n;
+            eprintln!("[completion] next → {}", menu.selected_ix);
+        }
+        self.scroll_completion_to_selected();
+        self.schedule_completion_resolve(window, cx);
+        cx.notify();
+    }
+
+    fn on_completion_prev(
+        &mut self,
+        _: &CompletionPrev,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        if let Some(ref mut menu) = self.completion {
+            let n = menu.filtered.len();
+            if n == 0 {
+                return;
+            }
+            menu.selected_ix = if menu.selected_ix == 0 {
+                n - 1
+            } else {
+                menu.selected_ix - 1
+            };
+            eprintln!("[completion] prev → {}", menu.selected_ix);
+        }
+        self.scroll_completion_to_selected();
+        self.schedule_completion_resolve(window, cx);
+        cx.notify();
+    }
+
+    fn on_completion_first(
+        &mut self,
+        _: &CompletionFirst,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        if let Some(ref mut menu) = self.completion {
+            menu.selected_ix = 0;
+        }
+        self.scroll_completion_to_selected();
+        self.schedule_completion_resolve(window, cx);
+        cx.notify();
+    }
+
+    fn on_completion_last(
+        &mut self,
+        _: &CompletionLast,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        if let Some(ref mut menu) = self.completion {
+            let n = menu.filtered.len();
+            if n > 0 {
+                menu.selected_ix = n - 1;
+            }
+        }
+        self.scroll_completion_to_selected();
+        self.schedule_completion_resolve(window, cx);
+        cx.notify();
+    }
+
+    /// Fire a `completionItem/resolve` request for the currently selected item if it
+    /// has no inline documentation yet. Stores result in `menu.doc_text` and rebuilds
+    /// markdown segments for the doc panel.
+    fn schedule_completion_resolve(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mgr) = self.lsp_manager.clone() else {
+            return;
+        };
+        let path = self.doc.path.clone();
+        let Ok(uri) = url::Url::from_file_path(&path) else {
+            return;
+        };
+        let Some(ref mut menu) = self.completion else {
+            return;
+        };
+
+        // If the selected item already has inline documentation, rebuild segments and show.
+        if let Some(&item_ix) = menu.filtered.get(menu.selected_ix) {
+            if let Some(inline_doc) = menu
+                .items
+                .get(item_ix)
+                .and_then(|it| it.documentation.as_ref())
+            {
+                let text = inline_doc.clone();
+                let t = cx.global::<RuntimeTheme>().clone();
+                let rope = ropey::Rope::from_str(&text);
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_string());
+                let md = std::sync::Arc::new(faber_editor::markdown::parse_markdown_with_fallback(
+                    &text,
+                    &rope,
+                    &self.registry,
+                    ext.as_deref(),
+                ));
+                crate::hover_popover::rebuild_segments(&menu.doc_segments, &md, &t);
+                return;
+            }
+        }
+
+        let Some(&item_ix) = menu.filtered.get(menu.selected_ix) else {
+            return;
+        };
+        // Build the completionItem JSON for the resolve request.
+        // Protocol requires at minimum `label`; servers use `data` for resolution context.
+        let resolve_json = {
+            let it = &menu.items[item_ix];
+            let mut obj = serde_json::Map::new();
+            obj.insert("label".into(), serde_json::json!(it.label));
+            if let Some(k) = it.kind {
+                obj.insert("kind".into(), serde_json::json!(k));
+            }
+            if let Some(ref d) = it.detail {
+                obj.insert("detail".into(), serde_json::json!(d));
+            }
+            if !it.data.is_null() {
+                obj.insert("data".into(), it.data.clone());
+            }
+            serde_json::Value::Object(obj)
+        };
+        let Some(rx) = mgr.resolve_completion_item(&uri, resolve_json) else {
+            return;
+        };
+        // Clear stale doc from previous selection.
+        menu.doc_text = None;
+        menu.doc_segments.borrow_mut().clear();
+        let resolve_registry = Arc::clone(&self.registry);
+        let resolve_ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_string());
+        let task = cx.spawn_in(window, async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rx.recv_timeout(std::time::Duration::from_secs(3)) })
+                .await;
+            if let Ok(Ok(val)) = result {
+                let doc = faber_lsp::completion::extract_doc_text(val.get("documentation"));
+                view.update(cx, |ev, cx| {
+                    if let Some(ref mut m) = ev.completion {
+                        m.doc_text = doc;
+                        // Rebuild markdown segments for the doc panel.
+                        if let Some(ref text) = m.doc_text {
+                            let t = cx.global::<RuntimeTheme>().clone();
+                            let rope = ropey::Rope::from_str(text);
+                            let md = std::sync::Arc::new(
+                                faber_editor::markdown::parse_markdown_with_fallback(
+                                    text,
+                                    &rope,
+                                    &resolve_registry,
+                                    resolve_ext.as_deref(),
+                                ),
+                            );
+                            crate::hover_popover::rebuild_segments(&m.doc_segments, &md, &t);
+                        }
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        });
+        if let Some(ref mut menu) = self.completion {
+            menu.resolve_task = Some(task);
+        }
+    }
+
+    fn on_confirm_completion(
+        &mut self,
+        _: &ConfirmCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        eprintln!(
+            "[completion] confirm selected={}",
+            self.completion.as_ref().map(|m| m.selected_ix).unwrap_or(0)
+        );
+        self.accept_completion(window, cx);
+    }
+
+    fn on_cancel_completion(
+        &mut self,
+        _: &CancelCompletion,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        eprintln!("[completion] cancel");
+        self.dismiss_completion(cx);
+    }
+
+    fn render_completion_overlay(
+        &mut self,
+        t: &RuntimeTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.completion.as_ref()?.filtered.is_empty() {
+            return None;
+        }
+
+        let word_start = self.completion.as_ref()?.word_start;
+
+        // Recompute the word's CURRENT window position every frame. `deferred` paints
+        // this overlay outside the scroll transform, so painting at the live position
+        // keeps the overlay glued to the word — it travels with the text as the buffer
+        // scrolls, instead of parking at a fixed window spot.
+        let anchor = self.hover_anchor_for_offset(word_start, t, window)?;
+
+        // Hide (but keep state) when the typed word scrolls off-screen.
+        {
+            let word_line = self
+                .doc
+                .rope
+                .char_to_line(word_start.min(self.doc.len_chars().saturating_sub(1)));
+            let top_line = self.top_visible_line(t);
+            let viewport_h = {
+                let st = self.scroll_handle.0.borrow();
+                f32::from(st.base_handle.bounds().size.height)
+            };
+            let visible_lines = (viewport_h / t.line_height_code).ceil() as usize;
+            let bottom_line = top_line + visible_lines;
+            if word_line < top_line || word_line >= bottom_line {
+                eprintln!(
+                    "[completion] word_line={word_line} outside [{top_line},{bottom_line}) — hidden"
+                );
+                return None;
+            }
+        }
+
+        let selected_ix = self.completion.as_ref()?.selected_ix;
+        let scroll = self.completion.as_ref()?.scroll.clone();
+
+        const MIN_VISIBLE: usize = 3;
+        const MAX_VISIBLE: usize = 12;
+        const DROPDOWN_W: f32 = 320.0;
+        const DOC_MIN_W: f32 = 320.0;
+        const DOC_MAX_W: f32 = 500.0;
+
+        // Viewport bounds (window space) — size the menu to the space available
+        // below the anchor, flipping above only when the space below is cramped
+        // (Zed parity: more rows shown when there is room).
+        let (vp_top, vp_bottom) = {
+            let st = self.scroll_handle.0.borrow();
+            let b = st.base_handle.bounds();
+            let top = f32::from(b.origin.y);
+            (top, top + f32::from(b.size.height))
+        };
+        let space_below = (vp_bottom - anchor.line_bottom).max(0.0);
+        let space_above = (anchor.line_top - vp_top).max(0.0);
+        let min_menu_h = MIN_VISIBLE as f32 * COMPLETION_ITEM_H;
+        let place_above = space_below < min_menu_h && space_above > space_below;
+        let avail = if place_above {
+            space_above
+        } else {
+            space_below
+        };
+
+        let item_h_px = gpui::px(COMPLETION_ITEM_H);
+        let caption_sz = gpui::px(t.font_size_caption);
+        let code_sz = gpui::px(t.font_size_code);
+        let selected_bg = t.accent_muted;
+
+        // Kind → theme syntax color, reusing the editor's own token palette.
+        let syntax_color = |name: &str| {
+            t.highlight_id(name)
+                .map(|id| t.syntax_color(id))
+                .unwrap_or(t.text)
+        };
+        let c_function = syntax_color("function");
+        let c_variable = syntax_color("variable");
+        let c_type = syntax_color("type");
+        let c_keyword = syntax_color("keyword");
+        let c_constant = syntax_color("constant");
+        let c_namespace = syntax_color("namespace");
+        // Color + compact glyph per LSP CompletionItemKind, resolved in one pass.
+        let kind_info = |kind: Option<i32>| -> (gpui::Hsla, &'static str) {
+            match kind {
+                Some(1) => (t.text, "ab"),               // Text
+                Some(2) | Some(3) => (c_function, "fn"), // Method, Function
+                Some(4) => (t.text, "c"),                // Constructor
+                Some(5) => (c_variable, "f"),            // Field
+                Some(6) => (c_variable, "v"),            // Variable
+                Some(7) => (c_type, "C"),                // Class
+                Some(8) => (c_type, "I"),                // Interface
+                Some(9) => (c_namespace, "ns"),          // Module
+                Some(10) => (c_variable, "p"),           // Property
+                Some(11) => (t.text, "u"),               // Unit
+                Some(12) => (c_constant, "="),           // Value
+                Some(13) => (c_type, "E"),               // Enum
+                Some(14) => (c_keyword, "kw"),           // Keyword
+                Some(15) => (t.text, "⋯"),               // Snippet
+                Some(20) => (t.text, "e"),               // EnumMember
+                Some(21) => (c_constant, "K"),           // Constant
+                Some(22) => (c_type, "T"),               // Struct
+                Some(23) => (t.text, "!"),               // Event
+                Some(24) => (t.text, "op"),              // Operator
+                Some(25) => (c_type, "T"),               // TypeParameter
+                _ => (t.text, "·"),
+            }
+        };
+
+        // Extract item display data (label, kind, detail) for row rendering.
+        let items: Vec<(String, Option<i32>, Option<String>)> = {
+            let m = self.completion.as_ref()?;
+            m.filtered
+                .iter()
+                .map(|&ix| {
+                    let item = &m.items[ix];
+                    (item.label.clone(), item.kind, item.detail.clone())
+                })
+                .collect()
+        };
+
+        let item_count = items.len();
+        let fit_rows = (avail / COMPLETION_ITEM_H).floor() as usize;
+        let visible_rows = fit_rows
+            .clamp(MIN_VISIBLE, MAX_VISIBLE)
+            .min(item_count)
+            .max(1);
+        let list_h = visible_rows as f32 * COMPLETION_ITEM_H;
+
+        let rows: Vec<AnyElement> = items
+            .into_iter()
+            .enumerate()
+            .map(|(list_ix, (label, kind, detail))| {
+                let is_selected = list_ix == selected_ix;
+                let (kc, glyph) = kind_info(kind);
+                // Colored by kind; unselected rows dimmed via alpha so the
+                // selection highlight still reads clearly.
+                let label_color = if is_selected {
+                    kc
+                } else {
+                    gpui::Hsla {
+                        a: kc.a * 0.7,
+                        ..kc
+                    }
+                };
+                let mut row = div()
+                    .id(("completion-item", list_ix))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h(item_h_px)
+                    .px(px(t.sp2))
+                    .gap(px(t.sp2))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |view, _, window, cx| {
+                            if let Some(ref mut m) = view.completion {
+                                m.selected_ix = list_ix;
+                            }
+                            view.accept_completion(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        // Fixed-size, flex-centered cell so the glyph shares the
+                        // row's vertical center with the label (no baseline drift).
+                        div()
+                            .w(px(18.))
+                            .h(item_h_px)
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(caption_sz)
+                            .text_color(label_color)
+                            .child(glyph.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_size(code_sz)
+                            .text_color(label_color)
+                            .child(label),
+                    );
+                if let Some(d) = detail {
+                    row = row.child(
+                        div()
+                            .text_size(caption_sz)
+                            .text_color(t.text_subtle)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .max_w(px(120.))
+                            .text_ellipsis()
+                            .child(d),
+                    );
+                }
+                if is_selected {
+                    row = row.bg(selected_bg).rounded(px(t.radius_sm));
+                }
+                row.into_any()
+            })
+            .collect();
+
+        // Dropdown list using glass popover surface.
+        let dropdown = crate::ui::popover_container("completion-dropdown", t)
+            .w(px(DROPDOWN_W))
+            .h(px(list_h))
+            .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .id("completion-list")
+                    .flex_col()
+                    .h_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .p(px(t.sp1))
+                    .children(rows),
+            );
+
+        // Documentation panel — uses persistent markdown segments (rebuilt when doc changes).
+        // Responsive: grows to fit content within a width range, capped in height
+        // to the available viewport space (scrolls past the cap). The scroll child
+        // stays block-level (no flex) so overflow_y_scroll can measure true content
+        // height and never squeezes wrapped lines on top of each other.
+        let doc_panel: Option<AnyElement> = self.completion.as_ref().and_then(|m| {
+            if m.doc_segments.borrow().is_empty() {
+                return None;
+            }
+            let doc_scroll = m.doc_scroll.clone();
+            let doc_segments = m.doc_segments.clone();
+            let doc_max_h = avail.clamp(160.0, 480.0);
+            let mut segs = m.doc_segments.borrow_mut();
+            let content = crate::hover_popover::render_doc_content(&mut segs, t);
+            drop(segs);
+            Some(
+                crate::ui::popover_container("completion-doc", t)
+                    .ml(px(t.sp2))
+                    .min_w(px(DOC_MIN_W))
+                    .max_w(px(DOC_MAX_W))
+                    .max_h(px(doc_max_h))
+                    .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
+                        cx.stop_propagation();
+                    }))
+                    // Clickable links; the panel occludes the editor so clicks
+                    // never fall through to the buffer behind it.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |_, e: &MouseUpEvent, _, cx| {
+                            if let Some((seg_ix, link_ix)) =
+                                crate::hover_popover::link_at(&doc_segments, e.position)
+                            {
+                                let url = doc_segments
+                                    .borrow()
+                                    .get(seg_ix)
+                                    .and_then(|s| s.links.get(link_ix).map(|(_, u)| u.clone()));
+                                if let Some(url) = url {
+                                    cx.open_url(&url);
+                                }
+                            }
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id("completion-doc-scroll")
+                            .overflow_y_scroll()
+                            .max_h(px(doc_max_h))
+                            .track_scroll(&doc_scroll)
+                            .p(px(t.sp3))
+                            .children(content),
+                    )
+                    .into_any(),
+            )
+        });
+
+        // `occlude` + swallowing mouse events over the whole overlay bounds so a
+        // click/hover that lands on the overlay never reaches the buffer behind it.
+        let container = div()
+            .id("completion-overlay")
+            .occlude()
+            .flex()
+            .flex_row()
+            .items_start()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_move(|_, _, cx| cx.stop_propagation())
+            .child(dropdown)
+            .when_some(doc_panel, |el, p| el.child(p));
+
+        // Position at the word's live window position (recomputed each frame above),
+        // so the overlay follows the text as it scrolls. Flip above only when cramped
+        // below.
+        let (pos, corner) = if place_above {
+            (
+                gpui::point(px(anchor.x), px(anchor.line_top)),
+                gpui::Corner::BottomLeft,
+            )
+        } else {
+            (
+                gpui::point(px(anchor.x), px(anchor.line_bottom)),
+                gpui::Corner::TopLeft,
+            )
+        };
+        Some(
+            deferred(
+                anchored()
+                    .position(pos)
+                    .anchor(corner)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(container),
+            )
+            .with_priority(10)
+            .into_any(),
+        )
+    }
 }

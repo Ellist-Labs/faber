@@ -1,12 +1,9 @@
 // Rendering primitives shared by EditorView, FilePreview, and ProjectSearchView.
-// `build_text_runs` and `token_color` live here so they are a single source of
-// truth; each view that needs per-line shaping imports them directly.
+// `build_text_runs` lives here so it is a single source of truth; each view that
+// needs per-line shaping imports it directly.
 
-use faber_editor::{
-    SyntaxToken,
-    highlight::{HighlightSpan, char_col_to_byte_col},
-};
-use gpui::{AnyElement, Hsla, SharedString, TextRun, div, font, prelude::*, px};
+use faber_editor::highlight::{HighlightSpan, char_col_to_byte_col};
+use gpui::{AnyElement, SharedString, TextRun, div, font, prelude::*, px};
 
 use crate::theme::RuntimeTheme;
 
@@ -54,6 +51,24 @@ pub(crate) fn build_text_runs(
     }
     breakpoints.sort_unstable();
     breakpoints.dedup();
+    // Snap any breakpoint that falls inside a multibyte char to the next valid
+    // UTF-8 char boundary. Tree-sitter byte offsets are always valid, but the
+    // clamp to line_bytes above can leave an offset mid-sequence for very long
+    // spans. GPUI's text_system panics on a non-boundary byte index.
+    let breakpoints: Vec<usize> = breakpoints
+        .into_iter()
+        .map(|b| {
+            if line_str.is_char_boundary(b) {
+                b
+            } else {
+                (b + 1..=b + 3)
+                    .find(|&i| i <= line_bytes && line_str.is_char_boundary(i))
+                    .unwrap_or(line_bytes)
+            }
+        })
+        .collect();
+    let mut breakpoints = breakpoints;
+    breakpoints.dedup();
     let mut runs = Vec::new();
     for i in 0..breakpoints.len().saturating_sub(1) {
         let start = breakpoints[i];
@@ -67,7 +82,8 @@ pub(crate) fn build_text_runs(
                 let (sb, eb) = span_range(s);
                 start >= sb && end <= eb
             })
-            .map(|s| token_style(s.token, t))
+            .and_then(|s| t.syntax_style(s.highlight_id))
+            .map(|style| (style.color, style.italic))
             .unwrap_or((t.text, false));
         let mut run_font = default_font.clone();
         if italic {
@@ -130,36 +146,6 @@ pub(crate) fn build_text_runs(
     }
 
     runs
-}
-
-/// Color + italic flag for a syntax token (spec §2.7: italic keyword/comment).
-pub(crate) fn token_style(token: SyntaxToken, t: &RuntimeTheme) -> (Hsla, bool) {
-    let italic = match token {
-        SyntaxToken::Keyword => t.syntax_keyword_italic,
-        SyntaxToken::Comment => t.syntax_comment_italic,
-        _ => false,
-    };
-    (token_color(token, t), italic)
-}
-
-pub(crate) fn token_color(token: SyntaxToken, t: &RuntimeTheme) -> Hsla {
-    match token {
-        SyntaxToken::Keyword => t.syntax_keyword,
-        SyntaxToken::Function => t.syntax_function,
-        SyntaxToken::Type => t.syntax_type,
-        SyntaxToken::String => t.syntax_string,
-        SyntaxToken::Number => t.syntax_number,
-        SyntaxToken::Comment => t.syntax_comment,
-        SyntaxToken::Constant => t.syntax_constant,
-        SyntaxToken::Operator => t.syntax_operator,
-        SyntaxToken::Punctuation => t.syntax_punctuation,
-        SyntaxToken::Variable => t.syntax_variable,
-        SyntaxToken::Property => t.syntax_property,
-        SyntaxToken::Attribute => t.syntax_attribute,
-        SyntaxToken::Namespace => t.syntax_namespace,
-        SyntaxToken::Tag => t.syntax_tag,
-        SyntaxToken::Label => t.syntax_label,
-    }
 }
 
 /// Build a div-based row of syntax-colored spans for use in list views that

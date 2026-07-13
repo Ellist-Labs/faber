@@ -61,6 +61,12 @@ crates/faber-app/       gpui shell — EditorView, virtualized render, keybindin
 - Before finishing string-touching work: run `/i18n-guardrails` skill + `cargo test -p faber --test i18n_parity`.
 - Adding a locale: copy `en.toml`, translate values (keep all keys), add `Language` variant to `faber-settings`. See `.claude/skills/i18n-guardrails/SKILL.md`.
 
+## Zed as gold standard
+
+- **Before implementing any editor feature, inspect how Zed does it first.** Zed is cloned at
+  `/Users/rodrigo/Codes/ellist/zed` — read the equivalent feature there before writing a line.
+  This is a required step, not optional.
+
 ## Code Style
 
 - Comments: minimum. Only document non-obvious invariants or perf constraints.

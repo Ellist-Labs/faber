@@ -1805,6 +1805,7 @@ name = "faber-lang"
 version = "0.1.0"
 dependencies = [
  "faber-core",
+ "faber-theme",
  "ropey",
  "serde",
  "tree-sitter",
