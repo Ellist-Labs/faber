@@ -93,23 +93,52 @@ fn semantic() -> SemanticColors {
 }
 
 fn syntax() -> SyntaxTheme {
-    SyntaxTheme {
-        keyword: HighlightStyle::italic(0xCF8EF4FF),
-        function: HighlightStyle::color(0x82AAFFFF),
-        r#type: HighlightStyle::color(0xFFCB6BFF),
-        string: HighlightStyle::color(0xC3E88DFF),
-        number: HighlightStyle::color(0xF78C6CFF),
-        comment: HighlightStyle::italic(0x546E7AFF),
-        constant: HighlightStyle::color(0xF78C6CFF),
-        operator: HighlightStyle::color(0x89DDFFFF),
-        punctuation: HighlightStyle::color(0xFFFFFF99), // white 60% — visible on OLED black
-        variable: HighlightStyle::color(0xFFFFFFFF),
-        property: HighlightStyle::color(0xB2CCD6FF),
-        attribute: HighlightStyle::color(0xFF9F0AFF),
-        namespace: HighlightStyle::color(0xFFCB6BFF),
-        tag: HighlightStyle::color(0xCF8EF4FF),
-        label: HighlightStyle::color(0x89DDFFFF),
-    }
+    use HighlightStyle as H;
+    SyntaxTheme::new([
+        ("keyword", H::italic(0xCF8EF4FF)),
+        ("keyword.control", H::italic(0xCF8EF4FF)),
+        ("keyword.operator", H::italic(0xCF8EF4FF)),
+        ("keyword.special", H::italic(0xCF8EF4FF)),
+        ("function", H::color(0x82AAFFFF)),
+        ("function.method", H::color(0x82AAFFFF)),
+        ("function.builtin", H::color(0x82AAFFFF)),
+        ("function.macro", H::color(0x82AAFFFF)),
+        ("type", H::color(0xFFCB6BFF)),
+        ("type.builtin", H::color(0xFFCB6BFF)),
+        ("constructor", H::color(0xFFCB6BFF)),
+        ("string", H::color(0xC3E88DFF)),
+        ("string.special", H::color(0xC3E88DFF)),
+        ("string.escape", H::color(0xC3E88DFF)),
+        ("character", H::color(0xC3E88DFF)),
+        ("escape", H::color(0xC3E88DFF)),
+        ("number", H::color(0xF78C6CFF)),
+        ("float", H::color(0xF78C6CFF)),
+        ("comment", H::italic(0x546E7AFF)),
+        ("comment.documentation", H::italic(0x546E7AFF)),
+        ("constant", H::color(0xF78C6CFF)),
+        ("constant.builtin", H::color(0xF78C6CFF)),
+        ("constant.macro", H::color(0xF78C6CFF)),
+        ("operator", H::color(0x89DDFFFF)),
+        ("punctuation", H::color(0xFFFFFF99)),
+        ("punctuation.bracket", H::color(0xFFFFFF99)),
+        ("punctuation.delimiter", H::color(0xFFFFFF99)),
+        ("variable", H::color(0xFFFFFFFF)),
+        ("variable.parameter", H::color(0xFFFFFFFF)),
+        ("variable.builtin", H::color(0xFFFFFFFF)),
+        ("property", H::color(0xB2CCD6FF)),
+        ("field", H::color(0xB2CCD6FF)),
+        ("attribute", H::color(0xFF9F0AFF)),
+        ("namespace", H::color(0xFFCB6BFF)),
+        ("module", H::color(0xFFCB6BFF)),
+        ("tag", H::color(0xCF8EF4FF)),
+        ("tag.builtin", H::color(0xCF8EF4FF)),
+        ("label", H::color(0x89DDFFFF)),
+        // Markdown-specific captures (tree-sitter-md)
+        ("text.title", H::italic(0xCF8EF4FF)),
+        ("text.literal", H::color(0xC3E88DFF)),
+        ("text.uri", H::color(0xF78C6CFF)),
+        ("text.reference", H::color(0x89DDFFFF)),
+    ])
 }
 
 fn typography() -> Typography {

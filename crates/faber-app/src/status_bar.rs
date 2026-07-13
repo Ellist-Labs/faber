@@ -323,8 +323,8 @@ impl Render for LspStatusItem {
         let t = cx.global::<RuntimeTheme>().clone();
         let lsp = self.lsp_status.read(cx);
 
-        let (dot_color, download_fraction) = if lsp.statuses.is_empty() {
-            (t.text_subtle, None)
+        let (dot_color, download_fraction, state_label) = if lsp.statuses.is_empty() {
+            (t.text_subtle, None, None)
         } else {
             let worst = lsp.statuses.iter().max_by_key(|s| match &s.state {
                 ServerState::Error(_) => 4,
@@ -354,7 +354,18 @@ impl Render for LspStatusItem {
                 ServerState::Error(_) => t.error,
                 ServerState::Stopped => t.text_subtle,
             };
-            (color, dl_fraction)
+
+            // Show a brief text label during initialization so the user gets
+            // feedback that language servers are actively starting up.
+            let label = match &status.state {
+                ServerState::Downloading => Some(t!("status_bar.lsp_downloading").to_string()),
+                ServerState::Starting | ServerState::Initializing => {
+                    Some(t!("status_bar.lsp_starting").to_string())
+                }
+                _ => None,
+            };
+
+            (color, dl_fraction, label)
         };
 
         let ws = self.ws.clone();
@@ -375,7 +386,16 @@ impl Render for LspStatusItem {
                     .path(IconName::Code.path())
                     .size(px(11.))
                     .text_color(dot_color),
-            );
+            )
+            .when_some(state_label, |el, label| {
+                el.child(
+                    div()
+                        .text_size(px(11.))
+                        .font_family(t.ui_family.clone())
+                        .text_color(dot_color)
+                        .child(label),
+                )
+            });
 
         if let Some(fraction) = download_fraction {
             let bar_w = 50_f32;

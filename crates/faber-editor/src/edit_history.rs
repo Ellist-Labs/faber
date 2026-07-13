@@ -55,6 +55,14 @@ impl History {
     pub fn undo(&mut self, doc: &mut Document) -> Option<usize> {
         self.commit();
         let inverse = self.undo_stack.pop()?;
+        debug_assert_eq!(
+            inverse.len_before,
+            doc.rope.len_chars(),
+            "undo stack out of sync with document"
+        );
+        if inverse.len_before != doc.rope.len_chars() {
+            return None;
+        }
         // Capture the forward change (for redo) against the current rope
         // before we mutate it.
         let forward = inverse.invert(&doc.rope);

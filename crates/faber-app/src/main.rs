@@ -1,5 +1,6 @@
 mod assets;
 mod buffer_view;
+mod completion_logic;
 mod editor_logic;
 mod editor_view;
 mod file_finder;
@@ -121,6 +122,13 @@ actions!(
         InputMoveEnd,
         GoToDefinition,
         FindReferences,
+        ShowCompletions,
+        CompletionNext,
+        CompletionPrev,
+        CompletionFirst,
+        CompletionLast,
+        ConfirmCompletion,
+        CancelCompletion,
     ]
 );
 
@@ -361,6 +369,49 @@ fn register_keybindings(cx: &mut App) {
         // LSP navigation
         KeyBinding::new("f12", GoToDefinition, Some("Editor")),
         KeyBinding::new("shift-f12", FindReferences, Some("Editor")),
+        KeyBinding::new("ctrl-space", ShowCompletions, Some("Editor")),
+        // Completion menu (context outranks generic Editor bindings — Zed parity)
+        KeyBinding::new(
+            "down",
+            CompletionNext,
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new(
+            "ctrl-n",
+            CompletionNext,
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new("up", CompletionPrev, Some("Editor && showing_completions")),
+        KeyBinding::new(
+            "ctrl-p",
+            CompletionPrev,
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new(
+            "pagedown",
+            CompletionLast,
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new(
+            "pageup",
+            CompletionFirst,
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new(
+            "enter",
+            ConfirmCompletion,
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new(
+            "tab",
+            ConfirmCompletion,
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new(
+            "escape",
+            CancelCompletion,
+            Some("Editor && showing_completions"),
+        ),
         // Project search
         KeyBinding::new("cmd-shift-f", OpenProjectSearch, Some("Workspace")),
         // Symbol finder

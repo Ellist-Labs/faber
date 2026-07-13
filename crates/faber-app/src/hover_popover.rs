@@ -12,11 +12,10 @@ use std::{
 
 use faber_editor::markdown::{Block, BlockKind, InlineRun, MarkdownDoc};
 use gpui::{
-    Font, FontStyle, FontWeight, Hsla, Pixels, SharedString, StyledText, TextLayout, TextRun,
-    UnderlineStyle, px,
+    AnyElement, Font, FontStyle, FontWeight, Hsla, Pixels, SharedString, StyledText, TextLayout,
+    TextRun, UnderlineStyle, div, prelude::*, px,
 };
 
-use crate::buffer_view::token_color;
 use crate::theme::RuntimeTheme;
 
 // ── Segment model ──────────────────────────────────────────────────────────────
@@ -631,7 +630,11 @@ fn code_line_runs(
         if start > byte_cursor {
             runs.push(plain_mono_run(start - byte_cursor, t.text, t));
         }
-        runs.push(plain_mono_run(end - start, token_color(span.token, t), t));
+        runs.push(plain_mono_run(
+            end - start,
+            t.syntax_color(span.highlight_id),
+            t,
+        ));
         byte_cursor = end;
     }
     if byte_cursor < line.len() {
@@ -798,6 +801,187 @@ pub fn rebuild_segments(shared: &SharedSegments, md: &Arc<MarkdownDoc>, t: &Runt
     *shared.borrow_mut() = build_segments(md, t);
 }
 
+/// Render a flat list of markdown segments into styled child elements, grouped
+/// into code blocks, blockquotes, image rows, and tables — for read-only doc panels
+/// such as the completion item documentation aside.
+pub fn render_doc_content(segments: &mut Vec<Segment>, t: &RuntimeTheme) -> Vec<AnyElement> {
+    #[derive(Clone, PartialEq)]
+    enum Bucket {
+        Plain,
+        Code,
+        Quote,
+        Images,
+        Table,
+    }
+
+    let sel_color = gpui::hsla(0., 0., 0., 0.); // no selection in doc panel
+
+    let seg_wrapper = |seg: &mut Segment, t: &RuntimeTheme| -> AnyElement {
+        let styled = segment_styled_text(seg, None, sel_color);
+        seg.layout = styled.layout().clone();
+        // Record painted bounds each frame so hit_test / link_at can map clicks
+        // to segments (enables clickable links in the doc panel).
+        let seg_bounds = Rc::clone(&seg.bounds);
+        seg.bounds.set(None);
+        let is_code = seg.kind == SegmentKind::Code;
+        let gap = seg.top_gap;
+        div()
+            .relative()
+            .w_full()
+            .mt(px(gap))
+            .ml(px(seg.indent))
+            .min_h(px(if is_code {
+                t.line_height_code
+            } else {
+                seg.text_size + 4.
+            }))
+            .when(is_code, |el| el.font_family(t.mono_family.clone()))
+            .when(!is_code, |el| {
+                el.font_family(t.ui_family.clone()).pb(px(2.))
+            })
+            .text_size(px(seg.text_size))
+            .text_color(if is_code { t.text } else { t.text_muted })
+            .child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _, _| seg_bounds.set(Some(bounds)),
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(styled)
+            .into_any_element()
+    };
+
+    // Flush a completed bucket group into `out`.
+    let flush = |bucket: &Option<Bucket>,
+                 group: &mut Vec<AnyElement>,
+                 table_rows: &mut Vec<Vec<AnyElement>>,
+                 out: &mut Vec<AnyElement>,
+                 gap: f32,
+                 t: &RuntimeTheme| {
+        match bucket {
+            Some(Bucket::Code) if !group.is_empty() => out.push(
+                div()
+                    .w_full()
+                    .mt(px(gap))
+                    .bg(t.bg_sunken)
+                    .rounded(px(t.radius_xs))
+                    .px(px(t.sp3))
+                    .py(px(t.sp2))
+                    .children(std::mem::take(group))
+                    .into_any_element(),
+            ),
+            Some(Bucket::Quote) if !group.is_empty() => out.push(
+                div()
+                    .w_full()
+                    .mt(px(gap))
+                    .border_l_2()
+                    .border_color(t.accent_muted)
+                    .pl(px(t.sp3))
+                    .children(std::mem::take(group))
+                    .into_any_element(),
+            ),
+            Some(Bucket::Images) if !group.is_empty() => out.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(px(4.))
+                    .mt(px(gap))
+                    .children(std::mem::take(group))
+                    .into_any_element(),
+            ),
+            Some(Bucket::Table) => {
+                if !table_rows.is_empty() {
+                    let rows_el: Vec<AnyElement> = std::mem::take(table_rows)
+                        .into_iter()
+                        .map(|row| {
+                            div()
+                                .flex()
+                                .flex_row()
+                                .border_b_1()
+                                .border_color(t.separator)
+                                .children(row)
+                                .into_any_element()
+                        })
+                        .collect();
+                    out.push(
+                        div()
+                            .w_full()
+                            .mt(px(gap))
+                            .border_1()
+                            .border_color(t.separator)
+                            .rounded(px(t.radius_xs))
+                            .overflow_hidden()
+                            .children(rows_el)
+                            .into_any_element(),
+                    );
+                }
+                group.clear();
+            }
+            _ => {
+                out.extend(std::mem::take(group));
+                table_rows.clear();
+            }
+        }
+    };
+
+    let mut out: Vec<AnyElement> = Vec::new();
+    let mut cur: Option<Bucket> = None;
+    let mut group: Vec<AnyElement> = Vec::new();
+    let mut group_gap = 0.0f32;
+    let mut table_rows: Vec<Vec<AnyElement>> = Vec::new();
+
+    let seg_count = segments.len();
+    for i in 0..seg_count {
+        let seg = &mut segments[i];
+        let bucket = match &seg.kind {
+            SegmentKind::Code => Bucket::Code,
+            SegmentKind::Text if seg.table_cell.is_some() => Bucket::Table,
+            SegmentKind::Image { .. } => Bucket::Images,
+            SegmentKind::Rule => Bucket::Plain,
+            _ => {
+                if seg.indent > 0.0 {
+                    Bucket::Quote
+                } else {
+                    Bucket::Plain
+                }
+            }
+        };
+        if cur.as_ref() != Some(&bucket) || bucket == Bucket::Plain {
+            flush(&cur, &mut group, &mut table_rows, &mut out, group_gap, t);
+            cur = Some(bucket.clone());
+            group_gap = seg.top_gap;
+        }
+        let el = seg_wrapper(seg, t);
+        match bucket {
+            Bucket::Table => {
+                if let Some((_, col, _)) = seg.table_cell {
+                    if col == 0 || table_rows.is_empty() {
+                        table_rows.push(Vec::new());
+                    }
+                    if let Some(row) = table_rows.last_mut() {
+                        row.push(
+                            div()
+                                .flex_1()
+                                .min_w(px(60.))
+                                .px(px(t.sp2))
+                                .py(px(2.))
+                                .child(el)
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
+            Bucket::Plain => out.push(el),
+            _ => group.push(el),
+        }
+    }
+    flush(&cur, &mut group, &mut table_rows, &mut out, group_gap, t);
+    out
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -904,31 +1088,37 @@ mod tests {
 
     #[test]
     fn overlapping_highlight_spans_still_tile_the_line() {
-        use faber_editor::SyntaxToken;
         use faber_editor::highlight::HighlightSpan;
         let t = RuntimeTheme::from(faber_theme::default::faber_dark());
         let line = "pub fn hello_world() {}";
-        // Nested/overlapping and unsorted spans, as tree-sitter captures can be.
+        let keyword_id = t.highlight_id("keyword").expect("keyword in default theme");
+        let function_id = t
+            .highlight_id("function")
+            .expect("function in default theme");
+        let type_id = t.highlight_id("type").expect("type in default theme");
+        let punct_id = t
+            .highlight_id("punctuation")
+            .expect("punctuation in default theme");
         let spans = vec![
             HighlightSpan {
                 start_byte_col: 0,
                 end_byte_col: 10,
-                token: SyntaxToken::Keyword,
+                highlight_id: keyword_id,
             },
             HighlightSpan {
                 start_byte_col: 4,
                 end_byte_col: 6,
-                token: SyntaxToken::Function,
+                highlight_id: function_id,
             },
             HighlightSpan {
                 start_byte_col: 2,
                 end_byte_col: 20,
-                token: SyntaxToken::Type,
+                highlight_id: type_id,
             },
             HighlightSpan {
                 start_byte_col: 15,
                 end_byte_col: u32::MAX,
-                token: SyntaxToken::Punctuation,
+                highlight_id: punct_id,
             },
         ];
         let runs = code_line_runs(line, &spans, &t);

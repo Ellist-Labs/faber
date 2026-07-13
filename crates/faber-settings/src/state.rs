@@ -91,6 +91,10 @@ impl AppState {
         push_recent(&mut self.recent_projects, abs);
     }
 
+    pub fn remove_recent_project(&mut self, abs: &str) {
+        self.recent_projects.retain(|p| p != abs);
+    }
+
     pub fn record_recent_file(&mut self, abs: &str) {
         push_recent(&mut self.recent_files, abs);
     }

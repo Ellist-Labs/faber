@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use faber_lang::{Grammar, SyntaxToken};
+use faber_lang::{Grammar, HighlightId};
 use tree_sitter::{QueryCursor, StreamingIterator, Tree};
 
 /// A single syntax-highlighted span on one line (byte columns, 0-indexed).
@@ -9,7 +9,7 @@ use tree_sitter::{QueryCursor, StreamingIterator, Tree};
 pub struct HighlightSpan {
     pub start_byte_col: u32,
     pub end_byte_col: u32,
-    pub token: SyntaxToken,
+    pub highlight_id: HighlightId,
 }
 
 /// Per-document syntax highlight cache.
@@ -40,17 +40,14 @@ impl HighlightCache {
         let root = tree.root_node();
 
         let mut cursor = QueryCursor::new();
+        cursor.set_match_limit(256);
         let mut captures = cursor.captures(&inner.query, root, src_bytes);
 
         captures.advance();
         while let Some((mat, ci)) = captures.get() {
             let capture = &mat.captures[*ci];
-            let token = match inner
-                .cap_tokens
-                .get(capture.index as usize)
-                .and_then(|t| *t)
-            {
-                Some(t) => t,
+            let highlight_id = match g.highlight_map.get(capture.index) {
+                Some(id) => id,
                 None => {
                     captures.advance();
                     continue;
@@ -68,7 +65,7 @@ impl HighlightCache {
                     line_spans.push(HighlightSpan {
                         start_byte_col: start.column as u32,
                         end_byte_col: end.column as u32,
-                        token,
+                        highlight_id,
                     });
                 }
             } else {
@@ -77,7 +74,7 @@ impl HighlightCache {
                     line_spans.push(HighlightSpan {
                         start_byte_col: start.column as u32,
                         end_byte_col: u32::MAX,
-                        token,
+                        highlight_id,
                     });
                 }
                 for row in (start.row + 1)..end.row {
@@ -85,7 +82,7 @@ impl HighlightCache {
                         line_spans.push(HighlightSpan {
                             start_byte_col: 0,
                             end_byte_col: u32::MAX,
-                            token,
+                            highlight_id,
                         });
                     }
                 }
@@ -93,7 +90,7 @@ impl HighlightCache {
                     line_spans.push(HighlightSpan {
                         start_byte_col: 0,
                         end_byte_col: end.column as u32,
-                        token,
+                        highlight_id,
                     });
                 }
             }

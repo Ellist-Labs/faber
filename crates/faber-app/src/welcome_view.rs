@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 
-use gpui::{App, ElementId, Entity, FontWeight, IntoElement, Window, div, prelude::*, px};
+use gpui::{
+    App, ElementId, Entity, FontWeight, IntoElement, MouseButton, Window, div, prelude::*, px, svg,
+};
 use rust_i18n::t;
 
 use crate::theme::RuntimeTheme;
-use crate::ui::{KeyHint, h_flex, v_flex};
+use crate::ui::{IconName, KeyHint, h_flex, v_flex};
 use crate::workspace::Workspace;
 use crate::{NewFile, OpenFile, OpenFolder, OpenSettings};
 
@@ -99,10 +101,18 @@ pub fn render_welcome(
         .pl(px(20.))
         .pr(px(20.))
         .pb(px(24.))
-        // Brand block — pl(8) aligns with the action row text (which also has px(8) internal pad)
+        // Brand block — folder icon + "Faber" title + version
         .child(
             v_flex()
                 .pl(px(8.))
+                .child(
+                    // Folder icon — replaces the bare menu-like look of the rail
+                    svg()
+                        .path(IconName::FolderOpen.path())
+                        .size(px(28.))
+                        .text_color(t.text_subtle)
+                        .mb(px(6.)),
+                )
                 .child(
                     div()
                         .text_color(t.text)
@@ -212,7 +222,9 @@ pub fn render_welcome(
                 .when(!recent_projects.is_empty(), |el| {
                     el.children(recent_projects.iter().enumerate().map(|(i, path)| {
                         let ent = entity.clone();
+                        let ent2 = entity.clone();
                         let p = path.clone();
+                        let p2 = path.clone();
                         let name = project_name(path);
                         let abbrev = abbreviate_path(path);
                         let initials = project_initials(&name);
@@ -222,9 +234,11 @@ pub fn render_welcome(
                         let text_subtle_col = t.text_subtle;
                         let ui_fam = t.ui_family.clone();
                         let mono_fam = t.mono_family.clone();
+                        let line_highlight = t.line_highlight;
 
                         div()
                             .id(("recent-proj", i))
+                            .group("recent-proj-row")
                             .flex()
                             .flex_row()
                             .items_center()
@@ -277,6 +291,34 @@ pub fn render_welcome(
                                             .text_size(px(11.))
                                             .font_family(mono_fam)
                                             .child(abbrev),
+                                    ),
+                            )
+                            // Remove button — revealed on row hover
+                            .child(
+                                div()
+                                    .id(("remove-proj", i))
+                                    .flex()
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(22.))
+                                    .rounded(px(5.))
+                                    .invisible()
+                                    .group_hover("recent-proj-row", |s| {
+                                        s.visible().bg(line_highlight)
+                                    })
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        ent2.update(cx, |ws, cx| {
+                                            ws.remove_recent_project(&p2, cx);
+                                        });
+                                    })
+                                    .child(
+                                        svg()
+                                            .path(IconName::Close.path())
+                                            .size(px(13.))
+                                            .text_color(text_muted_col),
                                     ),
                             )
                     }))
