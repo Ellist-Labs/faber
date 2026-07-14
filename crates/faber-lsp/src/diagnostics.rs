@@ -112,6 +112,26 @@ impl DiagnosticStore {
         result
     }
 
+    /// Worst severity per file URI across all sources. Cheaper than `get_all()` when
+    /// callers only need a per-file severity badge (no entry cloning or sorting).
+    pub fn worst_severity_per_file(&self) -> Vec<(url::Url, Severity)> {
+        let inner = self.inner.read().expect("lock poisoned");
+        let mut by_uri: HashMap<url::Url, Severity> = HashMap::new();
+        for (key, entries) in &inner.entries {
+            if let Some(sev) = entries.iter().map(|e| e.severity).min() {
+                by_uri
+                    .entry(key.uri.clone())
+                    .and_modify(|e| {
+                        if sev < *e {
+                            *e = sev;
+                        }
+                    })
+                    .or_insert(sev);
+            }
+        }
+        by_uri.into_iter().collect()
+    }
+
     /// All diagnostics grouped by URI, each group sorted by line then severity.
     /// Files with errors come first; ties broken alphabetically by URI.
     pub fn get_all(&self) -> Vec<(url::Url, Vec<DiagnosticEntry>)> {
