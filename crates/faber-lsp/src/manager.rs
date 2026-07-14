@@ -667,6 +667,23 @@ impl LspManager {
         self.notify_servers_for_lang(&lang_id_str, "textDocument/didChange", &params);
     }
 
+    pub fn on_document_saved(&self, uri: url::Url) {
+        if !self.is_trusted() {
+            return;
+        }
+        let lang_id_str = {
+            let docs = self.open_docs.lock().unwrap_or_else(|p| p.into_inner());
+            docs.get(&uri).map(|d| d.lang_id.clone())
+        };
+        let Some(lang_id_str) = lang_id_str else {
+            return;
+        };
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri.as_str() }
+        });
+        self.notify_servers_for_lang(&lang_id_str, "textDocument/didSave", &params);
+    }
+
     pub fn on_document_closed(&self, uri: url::Url) {
         if !self.is_trusted() {
             return;

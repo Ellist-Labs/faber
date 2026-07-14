@@ -19,6 +19,7 @@ mod panels;
 mod project_search_view;
 mod settings_view;
 mod sidebar;
+mod sidebar_logic;
 mod status_bar;
 mod symbol_finder;
 mod symbol_overlay;

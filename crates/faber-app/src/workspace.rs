@@ -188,7 +188,7 @@ pub struct Workspace {
     /// Keeps the filesystem watcher threads alive for the current root folder.
     _fs_watcher: Option<faber_index::watcher::FsWatcher>,
     index_status: gpui::Entity<IndexStatus>,
-    lsp_manager: Option<Arc<LspManager>>,
+    pub(crate) lsp_manager: Option<Arc<LspManager>>,
     lsp_status: gpui::Entity<LspStatus>,
     status_bar: Entity<crate::status_bar::StatusBar>,
     file_finder: Option<Entity<FileFinderView>>,
@@ -461,18 +461,37 @@ impl Workspace {
     /// (VS Code behavior). Never touches content or history.
     fn save_all_dirty(&mut self, cx: &mut Context<Self>) {
         let editors = self.all_editors(cx);
+        let lsp_mgr = self.lsp_manager.clone();
         for editor in editors {
-            Self::save_doc_now(&editor, cx);
+            Self::save_doc_now(&editor, lsp_mgr.as_ref(), cx);
         }
     }
 
-    fn save_doc_now(editor: &Entity<EditorView>, cx: &mut App) {
-        editor.update(cx, |ed, cx| {
+    fn save_doc_now(editor: &Entity<EditorView>, lsp_mgr: Option<&Arc<LspManager>>, cx: &mut App) {
+        let saved_path = editor.update(cx, |ed, cx| {
             if ed.doc.dirty && !ed.doc.is_untitled() && save(&ed.doc.rope, &ed.doc.path).is_ok() {
                 ed.doc.mark_saved();
                 cx.notify();
+                return Some(ed.doc.path.clone());
             }
+            None
         });
+        if let Some(path) = saved_path {
+            let registry = cx.global::<crate::Registry>().0.clone();
+            Self::notify_lsp_saved(&path, lsp_mgr, &registry);
+        }
+    }
+
+    fn notify_lsp_saved(
+        path: &Path,
+        lsp_mgr: Option<&Arc<LspManager>>,
+        registry: &Arc<LanguageRegistry>,
+    ) {
+        if let Some(mgr) = lsp_mgr {
+            if let Some((uri, _)) = Self::doc_uri_and_lang(path, registry) {
+                mgr.on_document_saved(uri);
+            }
+        }
     }
 
     pub fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
@@ -507,7 +526,7 @@ impl Workspace {
         if cx.global::<SettingsStore>().0.auto_save == AutoSave::OnFocusChange
             && let Some(editor) = prev_editor
         {
-            Self::save_doc_now(&editor, cx);
+            Self::save_doc_now(&editor, self.lsp_manager.as_ref(), cx);
         }
         self.panes[&self.focused_pane].update(cx, |p: &mut Pane, _| p.set_active(Some(ix)));
         self.right_open = self.active_is_markdown(cx);
@@ -933,11 +952,14 @@ impl Workspace {
                 {
                     break;
                 }
-                // Notify EditorViews + DiagnosticsPanels to repaint if diagnostics changed.
+                // Notify EditorViews + DiagnosticsPanels + sidebar to repaint if diagnostics changed.
                 let diag_gen = diag_store.generation();
                 if diag_gen != last_diag_gen {
                     last_diag_gen = diag_gen;
                     let _ = this.update(cx, |ws, cx| {
+                        // Sidebar renders as part of Workspace::render, so notifying the
+                        // workspace is sufficient to refresh the file-tree tints.
+                        cx.notify();
                         let editors: Vec<_> = ws
                             .panes
                             .values()
@@ -1642,8 +1664,14 @@ impl Workspace {
             cx.notify();
             ok
         });
-        if ok && let Some(engine) = &self.index_engine {
-            engine.request(faber_index::trigger::IndexTrigger::FileSaved(abs_path));
+        if ok {
+            if let Some(engine) = &self.index_engine {
+                engine.request(faber_index::trigger::IndexTrigger::FileSaved(
+                    abs_path.clone(),
+                ));
+            }
+            let registry = cx.global::<crate::Registry>().0.clone();
+            Self::notify_lsp_saved(&abs_path, self.lsp_manager.as_ref(), &registry);
         }
         Task::ready(ok)
     }

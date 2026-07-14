@@ -1,7 +1,11 @@
+use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use faber_editor::outline::Outline;
+use faber_lsp::diagnostics::Severity;
 use gpui::{
     AnyElement, App, Context, Div, Entity, IntoElement, ListHorizontalSizingBehavior, MouseButton,
     ScrollWheelEvent, SharedString, Stateful, div, prelude::*, px, svg, uniform_list,
@@ -95,6 +99,18 @@ impl Workspace {
         let t2 = t.clone();
         let active_path = self.active_editor_path(cx);
         let char_w = t.char_w_code;
+
+        // Build per-path diagnostic severity map once per render (single lock acquisition).
+        let diag_map: Rc<HashMap<PathBuf, Severity>> =
+            Rc::new(self.lsp_manager.as_ref().map_or_else(HashMap::new, |mgr| {
+                let file_sevs: Vec<(PathBuf, Severity)> = mgr
+                    .diagnostic_store()
+                    .worst_severity_per_file()
+                    .into_iter()
+                    .filter_map(|(uri, sev)| uri.to_file_path().ok().map(|path| (path, sev)))
+                    .collect();
+                crate::sidebar_logic::rollup_worst_severity(&file_sevs)
+            }));
         let widest_idx = self
             .visible_rows
             .iter()
@@ -131,10 +147,18 @@ impl Workspace {
             move |range: std::ops::Range<usize>, _window, cx| {
                 let entity2 = entity.clone();
                 let ws = entity.read(cx);
+                let dm = Rc::clone(&diag_map);
                 range
                     .map(|ix| {
-                        ws.render_tree_row(ix, &entity2, active_path.as_deref(), &t2, indent_guides)
-                            .into_any_element()
+                        ws.render_tree_row(
+                            ix,
+                            &entity2,
+                            active_path.as_deref(),
+                            &t2,
+                            indent_guides,
+                            &dm,
+                        )
+                        .into_any_element()
                     })
                     .collect::<Vec<AnyElement>>()
             },
@@ -185,6 +209,7 @@ impl Workspace {
         active_path: Option<&Path>,
         t: &RuntimeTheme,
         indent_guides: bool,
+        diag_map: &HashMap<PathBuf, Severity>,
     ) -> Stateful<Div> {
         let row = &self.visible_rows[ix];
         let depth = row.depth;
@@ -224,6 +249,15 @@ impl Workspace {
                 .flex_shrink_0()
                 .into_any_element()
         };
+
+        // Diagnostic severity tint for filename (Error → red, Warning → yellow).
+        // Info/Hint are not surfaced per issue #47 scope.
+        // TODO(#43): compose with git-modified status once git integration lands.
+        let name_color = diag_map.get(&row.path).copied().and_then(|sev| match sev {
+            Severity::Error => Some(t.error),
+            Severity::Warning => Some(t.warning),
+            _ => None,
+        });
 
         // Vertical indent guides
         let guides: Vec<AnyElement> = if indent_guides && depth > 0 {
@@ -286,6 +320,7 @@ impl Workspace {
                 div()
                     .whitespace_nowrap()
                     .flex_shrink_0()
+                    .when_some(name_color, |el, c| el.text_color(c))
                     .child(row.name.clone()),
             )
     }
