@@ -150,8 +150,15 @@ impl Workspace {
                 let dm = Rc::clone(&diag_map);
                 range
                     .map(|ix| {
-                        ws.render_tree_row(ix, &entity2, active_path.as_deref(), &t2, indent_guides, &dm)
-                            .into_any_element()
+                        ws.render_tree_row(
+                            ix,
+                            &entity2,
+                            active_path.as_deref(),
+                            &t2,
+                            indent_guides,
+                            &dm,
+                        )
+                        .into_any_element()
                     })
                     .collect::<Vec<AnyElement>>()
             },

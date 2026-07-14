@@ -482,7 +482,11 @@ impl Workspace {
         }
     }
 
-    fn notify_lsp_saved(path: &Path, lsp_mgr: Option<&Arc<LspManager>>, registry: &Arc<LanguageRegistry>) {
+    fn notify_lsp_saved(
+        path: &Path,
+        lsp_mgr: Option<&Arc<LspManager>>,
+        registry: &Arc<LanguageRegistry>,
+    ) {
         if let Some(mgr) = lsp_mgr {
             if let Some((uri, _)) = Self::doc_uri_and_lang(path, registry) {
                 mgr.on_document_saved(uri);
@@ -1662,7 +1666,9 @@ impl Workspace {
         });
         if ok {
             if let Some(engine) = &self.index_engine {
-                engine.request(faber_index::trigger::IndexTrigger::FileSaved(abs_path.clone()));
+                engine.request(faber_index::trigger::IndexTrigger::FileSaved(
+                    abs_path.clone(),
+                ));
             }
             let registry = cx.global::<crate::Registry>().0.clone();
             Self::notify_lsp_saved(&abs_path, self.lsp_manager.as_ref(), &registry);
